@@ -1,0 +1,29 @@
+{
+  "name": "car-game-wix-headless",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "scripts": {
+    "dev": "vite",
+    "dev:wix": "npm run dev --prefix office-wix-managed",
+    "build": "vite build",
+    "build:wix": "npm run build --prefix office-wix-managed",
+    "build:all": "npm run build && npm run build --prefix office-wix-managed",
+    "preview": "vite preview",
+    "sync-office": "node scripts/build-office-scene-module.mjs"
+  },
+  "dependencies": {
+    "@wix/sdk": "^1.21.12",
+    "cannon-es": "^0.20.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "three": "^0.160.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "vite": "^4.5.5"
+  }
+}
