@@ -23,8 +23,11 @@ const htmlPath =
 
 const html = readFileSync(htmlPath, "utf8");
 const lines = html.split(/\r?\n/);
-// Line 59 .. 10408 in file (1-based): include `animate();` before </script> (was slice end off by one).
-const inner = lines.slice(58, 10408).join("\n");
+const animateIdx = lines.findIndex((l) => /^\s*animate\(\);\s*$/.test(l));
+if (animateIdx < 0) {
+  throw new Error(`animate() not found in ${htmlPath}`);
+}
+const inner = lines.slice(58, animateIdx + 1).join("\n");
 
 const marker = `import { RectAreaLightUniformsLib } from "three/addons/lights/RectAreaLightUniformsLib.js";`;
 
@@ -84,8 +87,43 @@ s = s.replace(
 );
 
 s = s.replace(
-  `new THREE.TextureLoader().load("keyboard image.jpg", (tex) => {`,
-  `new THREE.TextureLoader().load(officeAsset("keyboard image.jpg"), (tex) => {`,
+  `new THREE.TextureLoader().load("keyboard-image.jpg", (tex) => {`,
+  `new THREE.TextureLoader().load(officeAsset("keyboard-image.jpg"), (tex) => {`,
+);
+
+s = s.replace(
+  `        new THREE.TextureLoader().load(
+          "bookLeftPage.jpg",`,
+  `        new THREE.TextureLoader().load(
+          officeAsset("bookLeftPage.jpg"),`,
+);
+
+s = s.replace(
+  `        new THREE.TextureLoader().load(
+          textureUrl,`,
+  `        new THREE.TextureLoader().load(
+          officeAsset(textureUrl),`,
+);
+
+s = s.replace(
+  `        new THREE.TextureLoader().load(
+          "techDesignerMagnet.jpg",`,
+  `        new THREE.TextureLoader().load(
+          officeAsset("techDesignerMagnet.jpg"),`,
+);
+
+s = s.replace(
+  `        new THREE.TextureLoader().load(
+          "plant-ground-texture.jpg",`,
+  `        new THREE.TextureLoader().load(
+          officeAsset("plant-ground-texture.jpg"),`,
+);
+
+s = s.replace(
+  `        new THREE.TextureLoader().load(
+          "leaf.png",`,
+  `        new THREE.TextureLoader().load(
+          officeAsset("leaf.png"),`,
 );
 
 s = s.replace(
@@ -97,9 +135,9 @@ s = s.replace(
 
 s = s.replace(
   `      loader.load(
-        "office-table-embed65.gltf",`,
+        "office-table-embed75.gltf",`,
   `      loader.load(
-        officeAsset("office-table-embed65.gltf"),`,
+        officeAsset("office-table-embed75.gltf"),`,
 );
 
 s = s.replace(
@@ -164,6 +202,7 @@ s = s.replace(
           let nextCam;
           if (camera === carCamera || camera === carCameraFollow) nextCam = testCamera;
           else if (camera === gumsTankCamera) nextCam = testCamera;
+          else if (camera === freeCamera) nextCam = carCamera;
           else nextCam = carCamera;
           camera = nextCam;
           renderScenePass.camera = camera;

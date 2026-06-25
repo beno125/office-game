@@ -8,8 +8,10 @@ This is a **static React app** (Vite, JavaScript + JSX). It can call **Wix Headl
 
 ```bash
 npm install
+npm run local          # build + open static preview http://127.0.0.1:4173 (no dev / no HMR)
 npm run dev              # Vite app (self-managed path)
 npm run dev:wix          # Wix-managed Astro app (from office-wix-managed/)
+npm run dev:wix-astro    # Same app via plain `astro dev` (no Wix proxy; use if `wix dev` + Vite WS hangs)
 npm run build            # Vite → dist/
 npm run build:wix        # Wix Astro production build only
 npm run build:all        # Vite + Wix Astro

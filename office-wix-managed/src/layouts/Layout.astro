@@ -27,6 +27,9 @@ const { title = "Office" } = Astro.props;
     height: 100%;
     overflow: hidden;
     font-family: system-ui, sans-serif;
+    /* Match scene root so the page is not pure white before React / WebGL mount */
+    background: #1a1a1a;
+    color: #e8e8e8;
   }
 
   #perfBadge {
@@ -52,5 +55,7 @@ const { title = "Office" } = Astro.props;
 
   .office-scene-root canvas {
     display: block;
+    position: relative;
+    z-index: 0;
   }
 </style>

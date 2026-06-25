@@ -9,6 +9,8 @@
   "scripts": {
     "dev": "vite",
     "dev:wix": "npm run dev --prefix office-wix-managed",
+    "dev:wix-astro": "npm run dev:astro --prefix office-wix-managed",
+    "local": "vite build && vite preview --host 127.0.0.1 --port 4173 --strictPort",
     "build": "vite build",
     "build:wix": "npm run build --prefix office-wix-managed",
     "build:all": "npm run build && npm run build --prefix office-wix-managed",

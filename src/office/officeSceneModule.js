@@ -35,6 +35,9 @@ function officeAsset(relativePath) {
       carCameraFollow.position.set(2, 2, 2);
       const testCamera = new THREE.PerspectiveCamera(50, 1, 0.1, 1000);
       const gumsTankCamera = new THREE.PerspectiveCamera(42, 1, 0.08, 1000);
+      const freeCamera = new THREE.PerspectiveCamera(52, 1, 0.04, 2500);
+      freeCamera.position.set(5, 4, 8);
+      const _freeCamDir = new THREE.Vector3();
       let camera = carCamera;
       const CAR_CAM_YAW_FOLLOW = 0.42;
       const CAR_CAM_AZIMUTH_LIMIT = THREE.MathUtils.degToRad(70);
@@ -102,6 +105,16 @@ function officeAsset(relativePath) {
       }
 
       function configureOrbitControlsForCarView(forCamera) {
+        if (forCamera === freeCamera) {
+          controls.minDistance = Math.max(0.12, getCarCameraMinDistance() * 0.22);
+          controls.maxDistance = 120;
+          controls.enableZoom = true;
+          controls.zoomSpeed = 1.15;
+          controls.dollyToCursor = true;
+          controls.minPolarAngle = 0.08;
+          controls.maxPolarAngle = Math.PI - 0.08;
+          return;
+        }
         if (forCamera === carCameraFollow && _carFollowCamDistance > 1e-6) {
           controls.minDistance = _carFollowCamDistance;
           controls.maxDistance = _carFollowCamDistance;
@@ -822,6 +835,8 @@ function officeAsset(relativePath) {
       carCameraFollow.layers.enable(CAR_LIGHTS_BLOOM_LAYER);
       testCamera.layers.enable(CAR_LIGHTS_BLOOM_LAYER);
       gumsTankCamera.layers.enable(CAR_LIGHTS_BLOOM_LAYER);
+      freeCamera.layers.enable(CAR_LIGHTS_BLOOM_LAYER);
+      freeCamera.layers.enable(DESK_FLAME_LAYER);
 
       /** SMAA + composer MSAA handle edges; skipping canvas MSAA saves a full multisampled resolve per pass. */
       const renderer = new THREE.WebGLRenderer({
@@ -1606,6 +1621,58 @@ function officeAsset(relativePath) {
       let controls = createOrbitControls(camera);
       controls.target.set(0, 0, 0);
 
+      function createAxisTextSprite(text, hexColor) {
+        const canvas = document.createElement("canvas");
+        const ctx = canvas.getContext("2d");
+        const s = 128;
+        canvas.width = s;
+        canvas.height = s;
+        ctx.clearRect(0, 0, s, s);
+        ctx.font = "bold 88px system-ui, sans-serif";
+        ctx.fillStyle = hexColor;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(text, s / 2, s / 2);
+        const map = new THREE.CanvasTexture(canvas);
+        map.colorSpace = THREE.SRGBColorSpace;
+        map.needsUpdate = true;
+        const mat = new THREE.SpriteMaterial({
+          map,
+          depthTest: false,
+          transparent: true,
+          opacity: 0.95,
+        });
+        const sprite = new THREE.Sprite(mat);
+        sprite.scale.setScalar(0.55);
+        sprite.renderOrder = 1000;
+        return sprite;
+      }
+
+      const axisLen = 3;
+      const visualXYZ = new THREE.Group();
+      visualXYZ.name = "visualXYZ";
+      const axes = new THREE.AxesHelper(axisLen);
+      axes.traverse((o) => {
+        if (o.material) {
+          o.material.depthTest = false;
+          o.material.transparent = true;
+          o.material.opacity = 0.9;
+        }
+      });
+      axes.renderOrder = 999;
+      visualXYZ.add(axes);
+      const labelGap = 0.25;
+      const sx = createAxisTextSprite("X", "#ff3333");
+      sx.position.set(axisLen + labelGap, 0, 0);
+      visualXYZ.add(sx);
+      const sy = createAxisTextSprite("Y", "#44ff44");
+      sy.position.set(0, axisLen + labelGap, 0);
+      visualXYZ.add(sy);
+      const sz = createAxisTextSprite("Z", "#4488ff");
+      sz.position.set(0, 0, axisLen + labelGap);
+      visualXYZ.add(sz);
+      scene.add(visualXYZ);
+
       // Lights + windowTris: one blend (lightBlend, 0→1) drives both.
       // Dark / “blinds closed”: lightBlend → 0 (Key O) — tilted tris, darker scene.
       // Bright / “blinds open”: lightBlend → 1 (Key P) — flat tris, lighter scene.
@@ -1706,6 +1773,7 @@ function officeAsset(relativePath) {
       // Meshes whose emissiveIntensity is lerped between strong (dark) and gentle (bright).
       // Each entry: { mesh, darkIntensity, brightIntensity }.
       const _peselLightMeshes = [];
+      const _techDesignerMagnetDecals = [];
       const _shelfDownLights = [];
       const _mainLightDownPoints = [];
       const brightMode = {
@@ -1828,6 +1896,13 @@ function officeAsset(relativePath) {
             entry.darkIntensity +
             (entry.brightIntensity - entry.darkIntensity) * b;
         }
+        for (let i = 0; i < _techDesignerMagnetDecals.length; i++) {
+          const entry = _techDesignerMagnetDecals[i];
+          if (!entry?.material) continue;
+          entry.material.emissiveIntensity =
+            entry.darkIntensity +
+            (entry.brightIntensity - entry.darkIntensity) * b;
+        }
         for (let i = 0; i < _shelfDownLights.length; i++) {
           const entry = _shelfDownLights[i];
           if (!entry || !entry.light) continue;
@@ -1907,10 +1982,50 @@ function officeAsset(relativePath) {
           e.preventDefault();
           switchCarView(carCameraFollow);
         }
+        if (e.code === "Digit3") {
+          e.preventDefault();
+          const prevCam = camera;
+          const w = Math.max(1, window.innerWidth);
+          const h = Math.max(1, window.innerHeight);
+          freeCamera.aspect = w / h;
+          freeCamera.updateProjectionMatrix();
+          prevCam.updateMatrixWorld(true);
+          camera = freeCamera;
+          renderScenePass.camera = camera;
+          controls.dispose();
+          controls = createOrbitControls(freeCamera);
+          if (car) {
+            getCarCameraLookAtPoint(_carMatrixLookAt);
+            controls.target.copy(_carMatrixLookAt);
+            _freeCamDir.subVectors(prevCam.position, _carMatrixLookAt);
+            let dist = _freeCamDir.length();
+            if (!Number.isFinite(dist) || dist < 0.2) {
+              _freeCamDir.set(1, 0.5, 1.1).normalize();
+              dist = Math.max(2.2, getCarCameraMinDistance() * 1.1);
+            } else {
+              _freeCamDir.multiplyScalar(1 / dist);
+            }
+            const clampDist = THREE.MathUtils.clamp(
+              dist,
+              getCarCameraMinDistance() * 0.85,
+              32,
+            );
+            freeCamera.position
+              .copy(_carMatrixLookAt)
+              .addScaledVector(_freeCamDir, clampDist);
+          } else {
+            controls.target.set(0, 0.75, 0);
+            freeCamera.position.copy(prevCam.position);
+            freeCamera.quaternion.copy(prevCam.quaternion);
+          }
+          configureOrbitControlsForCarView(freeCamera);
+          controls.update();
+        }
       });
 
-      // --- Car from car-game12.gltf (loaded when table is ready) ---
+      // --- Car from car-game13.gltf (loaded when table is ready) ---
       // GLTF wheel names: wheelFl=front left, wheelFr=front right, wheelRl=rear left, wheelRr=rear right
+      // Wheel covers (wheelCoverFl etc.) are parented to their wheel so they follow steer + roll.
       const WHEEL_RADIUS = 0.28;
       const TABLE_WHEEL_CLEARANCE = 0;
       let halfW = 0.6,
@@ -1960,8 +2075,8 @@ function officeAsset(relativePath) {
       let gumDispenserGroup = null;
       let gumDispenserPhysicMesh = null;
       let gumDispenserPhysBody = null;
-      let conusGroup = null;
-      let conusPhysBody = null;
+      const _conusInstances = [];
+      const _starInstances = [];
       let drawerGroup = null;
       let _drawerOrigZ = 0;
       let _drawerState = "closed";
@@ -1982,6 +2097,7 @@ function officeAsset(relativePath) {
       let _bottleInitQuat = null;
       let _certifiedInitPos = null;
       let _certifiedInitQuat = null;
+      const _obbCorner = new CANNON.Vec3();
       const _bottleWorldPos = new THREE.Vector3();
       const _bottleWorldQuat = new THREE.Quaternion();
       const _canonWorldPos = new THREE.Vector3();
@@ -1992,6 +2108,8 @@ function officeAsset(relativePath) {
         new THREE.Vector3(),
         new THREE.Vector3(),
       ];
+      const _wheelPhysScaleSync = new THREE.Vector3();
+      const _carBodyPhysBoxSizeSync = new THREE.Vector3();
       const _wheelsList = [null, null, null, null];
       const _wheelHadBottom = [false, false, false, false];
       const _gumClampTmp = new THREE.Vector3();
@@ -2007,7 +2125,7 @@ function officeAsset(relativePath) {
 
       const MAX_STEER_DEG = 28;
       const MAX_STEER_RAD = (MAX_STEER_DEG * Math.PI) / 180;
-      const CAR_SCALE_MULTIPLIER = 0.72;
+      const CAR_SCALE_MULTIPLIER = 1.24;
       const carState = {
         speed: 0,
         angle: 0,
@@ -2016,6 +2134,7 @@ function officeAsset(relativePath) {
         driftAngle: 0,
         turnHoldTime: 0,
         maxSpeed: 17,
+        reverseSpeedFactor: 0.68,
         accel: 14,
         brakeDecel: 92,
         brakeDecelReverseKey: 620,
@@ -2792,7 +2911,7 @@ function officeAsset(relativePath) {
               metalness: 0.3,
               roughness: 0.6,
             });
-            new THREE.TextureLoader().load(officeAsset("keyboard image.jpg"), (tex) => {
+            new THREE.TextureLoader().load(officeAsset("keyboard-image.jpg"), (tex) => {
               tex.colorSpace = THREE.SRGBColorSpace;
               tex.wrapS = THREE.ClampToEdgeWrapping;
               tex.wrapT = THREE.ClampToEdgeWrapping;
@@ -3073,6 +3192,27 @@ function officeAsset(relativePath) {
         }
       }
 
+      const PLANT_VASE_STENCIL_REF = 1;
+
+      function applyPlantVaseStencilWrite(material) {
+        material.stencilWrite = true;
+        material.stencilRef = PLANT_VASE_STENCIL_REF;
+        material.stencilFunc = THREE.AlwaysStencilFunc;
+        material.stencilFail = THREE.KeepStencilOp;
+        material.stencilZFail = THREE.KeepStencilOp;
+        material.stencilZPass = THREE.ReplaceStencilOp;
+        material.depthWrite = true;
+      }
+
+      function applyPlantGroundStencilMask(material) {
+        material.stencilWrite = false;
+        material.stencilRef = PLANT_VASE_STENCIL_REF;
+        material.stencilFunc = THREE.NotEqualStencilFunc;
+        material.stencilFail = THREE.KeepStencilOp;
+        material.stencilZFail = THREE.KeepStencilOp;
+        material.stencilZPass = THREE.KeepStencilOp;
+      }
+
       function applyPlantVaseAndBaseMaterials(model) {
         const plantVaseMeshes = [];
         const plantBaseMeshes = [];
@@ -3113,20 +3253,26 @@ function officeAsset(relativePath) {
           roughness: 0.65,
           metalness: 0.05,
         });
-        function applyTerrazzo(meshes) {
+        function applyTerrazzo(meshes, stencilMask = false) {
           for (let i = 0; i < meshes.length; i++) {
             const m = meshes[i];
             if (m && m.material) {
               if (Array.isArray(m.material)) {
-                for (let j = 0; j < m.material.length; j++)
-                  m.material[j] = greenTerrazzoMat.clone();
+                for (let j = 0; j < m.material.length; j++) {
+                  const mat = greenTerrazzoMat.clone();
+                  if (stencilMask) applyPlantVaseStencilWrite(mat);
+                  m.material[j] = mat;
+                }
               } else {
-                m.material = greenTerrazzoMat.clone();
+                const mat = greenTerrazzoMat.clone();
+                if (stencilMask) applyPlantVaseStencilWrite(mat);
+                m.material = mat;
               }
             }
+            if (stencilMask) m.renderOrder = 5;
           }
         }
-        applyTerrazzo(plantVaseMeshes);
+        applyTerrazzo(plantVaseMeshes, true);
         applyTerrazzo(plantBaseMeshes);
       }
 
@@ -3252,13 +3398,17 @@ function officeAsset(relativePath) {
       const carUpLerp = new THREE.Vector3(0, 1, 0);
       const CAR_RAMP_TILT_LERP = 12;
       const jumpLaunchUp = new THREE.Vector3(0, 1, 0);
-      const jumpForwardLeanUp = new THREE.Vector3();
+      const _jumpAirLeanUp = new THREE.Vector3(0, 1, 0);
       let jumpStartTime = 0;
       let jumpLaunchSpeed = 0;
       let jumpInitialVelY = 0;
       let _rampJumpSimAirTime = 0;
-      const JUMP_TILT_DURATION = 0.45;
-      const JUMP_FORWARD_LEAN_AMOUNT = 0.38;
+      let _jumpAirLeanBlend = 0;
+      const JUMP_AIR_FORWARD_PITCH = 0.78;
+      const JUMP_AIR_LEAN_SMOOTH = 3.4;
+      const JUMP_AIR_TILT_LERP = 12;
+      const AIR_TILT_LERP_MIN = 4;
+      const AIR_TILT_LERP_MAX = 7;
       const LANDING_TILT_LERP = 120;
       const LANDING_RECOVERY_DURATION = 0.3;
       let wasInAir = false;
@@ -3617,6 +3767,23 @@ function officeAsset(relativePath) {
       const duckEyesMaterial = new THREE.MeshStandardMaterial({
         color: 0xfafafa,
         roughness: 0.95,
+        metalness: 0,
+      });
+      const headphonesPlasticMaterial = new THREE.MeshStandardMaterial({
+        color: 0x525252,
+        roughness: 0.86,
+        metalness: 0,
+      });
+      const headphonesEarsMaterial = new THREE.MeshStandardMaterial({
+        color: 0x686868,
+        roughness: 0.96,
+        metalness: 0,
+      });
+      const headphonesLightMaterial = new THREE.MeshStandardMaterial({
+        color: 0x33ee55,
+        emissive: 0x22ff66,
+        emissiveIntensity: 3.4,
+        roughness: 0.08,
         metalness: 0,
       });
       const eyeBallMaterial = new THREE.MeshStandardMaterial({
@@ -4185,15 +4352,112 @@ function officeAsset(relativePath) {
         );
       }
 
-      const CONUS_PART_NAMES = ["conus", "conusStrips"];
+      const CONUS_SUFFIXES = [1, 2, 3];
+
+      function conusVisualPartNames(suffix) {
+        return [`conus${suffix}`, `conusStrips${suffix}`];
+      }
+
+      function applyConusMaterials(model) {
+        const conus1 = model.getObjectByName("conus1");
+        const strips1 = model.getObjectByName("conusStrips1");
+        if (!conus1?.isMesh || !strips1?.isMesh) return;
+        const conusMat = conus1.material;
+        const stripsMat = strips1.material;
+        for (let i = 2; i <= 3; i++) {
+          const conus = model.getObjectByName(`conus${i}`);
+          const strips = model.getObjectByName(`conusStrips${i}`);
+          if (conus?.isMesh) conus.material = conusMat;
+          if (strips?.isMesh) strips.material = stripsMat;
+        }
+      }
 
       function setupConusPhysics(model) {
+        _conusInstances.length = 0;
+        for (const suffix of CONUS_SUFFIXES) {
+          const physicName = `conusPhysic${suffix}`;
+          const partNames = conusVisualPartNames(suffix);
+          let physicMesh = null;
+          const visualParts = [];
+          model.traverse((node) => {
+            if (!node.isMesh) return;
+            if (node.name === physicName) physicMesh = node;
+            if (partNames.includes(node.name)) visualParts.push(node);
+          });
+          if (!physicMesh) continue;
+
+          model.updateMatrixWorld(true);
+
+          const phBB = new THREE.Box3().setFromObject(physicMesh);
+          const phCenter = phBB.getCenter(new THREE.Vector3());
+          const phSize = phBB.getSize(new THREE.Vector3());
+
+          const conusGroup = new THREE.Group();
+          conusGroup.name = `conusGroup${suffix}`;
+          conusGroup.position.copy(phCenter);
+          const phQuat = new THREE.Quaternion();
+          physicMesh.getWorldQuaternion(phQuat);
+          conusGroup.quaternion.copy(phQuat);
+          scene.add(conusGroup);
+          conusGroup.updateMatrixWorld(true);
+
+          for (const mesh of visualParts) {
+            conusGroup.attach(mesh);
+          }
+          conusGroup.attach(physicMesh);
+          physicMesh.visible = false;
+
+          const hx = phSize.x / 2;
+          const hy = phSize.y / 2;
+          const hz = phSize.z / 2;
+          const shape = new CANNON.Box(new CANNON.Vec3(hx, hy, hz));
+          const conusPhysBody = new CANNON.Body({
+            mass: 0.15,
+            material: propMaterial,
+            linearDamping: 0.6,
+            angularDamping: 0.6,
+            allowSleep: false,
+            collisionFilterGroup: 1,
+            collisionFilterMask: -1,
+            ccdSpeedThreshold: 1,
+            ccdIterations: 10,
+          });
+          conusPhysBody.addShape(shape);
+          conusPhysBody.position.set(phCenter.x, phCenter.y, phCenter.z);
+          conusPhysBody.quaternion.set(phQuat.x, phQuat.y, phQuat.z, phQuat.w);
+          physicsWorld.addBody(conusPhysBody);
+          _conusInstances.push({ group: conusGroup, physBody: conusPhysBody });
+        }
+      }
+
+      function syncConusFromPhysics() {
+        for (let i = 0; i < _conusInstances.length; i++) {
+          const inst = _conusInstances[i];
+          if (!inst?.group || !inst?.physBody) continue;
+          inst.group.position.set(
+            inst.physBody.position.x,
+            inst.physBody.position.y,
+            inst.physBody.position.z,
+          );
+          inst.group.quaternion.set(
+            inst.physBody.quaternion.x,
+            inst.physBody.quaternion.y,
+            inst.physBody.quaternion.z,
+            inst.physBody.quaternion.w,
+          );
+        }
+      }
+
+      const STAR_VISUAL_PART_NAMES = ["star"];
+
+      function setupStarPhysics(model) {
+        _starInstances.length = 0;
         let physicMesh = null;
         const visualParts = [];
         model.traverse((node) => {
           if (!node.isMesh) return;
-          if (node.name === "conusPhysic") physicMesh = node;
-          if (CONUS_PART_NAMES.includes(node.name)) visualParts.push(node);
+          if (node.name === "starPhysic") physicMesh = node;
+          if (STAR_VISUAL_PART_NAMES.includes(node.name)) visualParts.push(node);
         });
         if (!physicMesh) return;
 
@@ -4203,54 +4467,135 @@ function officeAsset(relativePath) {
         const phCenter = phBB.getCenter(new THREE.Vector3());
         const phSize = phBB.getSize(new THREE.Vector3());
 
-        conusGroup = new THREE.Group();
-        conusGroup.position.copy(phCenter);
+        const starGroup = new THREE.Group();
+        starGroup.name = "starGroup";
+        starGroup.position.copy(phCenter);
         const phQuat = new THREE.Quaternion();
         physicMesh.getWorldQuaternion(phQuat);
-        conusGroup.quaternion.copy(phQuat);
-        scene.add(conusGroup);
-        conusGroup.updateMatrixWorld(true);
+        starGroup.quaternion.copy(phQuat);
+        scene.add(starGroup);
+        starGroup.updateMatrixWorld(true);
 
         for (const mesh of visualParts) {
-          conusGroup.attach(mesh);
+          starGroup.attach(mesh);
         }
-        conusGroup.attach(physicMesh);
+        starGroup.attach(physicMesh);
         physicMesh.visible = false;
 
         const hx = phSize.x / 2;
         const hy = phSize.y / 2;
         const hz = phSize.z / 2;
         const shape = new CANNON.Box(new CANNON.Vec3(hx, hy, hz));
-        conusPhysBody = new CANNON.Body({
-          mass: 0.15,
+        const starPhysBody = new CANNON.Body({
+          mass: 0.32,
           material: propMaterial,
-          linearDamping: 0.6,
-          angularDamping: 0.6,
-          allowSleep: false,
+          linearDamping: 0.72,
+          angularDamping: 0.78,
+          allowSleep: true,
+          sleepSpeedLimit: 0.12,
+          sleepTimeLimit: 0.35,
           collisionFilterGroup: 1,
           collisionFilterMask: -1,
-          ccdSpeedThreshold: 1,
-          ccdIterations: 10,
         });
-        conusPhysBody.addShape(shape);
-        conusPhysBody.position.set(phCenter.x, phCenter.y, phCenter.z);
-        conusPhysBody.quaternion.set(phQuat.x, phQuat.y, phQuat.z, phQuat.w);
-        physicsWorld.addBody(conusPhysBody);
+        starPhysBody.addShape(shape);
+        starPhysBody.position.set(phCenter.x, phCenter.y, phCenter.z);
+        starPhysBody.quaternion.set(phQuat.x, phQuat.y, phQuat.z, phQuat.w);
+        placeOrientedBodyOnTableTop(starPhysBody);
+        starPhysBody._frozen = true;
+        physicsWorld.addBody(starPhysBody);
+        const initPos = new CANNON.Vec3(
+          starPhysBody.position.x,
+          starPhysBody.position.y,
+          starPhysBody.position.z,
+        );
+        const initQuat = new CANNON.Quaternion(
+          starPhysBody.quaternion.x,
+          starPhysBody.quaternion.y,
+          starPhysBody.quaternion.z,
+          starPhysBody.quaternion.w,
+        );
+        _starInstances.push({
+          group: starGroup,
+          physBody: starPhysBody,
+          initPos,
+          initQuat,
+        });
+        syncStarFromPhysics();
+        starGroup.updateMatrixWorld(true);
+        const visBB = new THREE.Box3().setFromObject(starGroup);
+        const tableTop = getTableSurfaceY();
+        if (!visBB.isEmpty() && tableTop != null) {
+          const visLift = tableTop + 0.02 - visBB.min.y;
+          if (visLift > 0.001) {
+            starPhysBody.position.y += visLift;
+            initPos.copy(starPhysBody.position);
+          }
+        }
+        syncStarFromPhysics();
       }
 
-      function syncConusFromPhysics() {
-        if (!conusGroup || !conusPhysBody) return;
-        conusGroup.position.set(
-          conusPhysBody.position.x,
-          conusPhysBody.position.y,
-          conusPhysBody.position.z,
-        );
-        conusGroup.quaternion.set(
-          conusPhysBody.quaternion.x,
-          conusPhysBody.quaternion.y,
-          conusPhysBody.quaternion.z,
-          conusPhysBody.quaternion.w,
-        );
+      function getTableTopY() {
+        if (!tablePlateBody?.shapes?.[0]) return null;
+        return tablePlateBody.position.y + tablePlateBody.shapes[0].halfExtents.y;
+      }
+
+      function getTableSurfaceY() {
+        if (tablePlateMesh) {
+          tablePlateMesh.updateMatrixWorld(true);
+          const tb = new THREE.Box3().setFromObject(tablePlateMesh);
+          if (!tb.isEmpty()) return tb.max.y;
+        }
+        if (typeof tableSurfaceY === "number" && Number.isFinite(tableSurfaceY)) {
+          return tableSurfaceY;
+        }
+        return getTableTopY();
+      }
+
+      function getOrientedBodyMinY(body) {
+        const shape = body.shapes[0];
+        if (!shape?.halfExtents) return body.position.y;
+        const hx = shape.halfExtents.x;
+        const hy = shape.halfExtents.y;
+        const hz = shape.halfExtents.z;
+        let minY = Infinity;
+        for (let sx = -1; sx <= 1; sx += 2) {
+          for (let sy = -1; sy <= 1; sy += 2) {
+            for (let sz = -1; sz <= 1; sz += 2) {
+              _obbCorner.set(sx * hx, sy * hy, sz * hz);
+              body.quaternion.vmult(_obbCorner, _obbCorner);
+              minY = Math.min(minY, body.position.y + _obbCorner.y);
+            }
+          }
+        }
+        return minY;
+      }
+
+      function placeOrientedBodyOnTableTop(body, clearance = 0.06) {
+        const tableTop = getTableSurfaceY();
+        if (tableTop == null) return;
+        const lift = tableTop + clearance - getOrientedBodyMinY(body);
+        if (Math.abs(lift) > 1e-6) body.position.y += lift;
+      }
+
+      function syncStarFromPhysics() {
+        for (let i = 0; i < _starInstances.length; i++) {
+          const inst = _starInstances[i];
+          if (!inst?.group || !inst?.physBody) continue;
+          const body = inst.physBody;
+          if (body._frozen && inst.initPos && inst.initQuat) {
+            body.position.copy(inst.initPos);
+            body.quaternion.copy(inst.initQuat);
+            body.velocity.set(0, 0, 0);
+            body.angularVelocity.set(0, 0, 0);
+          }
+          inst.group.position.set(body.position.x, body.position.y, body.position.z);
+          inst.group.quaternion.set(
+            body.quaternion.x,
+            body.quaternion.y,
+            body.quaternion.z,
+            body.quaternion.w,
+          );
+        }
       }
 
       const DRAWER_PART_NAMES = ["drawerPannel", "drawerEffect", "drawer"];
@@ -4608,6 +4953,73 @@ function officeAsset(relativePath) {
           return _tmpHE;
         }
         return null;
+      }
+
+      function resolveKnockablePropTableInnerBlock(body) {
+        if (!body || body.type !== CANNON.Body.DYNAMIC) return;
+        const he = body.shapes[0] ? getShapeHalfExtents(body.shapes[0]) : null;
+        if (!he) return;
+        const propRX = he.x;
+        const propRY = he.y;
+        const propRZ = he.z;
+
+        if (tableSideWallBody) {
+          for (let pass = 0; pass < 4; pass++) {
+            let moved = false;
+            for (let si = 0; si < tableSideWallBody.shapes.length; si++) {
+              const sh = tableSideWallBody.shapes[si];
+              const off = tableSideWallBody.shapeOffsets[si];
+              const wallHe = sh.halfExtents;
+              const wx = off ? off.x : 0;
+              const wy = off ? off.y : 0;
+              const wz = off ? off.z : 0;
+              const dx = body.position.x - wx;
+              const dy = body.position.y - wy;
+              const dz = body.position.z - wz;
+              if (
+                Math.abs(dx) >= wallHe.x + propRX ||
+                Math.abs(dy) >= wallHe.y + propRY ||
+                Math.abs(dz) >= wallHe.z + propRZ
+              ) {
+                continue;
+              }
+              const overlapX = wallHe.x + propRX - Math.abs(dx);
+              const overlapZ = wallHe.z + propRZ - Math.abs(dz);
+              if (overlapX <= 0 || overlapZ <= 0) continue;
+              if (overlapX < overlapZ) {
+                body.position.x += Math.sign(dx || 1) * overlapX;
+                body.velocity.x = 0;
+              } else {
+                body.position.z += Math.sign(dz || 1) * overlapZ;
+                body.velocity.z = 0;
+              }
+              moved = true;
+            }
+            if (!moved) break;
+          }
+        }
+
+        if (!tablePlateBody) return;
+        const tpHe = tablePlateBody.shapes[0].halfExtents;
+        const tableTop = tablePlateBody.position.y + tpHe.y;
+        if (body.position.y + propRY > tableTop - 0.08) return;
+
+        const relX = body.position.x - tablePlateBody.position.x;
+        const relZ = body.position.z - tablePlateBody.position.z;
+        const innerHalfX = Math.max(tpHe.x - propRX, 0.05);
+        const innerHalfZ = Math.max(tpHe.z - propRZ, 0.05);
+        if (Math.abs(relX) >= innerHalfX || Math.abs(relZ) >= innerHalfZ) return;
+
+        const escapeX = innerHalfX - Math.abs(relX);
+        const escapeZ = innerHalfZ - Math.abs(relZ);
+        if (escapeX <= 0 || escapeZ <= 0) return;
+        if (escapeX < escapeZ) {
+          body.position.x += Math.sign(relX || 1) * escapeX;
+          body.velocity.x = 0;
+        } else {
+          body.position.z += Math.sign(relZ || 1) * escapeZ;
+          body.velocity.z = 0;
+        }
       }
 
       const PROP_PHYS_NAMES = [
@@ -5119,6 +5531,33 @@ function officeAsset(relativePath) {
         });
       }
 
+      function applyHeadphonesMaterials(model) {
+        model.traverse((node) => {
+          if (!node.isMesh) return;
+          const name = node.name || "";
+          const parentName = node.parent ? node.parent.name || "" : "";
+          let mat = null;
+          if (
+            name === "headphonesBase" ||
+            parentName === "headphonesBase" ||
+            name === "headphonesButtons" ||
+            parentName === "headphonesButtons"
+          ) {
+            mat = headphonesPlasticMaterial;
+          } else if (name === "headphonesEars" || parentName === "headphonesEars") {
+            mat = headphonesEarsMaterial;
+          } else if (name === "headphonesLight" || parentName === "headphonesLight") {
+            mat = headphonesLightMaterial;
+          }
+          if (mat) {
+            if (Array.isArray(node.material)) {
+              for (let i = 0; i < node.material.length; i++)
+                node.material[i] = mat;
+            } else node.material = mat;
+          }
+        });
+      }
+
       function applyPhoneChargerCupMaterial(model) {
         model.traverse((node) => {
           if (!node.isMesh) return;
@@ -5320,6 +5759,7 @@ function officeAsset(relativePath) {
       const WINDOW_TRIS_DARK_ROTATION_X = Math.PI / 4; // 45° on X when lightBlend→0 (closed / dark)
       const WINDOW_GROUP_X_COPIES_PER_SIDE = 2; // duplicate this many times to left and right of center
       const WINDOW_GROUP_X_SPACING = 25; // spacing between window groups on X axis
+      const WINDOW_SIDE_ROW_COPIES_PER_SIDE = 3; // rotated side rows along Z per wall
       let windowTrisMeshes = [];
       let windowTrisSlotIndices = []; // 0..59 per mesh, for spacing update
       let windowTrisBaseYs = [];
@@ -5429,81 +5869,56 @@ function officeAsset(relativePath) {
             windowTrisBaseYs.push(basePos.y);
           });
         }
-        const groupCloneLeftExtra = windowUnitGroup.clone(true);
-        groupCloneLeftExtra.position.x =
+        const leftExtraX =
           -(WINDOW_GROUP_X_COPIES_PER_SIDE + 1) * WINDOW_GROUP_X_SPACING +
           WINDOW_GROUP_X_SPACING +
           2.5;
-        groupCloneLeftExtra.position.z = -1.7;
-        groupCloneLeftExtra.rotation.y = Math.PI / 2;
-        parent.add(groupCloneLeftExtra);
-        const leftTrisExtra = [];
-        groupCloneLeftExtra.traverse((node) => {
-          if (node.isMesh && node.name === "windowTris")
-            leftTrisExtra.push(node);
-          if (node.isMesh && node.name === "windowFrame")
-            setMeshDoubleSide(node);
-        });
-        leftTrisExtra.sort((a, b) => b.position.y - a.position.y);
-        leftTrisExtra.forEach((mesh, slot) => {
-          windowTrisMeshes.push(mesh);
-          windowTrisSlotIndices.push(slot);
-          windowTrisBaseYs.push(basePos.y);
-        });
-        const groupCloneLeftExtraZ = groupCloneLeftExtra.clone(true);
-        groupCloneLeftExtraZ.position.z = -1.7 + WINDOW_GROUP_X_SPACING;
-        parent.add(groupCloneLeftExtraZ);
-        const leftTrisExtraZ = [];
-        groupCloneLeftExtraZ.traverse((node) => {
-          if (node.isMesh && node.name === "windowTris")
-            leftTrisExtraZ.push(node);
-          if (node.isMesh && node.name === "windowFrame")
-            setMeshDoubleSide(node);
-        });
-        leftTrisExtraZ.sort((a, b) => b.position.y - a.position.y);
-        leftTrisExtraZ.forEach((mesh, slot) => {
-          windowTrisMeshes.push(mesh);
-          windowTrisSlotIndices.push(slot);
-          windowTrisBaseYs.push(basePos.y);
-        });
-        const extraRightX =
+        const rightExtraX =
           (WINDOW_GROUP_X_COPIES_PER_SIDE + 1) * WINDOW_GROUP_X_SPACING -
           WINDOW_GROUP_X_SPACING -
           2.5;
-        const groupCloneRightExtra = windowUnitGroup.clone(true);
-        groupCloneRightExtra.position.x = extraRightX;
-        groupCloneRightExtra.position.z = -1.7;
-        groupCloneRightExtra.rotation.y = -Math.PI / 2;
-        parent.add(groupCloneRightExtra);
-        const rightTrisExtra = [];
-        groupCloneRightExtra.traverse((node) => {
-          if (node.isMesh && node.name === "windowTris")
-            rightTrisExtra.push(node);
-          if (node.isMesh && node.name === "windowFrame")
-            setMeshDoubleSide(node);
-        });
-        rightTrisExtra.sort((a, b) => b.position.y - a.position.y);
-        rightTrisExtra.forEach((mesh, slot) => {
-          windowTrisMeshes.push(mesh);
-          windowTrisSlotIndices.push(slot);
-          windowTrisBaseYs.push(basePos.y);
-        });
-        const groupCloneRightExtraZ = groupCloneRightExtra.clone(true);
-        groupCloneRightExtraZ.position.z = -1.7 + WINDOW_GROUP_X_SPACING;
-        parent.add(groupCloneRightExtraZ);
-        const rightTrisExtraZ = [];
-        groupCloneRightExtraZ.traverse((node) => {
-          if (node.isMesh && node.name === "windowTris")
-            rightTrisExtraZ.push(node);
-          if (node.isMesh && node.name === "windowFrame")
-            setMeshDoubleSide(node);
-        });
-        rightTrisExtraZ.sort((a, b) => b.position.y - a.position.y);
-        rightTrisExtraZ.forEach((mesh, slot) => {
-          windowTrisMeshes.push(mesh);
-          windowTrisSlotIndices.push(slot);
-          windowTrisBaseYs.push(basePos.y);
-        });
+        const sideRowZBase = -1.7;
+        for (let zi = 0; zi < WINDOW_SIDE_ROW_COPIES_PER_SIDE; zi++) {
+          const groupCloneLeftExtra = windowUnitGroup.clone(true);
+          groupCloneLeftExtra.position.x = leftExtraX;
+          groupCloneLeftExtra.position.z =
+            sideRowZBase + zi * WINDOW_GROUP_X_SPACING;
+          groupCloneLeftExtra.rotation.y = Math.PI / 2;
+          parent.add(groupCloneLeftExtra);
+          const leftTrisExtra = [];
+          groupCloneLeftExtra.traverse((node) => {
+            if (node.isMesh && node.name === "windowTris")
+              leftTrisExtra.push(node);
+            if (node.isMesh && node.name === "windowFrame")
+              setMeshDoubleSide(node);
+          });
+          leftTrisExtra.sort((a, b) => b.position.y - a.position.y);
+          leftTrisExtra.forEach((mesh, slot) => {
+            windowTrisMeshes.push(mesh);
+            windowTrisSlotIndices.push(slot);
+            windowTrisBaseYs.push(basePos.y);
+          });
+
+          const groupCloneRightExtra = windowUnitGroup.clone(true);
+          groupCloneRightExtra.position.x = rightExtraX;
+          groupCloneRightExtra.position.z =
+            sideRowZBase + zi * WINDOW_GROUP_X_SPACING;
+          groupCloneRightExtra.rotation.y = -Math.PI / 2;
+          parent.add(groupCloneRightExtra);
+          const rightTrisExtra = [];
+          groupCloneRightExtra.traverse((node) => {
+            if (node.isMesh && node.name === "windowTris")
+              rightTrisExtra.push(node);
+            if (node.isMesh && node.name === "windowFrame")
+              setMeshDoubleSide(node);
+          });
+          rightTrisExtra.sort((a, b) => b.position.y - a.position.y);
+          rightTrisExtra.forEach((mesh, slot) => {
+            windowTrisMeshes.push(mesh);
+            windowTrisSlotIndices.push(slot);
+            windowTrisBaseYs.push(basePos.y);
+          });
+        }
       }
 
       const CHARGER_PARTICLE_COUNT = 720;
@@ -6470,6 +6885,923 @@ function officeAsset(relativePath) {
         );
       }
 
+      function setupBookLeftPageDecal(model) {
+        const page = model.getObjectByName("bookLeftPage");
+        if (!page?.isMesh || !page.geometry) return;
+        if (page.getObjectByName("bookLeftPageDecal")) return;
+
+        new THREE.TextureLoader().load(
+          officeAsset("bookLeftPage.jpg"),
+          (tex) => {
+            tex.colorSpace = THREE.SRGBColorSpace;
+            tex.flipY = true;
+            tex.wrapS = THREE.ClampToEdgeWrapping;
+            tex.wrapT = THREE.ClampToEdgeWrapping;
+            tex.center.set(0.5, 0.5);
+            tex.needsUpdate = true;
+
+            model.updateMatrixWorld(true);
+            page.updateMatrixWorld(true);
+
+            const box = new THREE.Box3().setFromObject(page);
+            if (box.isEmpty()) return;
+            const boxSize = box.getSize(new THREE.Vector3());
+
+            let nrm = page.geometry.attributes.normal;
+            if (!nrm) {
+              page.geometry.computeVertexNormals();
+              nrm = page.geometry.attributes.normal;
+            }
+            const nLocal = new THREE.Vector3();
+            const nTmp = new THREE.Vector3();
+            for (let i = 0; i < nrm.count; i++) {
+              nTmp.set(nrm.getX(i), nrm.getY(i), nrm.getZ(i));
+              nLocal.add(nTmp);
+            }
+            if (nLocal.lengthSq() < 1e-12) return;
+            nLocal.normalize();
+            const nWorld = nLocal
+              .clone()
+              .transformDirection(page.matrixWorld)
+              .normalize();
+
+            const up = new THREE.Vector3(0, 1, 0);
+            const uAxis = new THREE.Vector3().crossVectors(up, nWorld);
+            if (uAxis.lengthSq() < 1e-10) {
+              uAxis.crossVectors(new THREE.Vector3(1, 0, 0), nWorld);
+            }
+            uAxis.normalize();
+            const vAxis = new THREE.Vector3().crossVectors(nWorld, uAxis).normalize();
+
+            const rotY = new THREE.Matrix4().makeRotationY(Math.PI / 2);
+            uAxis.applyMatrix4(rotY);
+            vAxis.applyMatrix4(rotY);
+            nWorld.applyMatrix4(rotY);
+
+            let uMin = Infinity,
+              uMax = -Infinity,
+              vMin = Infinity,
+              vMax = -Infinity;
+            const rel = new THREE.Vector3();
+            const vW = new THREE.Vector3();
+            const refW = box.getCenter(new THREE.Vector3());
+            const pos = page.geometry.attributes.position;
+            for (let i = 0; i < pos.count; i++) {
+              vW.fromBufferAttribute(pos, i).applyMatrix4(page.matrixWorld);
+              rel.subVectors(vW, refW);
+              const u = rel.dot(uAxis);
+              const v = rel.dot(vAxis);
+              uMin = Math.min(uMin, u);
+              uMax = Math.max(uMax, u);
+              vMin = Math.min(vMin, v);
+              vMax = Math.max(vMax, v);
+            }
+            const uMid = (uMin + uMax) * 0.5;
+            const vMid = (vMin + vMax) * 0.5;
+            const centerW = refW
+              .clone()
+              .addScaledVector(uAxis, uMid)
+              .addScaledVector(vAxis, vMid);
+
+            uMin = Infinity;
+            uMax = -Infinity;
+            vMin = Infinity;
+            vMax = -Infinity;
+            for (let i = 0; i < pos.count; i++) {
+              vW.fromBufferAttribute(pos, i).applyMatrix4(page.matrixWorld);
+              rel.subVectors(vW, centerW);
+              const u = rel.dot(uAxis);
+              const v = rel.dot(vAxis);
+              uMin = Math.min(uMin, u);
+              uMax = Math.max(uMax, u);
+              vMin = Math.min(vMin, v);
+              vMax = Math.max(vMax, v);
+            }
+
+            const sortedBox = [boxSize.x, boxSize.y, boxSize.z].sort(
+              (a, b) => b - a,
+            );
+            const depth = Math.max(sortedBox[2] * 5, 0.18);
+            const orientation = new THREE.Euler();
+            orientation.setFromRotationMatrix(
+              new THREE.Matrix4().makeBasis(uAxis, vAxis, nWorld),
+            );
+            const edgePad = 1.06;
+            const pageW = Math.max(uMax - uMin, 0.02) * edgePad;
+            const pageH = Math.max(vMax - vMin, 0.02) * edgePad;
+            const decalSize = new THREE.Vector3(pageW, pageH, depth);
+
+            const decalGeo = new DecalGeometry(
+              page,
+              centerW,
+              orientation,
+              decalSize,
+            );
+            const posAttr = decalGeo.getAttribute("position");
+            if (!posAttr || posAttr.count === 0) {
+              console.warn(
+                "[office] bookLeftPage decal geometry empty — check projector size/orientation.",
+              );
+              decalGeo.dispose();
+              return;
+            }
+            decalGeo.applyMatrix4(page.matrixWorld.clone().invert());
+
+            const decal = new THREE.Mesh(
+              decalGeo,
+              new THREE.MeshStandardMaterial({
+                map: tex,
+                color: 0xffffff,
+                roughness: 0.85,
+                metalness: 0,
+                polygonOffset: true,
+                polygonOffsetFactor: -6,
+                polygonOffsetUnits: -1,
+                depthWrite: true,
+                side: THREE.DoubleSide,
+              }),
+            );
+            decal.name = "bookLeftPageDecal";
+            decal.renderOrder = 6;
+            page.add(decal);
+            applyTextureAnisotropyToRoot(decal);
+          },
+          undefined,
+          (err) => console.warn("bookLeftPage.jpg decal failed:", err),
+        );
+      }
+
+      const _bookDecalTexCache = new Map();
+      let _bookDecalBuildGen = 0;
+
+      function removeBookPageDecal(page, decalChildName) {
+        const existing = page.getObjectByName(decalChildName);
+        if (!existing) return;
+        existing.geometry?.dispose();
+        existing.material?.dispose();
+        page.remove(existing);
+      }
+
+      function buildBookPageDecalMesh(
+        model,
+        page,
+        tex,
+        meshName,
+        decalChildName,
+        rotYRadians,
+        fineRotateRadians,
+        rotationMode = "worldY",
+        sizeScale = 1,
+        worldOffset = null,
+      ) {
+        tex.wrapT = THREE.ClampToEdgeWrapping;
+        tex.center.set(0.5, 0.5);
+        tex.rotation = 0;
+        tex.needsUpdate = true;
+
+        model.updateMatrixWorld(true);
+        page.updateMatrixWorld(true);
+
+        const box = new THREE.Box3().setFromObject(page);
+        if (box.isEmpty()) return;
+        const boxSize = box.getSize(new THREE.Vector3());
+
+        let nrm = page.geometry.attributes.normal;
+        if (!nrm) {
+          page.geometry.computeVertexNormals();
+          nrm = page.geometry.attributes.normal;
+        }
+        const nLocal = new THREE.Vector3();
+        const nTmp = new THREE.Vector3();
+        for (let i = 0; i < nrm.count; i++) {
+          nTmp.set(nrm.getX(i), nrm.getY(i), nrm.getZ(i));
+          nLocal.add(nTmp);
+        }
+        if (nLocal.lengthSq() < 1e-12) return;
+        nLocal.normalize();
+        const nWorld = nLocal
+          .clone()
+          .transformDirection(page.matrixWorld)
+          .normalize();
+
+        const up = new THREE.Vector3(0, 1, 0);
+        const uAxis = new THREE.Vector3().crossVectors(up, nWorld);
+        if (uAxis.lengthSq() < 1e-10) {
+          uAxis.crossVectors(new THREE.Vector3(1, 0, 0), nWorld);
+        }
+        uAxis.normalize();
+        const vAxis = new THREE.Vector3().crossVectors(nWorld, uAxis).normalize();
+
+        if (rotationMode === "surfaceNormal") {
+          const rotN = new THREE.Matrix4().makeRotationAxis(nWorld, rotYRadians);
+          uAxis.applyMatrix4(rotN);
+          vAxis.applyMatrix4(rotN);
+          if (fineRotateRadians !== 0) {
+            const rotFine = new THREE.Matrix4().makeRotationAxis(
+              nWorld,
+              fineRotateRadians,
+            );
+            uAxis.applyMatrix4(rotFine);
+            vAxis.applyMatrix4(rotFine);
+          }
+        } else {
+          const rotY = new THREE.Matrix4().makeRotationY(rotYRadians);
+          uAxis.applyMatrix4(rotY);
+          vAxis.applyMatrix4(rotY);
+          nWorld.applyMatrix4(rotY);
+          if (fineRotateRadians !== 0) {
+            const rotN = new THREE.Matrix4().makeRotationAxis(
+              nWorld,
+              fineRotateRadians,
+            );
+            uAxis.applyMatrix4(rotN);
+            vAxis.applyMatrix4(rotN);
+          }
+        }
+
+        let uMin = Infinity,
+          uMax = -Infinity,
+          vMin = Infinity,
+          vMax = -Infinity;
+        const rel = new THREE.Vector3();
+        const vW = new THREE.Vector3();
+        const refW = box.getCenter(new THREE.Vector3());
+        const pos = page.geometry.attributes.position;
+        for (let i = 0; i < pos.count; i++) {
+          vW.fromBufferAttribute(pos, i).applyMatrix4(page.matrixWorld);
+          rel.subVectors(vW, refW);
+          const u = rel.dot(uAxis);
+          const v = rel.dot(vAxis);
+          uMin = Math.min(uMin, u);
+          uMax = Math.max(uMax, u);
+          vMin = Math.min(vMin, v);
+          vMax = Math.max(vMax, v);
+        }
+        const uMid = (uMin + uMax) * 0.5;
+        const vMid = (vMin + vMax) * 0.5;
+        const centerW = refW
+          .clone()
+          .addScaledVector(uAxis, uMid)
+          .addScaledVector(vAxis, vMid);
+        if (worldOffset) centerW.add(worldOffset);
+
+        uMin = Infinity;
+        uMax = -Infinity;
+        vMin = Infinity;
+        vMax = -Infinity;
+        for (let i = 0; i < pos.count; i++) {
+          vW.fromBufferAttribute(pos, i).applyMatrix4(page.matrixWorld);
+          rel.subVectors(vW, centerW);
+          const u = rel.dot(uAxis);
+          const v = rel.dot(vAxis);
+          uMin = Math.min(uMin, u);
+          uMax = Math.max(uMax, u);
+          vMin = Math.min(vMin, v);
+          vMax = Math.max(vMax, v);
+        }
+
+        const sortedBox = [boxSize.x, boxSize.y, boxSize.z].sort(
+          (a, b) => b - a,
+        );
+        const depth = Math.max(sortedBox[2] * 5, 0.18);
+        const orientation = new THREE.Euler();
+        orientation.setFromRotationMatrix(
+          new THREE.Matrix4().makeBasis(uAxis, vAxis, nWorld),
+        );
+        const edgePad = 1.06;
+        const pageW = Math.max(uMax - uMin, 0.02) * edgePad * sizeScale;
+        const pageH = Math.max(vMax - vMin, 0.02) * edgePad * sizeScale;
+        const decalSize = new THREE.Vector3(pageW, pageH, depth);
+
+        const decalGeo = new DecalGeometry(
+          page,
+          centerW,
+          orientation,
+          decalSize,
+        );
+        const posAttr = decalGeo.getAttribute("position");
+        if (!posAttr || posAttr.count === 0) {
+          console.warn(
+            `[office] ${meshName} decal geometry empty — check projector size/orientation.`,
+          );
+          decalGeo.dispose();
+          return;
+        }
+        decalGeo.applyMatrix4(page.matrixWorld.clone().invert());
+
+        const decal = new THREE.Mesh(
+          decalGeo,
+          new THREE.MeshStandardMaterial({
+            map: tex,
+            color: 0xffffff,
+            roughness: 0.85,
+            metalness: 0,
+            polygonOffset: true,
+            polygonOffsetFactor: -6,
+            polygonOffsetUnits: -1,
+            depthWrite: true,
+            side: THREE.DoubleSide,
+          }),
+        );
+        decal.name = decalChildName;
+        decal.renderOrder = 6;
+        page.add(decal);
+        applyTextureAnisotropyToRoot(decal);
+      }
+
+      function setupBookPageDecal(
+        model,
+        meshName,
+        textureUrl,
+        decalChildName,
+        rotYRadians = Math.PI / 2,
+        fineRotateRadians = 0,
+        rotationMode = "worldY",
+        sizeScale = 1,
+        worldOffset = null,
+      ) {
+        const page = model.getObjectByName(meshName);
+        if (!page?.isMesh || !page.geometry) return;
+        removeBookPageDecal(page, decalChildName);
+        const buildGen = ++_bookDecalBuildGen;
+
+        const finish = (sourceTex) => {
+          if (buildGen !== _bookDecalBuildGen) return;
+          const tex = sourceTex.clone();
+          tex.colorSpace = THREE.SRGBColorSpace;
+          tex.flipY = true;
+          buildBookPageDecalMesh(
+            model,
+            page,
+            tex,
+            meshName,
+            decalChildName,
+            rotYRadians,
+            fineRotateRadians,
+            rotationMode,
+            sizeScale,
+            worldOffset,
+          );
+        };
+
+        const cached = _bookDecalTexCache.get(textureUrl);
+        if (cached) {
+          finish(cached);
+          return;
+        }
+
+        new THREE.TextureLoader().load(
+          officeAsset(textureUrl),
+          (tex) => {
+            tex.colorSpace = THREE.SRGBColorSpace;
+            tex.flipY = true;
+            _bookDecalTexCache.set(textureUrl, tex);
+            finish(tex);
+          },
+          undefined,
+          (err) =>
+            console.warn(`${textureUrl} decal failed for ${meshName}:`, err),
+        );
+      }
+
+      function setupBookRightPageDecal(model) {
+        setupBookPageDecal(
+          model,
+          "bookRightPage",
+          "bookRightPage.jpg",
+          "bookRightPageDecal",
+          Math.PI / 2,
+          0,
+          "surfaceNormal",
+          0.9801,
+          new THREE.Vector3(0, 0, -0.03),
+        );
+      }
+
+      /** Rebuild right-page decal after editing rotation in code. Left page is left unchanged. */
+      window.refreshBookPageDecals = () => {
+        if (!_officeWorldRoot) return;
+        setupBookRightPageDecal(_officeWorldRoot);
+      };
+
+      function setupTechDesignerMagnetDecal(model) {
+        const mesh = model.getObjectByName("techDesignerMagnet");
+        if (!mesh?.isMesh || !mesh.geometry) {
+          console.warn("[office] techDesignerMagnet not found; decal skipped.");
+          return;
+        }
+        const existingDecal = mesh.getObjectByName("techDesignerMagnetDecal");
+        if (existingDecal) {
+          existingDecal.geometry?.dispose();
+          if (existingDecal.material) {
+            const idx = _techDesignerMagnetDecals.findIndex(
+              (e) => e.material === existingDecal.material,
+            );
+            if (idx >= 0) _techDesignerMagnetDecals.splice(idx, 1);
+            existingDecal.material.dispose();
+          }
+          mesh.remove(existingDecal);
+        }
+
+        new THREE.TextureLoader().load(
+          officeAsset("techDesignerMagnet.jpg"),
+          (tex) => {
+            tex.colorSpace = THREE.SRGBColorSpace;
+            tex.flipY = true;
+            tex.wrapS = THREE.ClampToEdgeWrapping;
+            tex.wrapT = THREE.ClampToEdgeWrapping;
+            tex.center.set(0.5, 0.5);
+            tex.needsUpdate = true;
+
+            model.updateMatrixWorld(true);
+            mesh.updateMatrixWorld(true);
+
+            const box = new THREE.Box3().setFromObject(mesh);
+            if (box.isEmpty()) return;
+            const boxSize = box.getSize(new THREE.Vector3());
+
+            const nWorld = new THREE.Vector3(0, 1, 0)
+              .transformDirection(mesh.matrixWorld)
+              .normalize();
+
+            const refUp = new THREE.Vector3(0, 0, 1);
+            let uAxis = new THREE.Vector3().crossVectors(refUp, nWorld);
+            if (uAxis.lengthSq() < 1e-10) {
+              refUp.set(0, 1, 0);
+              uAxis.crossVectors(refUp, nWorld);
+            }
+            uAxis.normalize();
+            const vAxis = new THREE.Vector3().crossVectors(nWorld, uAxis).normalize();
+
+            const rotFaceX = new THREE.Matrix4().makeRotationAxis(
+              nWorld,
+              (Math.PI * 3) / 2,
+            );
+            uAxis.applyMatrix4(rotFaceX);
+            vAxis.applyMatrix4(rotFaceX);
+
+            let nrm = mesh.geometry.attributes.normal;
+            if (!nrm) {
+              mesh.geometry.computeVertexNormals();
+              nrm = mesh.geometry.attributes.normal;
+            }
+
+            let uMin = Infinity,
+              uMax = -Infinity,
+              vMin = Infinity,
+              vMax = -Infinity;
+            const rel = new THREE.Vector3();
+            const vW = new THREE.Vector3();
+            const nTmp = new THREE.Vector3();
+            const refW = box.getCenter(new THREE.Vector3());
+            const pos = mesh.geometry.attributes.position;
+            for (let i = 0; i < pos.count; i++) {
+              nTmp.set(nrm.getX(i), nrm.getY(i), nrm.getZ(i));
+              if (nTmp.y < 0.55) continue;
+              vW.fromBufferAttribute(pos, i).applyMatrix4(mesh.matrixWorld);
+              rel.subVectors(vW, refW);
+              const u = rel.dot(uAxis);
+              const v = rel.dot(vAxis);
+              uMin = Math.min(uMin, u);
+              uMax = Math.max(uMax, u);
+              vMin = Math.min(vMin, v);
+              vMax = Math.max(vMax, v);
+            }
+            if (!Number.isFinite(uMin) || !Number.isFinite(vMin)) return;
+
+            const uMid = (uMin + uMax) * 0.5;
+            const vMid = (vMin + vMax) * 0.5;
+            const centerW = refW
+              .clone()
+              .addScaledVector(uAxis, uMid)
+              .addScaledVector(vAxis, vMid);
+
+            uMin = Infinity;
+            uMax = -Infinity;
+            vMin = Infinity;
+            vMax = -Infinity;
+            for (let i = 0; i < pos.count; i++) {
+              nTmp.set(nrm.getX(i), nrm.getY(i), nrm.getZ(i));
+              if (nTmp.y < 0.55) continue;
+              vW.fromBufferAttribute(pos, i).applyMatrix4(mesh.matrixWorld);
+              rel.subVectors(vW, centerW);
+              const u = rel.dot(uAxis);
+              const v = rel.dot(vAxis);
+              uMin = Math.min(uMin, u);
+              uMax = Math.max(uMax, u);
+              vMin = Math.min(vMin, v);
+              vMax = Math.max(vMax, v);
+            }
+
+            const sortedBox = [boxSize.x, boxSize.y, boxSize.z].sort(
+              (a, b) => b - a,
+            );
+            const depth = Math.max(sortedBox[2] * 5, 0.12);
+            const orientation = new THREE.Euler();
+            orientation.setFromRotationMatrix(
+              new THREE.Matrix4().makeBasis(uAxis, vAxis, nWorld),
+            );
+            const edgePad = 1.04;
+            const sizeScale = 1.14;
+            const pageW = Math.max(uMax - uMin, 0.02) * edgePad * sizeScale;
+            const pageH = Math.max(vMax - vMin, 0.02) * edgePad * sizeScale;
+            const decalSize = new THREE.Vector3(pageW, pageH, depth);
+
+            const decalGeo = new DecalGeometry(
+              mesh,
+              centerW,
+              orientation,
+              decalSize,
+            );
+            const posAttr = decalGeo.getAttribute("position");
+            if (!posAttr || posAttr.count === 0) {
+              console.warn(
+                "[office] techDesignerMagnet decal geometry empty — check projector size/orientation.",
+              );
+              decalGeo.dispose();
+              return;
+            }
+            const uvAttr = decalGeo.getAttribute("uv");
+            if (uvAttr) {
+              for (let i = 0; i < uvAttr.count; i++) {
+                uvAttr.setX(i, 1 - uvAttr.getX(i));
+              }
+            }
+            decalGeo.applyMatrix4(mesh.matrixWorld.clone().invert());
+
+            const decalMat = new THREE.MeshStandardMaterial({
+              map: tex,
+              color: 0xffffff,
+              emissive: 0xffffff,
+              emissiveMap: tex,
+              emissiveIntensity: 0,
+              roughness: 0.85,
+              metalness: 0,
+              polygonOffset: true,
+              polygonOffsetFactor: -6,
+              polygonOffsetUnits: -1,
+              depthWrite: true,
+              side: THREE.DoubleSide,
+            });
+            const decal = new THREE.Mesh(decalGeo, decalMat);
+            decal.name = "techDesignerMagnetDecal";
+            decal.renderOrder = 6;
+            mesh.add(decal);
+            _techDesignerMagnetDecals.push({
+              material: decalMat,
+              darkIntensity: 0.62,
+              brightIntensity: 0,
+            });
+            applyTextureAnisotropyToRoot(decal);
+          },
+          undefined,
+          (err) =>
+            console.warn("[office] techDesignerMagnet.jpg decal failed:", err),
+        );
+      }
+
+      function setupPlantGroundTexture(model) {
+        let ground = model.getObjectByName("plantGround.001");
+        if (!ground?.isMesh) {
+          model.traverse((node) => {
+            if (ground?.isMesh) return;
+            if (node.isMesh && node.name && node.name.includes("plantGround")) {
+              ground = node;
+            }
+          });
+        }
+        if (!ground?.isMesh) {
+          console.warn("[office] plantGround.001 not found; ground texture skipped.");
+          return;
+        }
+
+        ground.visible = true;
+        ground.frustumCulled = false;
+        ground.userData.skipBloomDarken = true;
+        ground.renderOrder = 10;
+
+        const geo = ground.geometry.clone();
+        if (!geo.boundingBox) geo.computeBoundingBox();
+        const bb = geo.boundingBox;
+        const spanX = Math.max(bb.max.x - bb.min.x, 1e-6);
+        const spanZ = Math.max(bb.max.z - bb.min.z, 1e-6);
+        const pos = geo.attributes.position;
+        const uvs = new Float32Array(pos.count * 2);
+        const uvScale = 1.65;
+        for (let i = 0; i < pos.count; i++) {
+          let u = (pos.getX(i) - bb.min.x) / spanX;
+          let v = 1 - (pos.getZ(i) - bb.min.z) / spanZ;
+          u = 0.5 + (u - 0.5) * uvScale;
+          v = 0.5 + (v - 0.5) * uvScale;
+          uvs[i * 2] = u;
+          uvs[i * 2 + 1] = v;
+        }
+        geo.setAttribute("uv", new THREE.BufferAttribute(uvs, 2));
+        ground.geometry = geo;
+
+        const mat = new THREE.MeshBasicMaterial({
+          color: 0x5c5c5c,
+          side: THREE.DoubleSide,
+          depthWrite: true,
+          depthTest: true,
+          polygonOffset: true,
+          polygonOffsetFactor: -4,
+          polygonOffsetUnits: -2,
+        });
+        applyPlantGroundStencilMask(mat);
+        ground.material = mat;
+
+        new THREE.TextureLoader().load(
+          officeAsset("plant-ground-texture.jpg"),
+          (tex) => {
+            tex.colorSpace = THREE.SRGBColorSpace;
+            tex.flipY = false;
+            tex.wrapS = THREE.RepeatWrapping;
+            tex.wrapT = THREE.RepeatWrapping;
+            tex.repeat.set(uvScale, uvScale);
+            tex.center.set(0.5, 0.5);
+            tex.needsUpdate = true;
+            mat.map = tex;
+            mat.color.setHex(0x5c5c5c);
+            mat.side = THREE.DoubleSide;
+            mat.needsUpdate = true;
+            applyTextureAnisotropyToRoot(ground);
+          },
+          undefined,
+          (err) =>
+            console.warn("[office] plant-ground-texture.jpg failed:", err),
+        );
+      }
+
+      function applyPlant1GreenMaterial(model) {
+        const part = model.getObjectByName("plant1");
+        if (!part) return;
+        const greenHex = 0x4a9d5c;
+        part.traverse((node) => {
+          if (node.name === "plant1LeafSprites") return;
+          if (!node.isMesh) return;
+          const opts = {
+            color: greenHex,
+            roughness: 0.72,
+            metalness: 0.02,
+          };
+          if (Array.isArray(node.material)) {
+            node.material = node.material.map(
+              () => new THREE.MeshStandardMaterial(opts),
+            );
+          } else {
+            node.material = new THREE.MeshStandardMaterial(opts);
+          }
+        });
+      }
+
+      function createSeededRng(seed) {
+        let state = seed >>> 0;
+        return () => {
+          state = (state + 0x6d2b79f5) >>> 0;
+          let t = Math.imul(state ^ (state >>> 15), 1 | state);
+          t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+      }
+
+      function setupPlant1LeafSprites(model) {
+        const plant1 = model.getObjectByName("plant1");
+        if (!plant1) {
+          console.warn("[office] plant1 not found; leaf sprites skipped.");
+          return;
+        }
+        if (plant1.getObjectByName("plant1LeafSprites")) return;
+        model.updateMatrixWorld(true);
+        plant1.updateMatrixWorld(true);
+        const bbox = new THREE.Box3().setFromObject(plant1);
+        if (bbox.isEmpty()) return;
+
+        const leafGroup = new THREE.Group();
+        leafGroup.name = "plant1LeafSprites";
+        plant1.add(leafGroup);
+
+        const centerW = bbox.getCenter(new THREE.Vector3());
+        const sizeW = bbox.getSize(new THREE.Vector3());
+        const baseSpan = Math.max(sizeW.x, sizeW.z, sizeW.y * 0.55);
+        const boxMin = bbox.min.clone();
+        const boxMax = bbox.max.clone();
+
+        new THREE.TextureLoader().load(
+          officeAsset("leaf.png"),
+          (tex) => {
+            tex.colorSpace = THREE.SRGBColorSpace;
+            tex.flipY = true;
+            tex.wrapS = THREE.ClampToEdgeWrapping;
+            tex.wrapT = THREE.ClampToEdgeWrapping;
+
+            const mat = new THREE.MeshBasicMaterial({
+              map: tex,
+              transparent: false,
+              opacity: 1,
+              side: THREE.DoubleSide,
+              depthWrite: true,
+            });
+            mat.customProgramCacheKey = () => "plant1LeafMat";
+            mat.onBeforeCompile = (shader) => {
+              shader.fragmentShader = shader.fragmentShader.replace(
+                "#include <map_fragment>",
+                `
+#include <map_fragment>
+float _leafLum = dot( diffuseColor.rgb, vec3( 0.2126, 0.7152, 0.0722 ) );
+if ( _leafLum < 0.06 ) discard;
+diffuseColor.a = 1.0;
+`,
+              );
+            };
+            const geo = new THREE.PlaneGeometry(1, 1);
+            const nLeaves = 98;
+            const rand = createSeededRng(1337);
+            const _anchorW = new THREE.Vector3();
+            const _up = new THREE.Vector3(0, 1, 0);
+            const _qBase = new THREE.Quaternion();
+            const _qTwist = new THREE.Quaternion();
+            const _topOffPlantLocal = new THREE.Vector3();
+            const _stemUp = new THREE.Vector3();
+            const _wv = new THREE.Vector3();
+            const _blendIn = new THREE.Vector3();
+
+            const randomUnitSphere = (target) => {
+              const u = rand();
+              const v = rand();
+              const theta = 2 * Math.PI * u;
+              const cosPhi = 2 * v - 1;
+              const sinPhi = Math.sqrt(Math.max(0, 1 - cosPhi * cosPhi));
+              target.set(
+                sinPhi * Math.cos(theta),
+                sinPhi * Math.sin(theta),
+                cosPhi,
+              );
+              return target;
+            };
+
+            const randomPointInBox = (target) => {
+              target.set(
+                boxMin.x + rand() * (boxMax.x - boxMin.x),
+                boxMin.y + rand() * (boxMax.y - boxMin.y),
+                boxMin.z + rand() * (boxMax.z - boxMin.z),
+              );
+              return target;
+            };
+
+            plant1.updateMatrixWorld(true);
+            const plantVertWorld = [];
+            plant1.traverse((node) => {
+              if (!node.isMesh || !node.geometry?.attributes?.position)
+                return;
+              const pos = node.geometry.attributes.position;
+              const mw = node.matrixWorld;
+              const step = pos.count > 12000 ? 4 : pos.count > 6000 ? 2 : 1;
+              for (let i = 0; i < pos.count; i += step) {
+                _wv
+                  .set(pos.getX(i), pos.getY(i), pos.getZ(i))
+                  .applyMatrix4(mw);
+                plantVertWorld.push(_wv.x, _wv.y, _wv.z);
+              }
+            });
+
+            let nv = (plantVertWorld.length / 3) | 0;
+            const sortAxis = 1;
+            const tNorm = new Float32Array(nv > 0 ? nv : 0);
+            let coordMin = 0;
+            let coordMax = 1;
+            if (nv > 0) {
+              coordMin = Infinity;
+              coordMax = -Infinity;
+              for (let k = 0; k < nv; k++) {
+                const c = plantVertWorld[k * 3 + sortAxis];
+                coordMin = Math.min(coordMin, c);
+                coordMax = Math.max(coordMax, c);
+              }
+              const cSpan = coordMax - coordMin + 1e-8;
+              for (let k = 0; k < nv; k++) {
+                tNorm[k] =
+                  (plantVertWorld[k * 3 + sortAxis] - coordMin) / cSpan;
+              }
+            }
+            const leafPickPool = [];
+            const centroidW = new THREE.Vector3();
+            if (nv > 0) {
+              let cx = 0,
+                cy = 0,
+                cz = 0;
+              for (let j = 0; j < plantVertWorld.length; j += 3) {
+                cx += plantVertWorld[j];
+                cy += plantVertWorld[j + 1];
+                cz += plantVertWorld[j + 2];
+              }
+              centroidW.set(cx / nv, cy / nv, cz / nv);
+            } else {
+              centroidW.copy(centerW);
+            }
+
+            for (let i = 0; i < nLeaves; i++) {
+              const mesh = new THREE.Mesh(geo, mat);
+              if (nv > 0) {
+                const tCenter = THREE.MathUtils.clamp(
+                  (i + 0.5 + (rand() - 0.5) * 1.05) / nLeaves,
+                  0.02,
+                  0.98,
+                );
+                let vertK = -1;
+                for (let att = 0; att < 8 && vertK < 0; att++) {
+                  const half =
+                    (0.48 / nLeaves + 0.034) * Math.pow(1.55, att);
+                  const lo = Math.max(0, tCenter - half);
+                  const hi = Math.min(1, tCenter + half);
+                  leafPickPool.length = 0;
+                  for (let k = 0; k < nv; k++) {
+                    const tv = tNorm[k];
+                    if (tv >= lo && tv <= hi) leafPickPool.push(k);
+                  }
+                  if (leafPickPool.length > 0) {
+                    vertK =
+                      leafPickPool[(rand() * leafPickPool.length) | 0];
+                  }
+                }
+                if (vertK < 0) vertK = (rand() * nv) | 0;
+                const vi = vertK * 3;
+                _anchorW.set(
+                  plantVertWorld[vi],
+                  plantVertWorld[vi + 1],
+                  plantVertWorld[vi + 2],
+                );
+              } else {
+                randomPointInBox(_anchorW);
+              }
+
+              _blendIn.copy(centroidW).sub(_anchorW);
+              if (_blendIn.lengthSq() < 1e-10) randomUnitSphere(_blendIn);
+              else _blendIn.normalize();
+              randomUnitSphere(_stemUp);
+              const mixR = 0.8 + rand() * 0.2;
+              _stemUp
+                .multiplyScalar(mixR)
+                .addScaledVector(_blendIn, 1 - mixR)
+                .normalize();
+
+              const s = 0.3 + rand() * 0.75;
+              const w = baseSpan * 0.102 * s;
+              const aspect = 1.32 + rand() * 0.34;
+              const h = w * aspect;
+              mesh.scale.set(w, h, 1);
+
+              _qBase.setFromUnitVectors(_up, _stemUp);
+              _qTwist.setFromAxisAngle(_stemUp, rand() * Math.PI * 2);
+              mesh.quaternion.copy(_qBase).premultiply(_qTwist);
+
+              plant1.worldToLocal(mesh.position.copy(_anchorW));
+              _topOffPlantLocal.set(0, h * 0.5, 0).applyQuaternion(mesh.quaternion);
+              mesh.position.sub(_topOffPlantLocal);
+
+              leafGroup.add(mesh);
+            }
+            applyTextureAnisotropyToRoot(leafGroup);
+            scheduleRebuildBloomDarkenLists();
+          },
+          undefined,
+          (err) => console.warn("[office] leaf.png failed to load:", err),
+        );
+      }
+
+      function getJumpAirLeanTarget() {
+        if (jumpInitialVelY <= 0.02 && !_rampLeftJumpActive) return 0;
+        const totalAir = (2 * jumpInitialVelY) / Math.max(0.01, CAR_GRAVITY);
+        const timeProgress = _rampJumpSimAirTime / Math.max(0.06, totalAir);
+        let velProgress = 0;
+        if (jumpInitialVelY > 0.02) {
+          if (carState.velY > 0) {
+            velProgress = 1 - carState.velY / jumpInitialVelY;
+          } else if (carState.velY < 0) {
+            velProgress = 1;
+          }
+        }
+        const progress = Math.max(timeProgress, velProgress);
+        if (progress < 0.18) return 0;
+        return rampJumpEaseInOut(Math.min(1, (progress - 0.18) / 0.52));
+      }
+
+      function applyJumpAirForwardTilt(targetOut, stepDt) {
+        _jumpAirLeanBlend +=
+          (getJumpAirLeanTarget() - _jumpAirLeanBlend) *
+          (1 - Math.exp(-JUMP_AIR_LEAN_SMOOTH * stepDt));
+        _carRight.crossVectors(_carForward, jumpLaunchUp);
+        if (_carRight.lengthSq() < 1e-10) {
+          _carRight.crossVectors(_carForward, _flatUp);
+        }
+        _carRight.normalize();
+        _quatWheelSteer.setFromAxisAngle(
+          _carRight,
+          -_jumpAirLeanBlend * JUMP_AIR_FORWARD_PITCH,
+        );
+        targetOut.copy(jumpLaunchUp).applyQuaternion(_quatWheelSteer);
+      }
+
       function logOfficeMeshParts(gltf) {
         const clipByNode = new Map();
         for (const clip of gltf.animations || []) {
@@ -6509,13 +7841,22 @@ function officeAsset(relativePath) {
 
       const loader = new GLTFLoader();
       loader.load(
-        officeAsset("office-table-embed65.gltf"),
+        officeAsset("office-table-embed75.gltf"),
         (gltf) => {
           logOfficeMeshParts(gltf);
           const model = gltf.scene;
           scene.add(model);
           _officeWorldRoot = model;
           _currentWorldModel = model;
+          model.updateMatrixWorld(true);
+          {
+            const _ob = new THREE.Box3().setFromObject(model);
+            if (!_ob.isEmpty()) {
+              _ob.getCenter(visualXYZ.position);
+              visualXYZ.position.y += 0.45;
+            }
+            visualXYZ.scale.setScalar(0.5);
+          }
           applyPerformanceShadowPolicy(model);
           initOfficeAnimations(gltf);
           findScreenMeshes(model);
@@ -6534,7 +7875,7 @@ function officeAsset(relativePath) {
                 });
                 if (!src) {
                   console.warn(
-                    "No outdoorBackground in office-table-embed65.gltf or fallback " +
+                    "No outdoorBackground in office-table-embed75.gltf or fallback " +
                       OUTDOOR_FALLBACK_GLTF +
                       ". Re-export embed36 with an object named outdoorBackground.",
                   );
@@ -6559,6 +7900,11 @@ function officeAsset(relativePath) {
           findGumsTank(model);
           findGumsStoper(model);
           setupBookCoverImages(model);
+          setupBookLeftPageDecal(model);
+          setupBookRightPageDecal(model);
+          setupTechDesignerMagnetDecal(model);
+          applyPlant1GreenMaterial(model);
+          setupPlant1LeafSprites(model);
           try {
             model.updateMatrixWorld(true);
             if (tablePlateMesh && !tablePlateBody) {
@@ -7182,6 +8528,7 @@ function officeAsset(relativePath) {
           applyScreenLightsMaterial(model);
           applyPenMaterials(model);
           applyDuckMaterials(model);
+          applyHeadphonesMaterials(model);
           setupEyeTracking(model);
           applyGumsTankMaterial(model);
           applyGumsPlasticMaterials(model);
@@ -7221,9 +8568,15 @@ function officeAsset(relativePath) {
           if (_propMeshes["mainScreensPin"]) _propMeshes["mainScreensPin"].visible = true;
           if (_propMeshes["mainScreensBase"]) _propMeshes["mainScreensBase"].visible = true;
           try {
+            applyConusMaterials(model);
             setupConusPhysics(model);
           } catch (e) {
             console.warn("Conus physics setup failed:", e);
+          }
+          try {
+            setupStarPhysics(model);
+          } catch (e) {
+            console.warn("Star physics setup failed:", e);
           }
           try {
             setupDrawerGroup(model);
@@ -7234,7 +8587,8 @@ function officeAsset(relativePath) {
           const _hideNames = [
             "certifiedBodyPhysic", "GumDispenserAllPhysic", "bottlePhisic",
             "dockingStationPhysic", "plantVasePhysic", "macScreenFramePhysic",
-            "macBodyBasePhysic", "conusPhysic",
+            "macBodyBasePhysic", "conusPhysic1", "conusPhysic2", "conusPhysic3",
+            "starPhysic",
           ];
           [model, scene].forEach((root) => {
             root.traverse((node) => {
@@ -7391,7 +8745,7 @@ function officeAsset(relativePath) {
               tablePlateBody.position.y = tableSurfaceY - 0.25;
             }
             showTablePlateWireframe();
-            const carGltfPath = "./car-game12.gltf";
+            const carGltfPath = "./car-game13.gltf";
             loader.setResourcePath(`${import.meta.env.BASE_URL}office-scene-optimized/`);
             loader.load(
               officeAsset(carGltfPath),
@@ -7583,6 +8937,19 @@ function officeAsset(relativePath) {
                   wheelRR.baseQuat = wheelRR.quaternion.clone();
                 }
 
+                const _wheelCoverPairs = [
+                  ["wheelCoverFl", wheelFL],
+                  ["wheelCoverFr", wheelFR],
+                  ["wheelCoverRl", wheelRL],
+                  ["wheelCoverRr", wheelRR],
+                ];
+                for (const [coverName, wheel] of _wheelCoverPairs) {
+                  const cover = car.getObjectByName(coverName);
+                  if (cover && wheel) {
+                    wheel.attach(cover);
+                  }
+                }
+
                 _quatAirInDrive.setFromAxisAngle(_axisAirInDrive, -Math.PI / 2);
                 airInParts = ["airIn1", "airIn2", "airIn3"]
                   .map((name) => car.getObjectByName(name))
@@ -7643,19 +9010,8 @@ function officeAsset(relativePath) {
                   car.quaternion.identity();
                 }
                 car.updateMatrixWorld(true);
-                const _carBox = new THREE.Box3().setFromObject(car);
-                carBottomOffsetY = Math.max(0, spawnSurfaceY - _carBox.min.y);
-                carWheelBottomOffsetY = carBottomOffsetY;
-                tableMinY = tableTopY + Math.max(0.05, carBottomOffsetY * 0.5);
-                tableSpawn.set(
-                  spawnX,
-                  spawnSurfaceY + carBottomOffsetY,
-                  spawnZ,
-                );
-                car.position.copy(tableSpawn);
-                storedCarScale = carScale;
 
-                car.updateMatrixWorld(true);
+                storedCarScale = carScale;
                 const _ws = new THREE.Vector3();
                 const canonWheelPairs = [
                   { canon: canonFL, wheel: wheelFL, ref: "FL" },
@@ -7712,6 +9068,51 @@ function officeAsset(relativePath) {
                   else if (entry.ref === "FR") canonFRBody = body;
                   else if (entry.ref === "RL") canonRLBody = body;
                   else if (entry.ref === "RR") canonRRBody = body;
+                }
+
+                {
+                  car.updateMatrixWorld(true);
+                  const _carBoxGround = new THREE.Box3().setFromObject(car);
+                  let refGroundY = _carBoxGround.min.y;
+                  let _wheelTreadMinY = Infinity;
+                  for (const w of [wheelFL, wheelFR, wheelRL, wheelRR]) {
+                    if (!w || !w._canonMesh || !w._physRadius) continue;
+                    w._canonMesh.getWorldPosition(_canonWorldPos);
+                    const treadY = _canonWorldPos.y - w._physRadius;
+                    _wheelTreadMinY = Math.min(_wheelTreadMinY, treadY);
+                  }
+                  if (Number.isFinite(_wheelTreadMinY)) {
+                    refGroundY = _wheelTreadMinY;
+                  }
+                  carBottomOffsetY = Math.max(0, spawnSurfaceY - refGroundY);
+                  carWheelBottomOffsetY = carBottomOffsetY;
+                  tableMinY = tableTopY + Math.max(0.05, carBottomOffsetY * 0.5);
+                  tableSpawn.set(
+                    spawnX,
+                    spawnSurfaceY + carBottomOffsetY,
+                    spawnZ,
+                  );
+                  car.position.copy(tableSpawn);
+                  car.updateMatrixWorld(true);
+                  for (const w of [wheelFL, wheelFR, wheelRL, wheelRR]) {
+                    const b = w?.physBody;
+                    const m = w?._canonMesh;
+                    if (!b || !m) continue;
+                    m.getWorldPosition(_canonWorldPos);
+                    m.getWorldQuaternion(_canonWorldQuat);
+                    b.position.set(
+                      _canonWorldPos.x,
+                      _canonWorldPos.y,
+                      _canonWorldPos.z,
+                    );
+                    b.quaternion.set(
+                      _canonWorldQuat.x,
+                      _canonWorldQuat.y,
+                      _canonWorldQuat.z,
+                      _canonWorldQuat.w,
+                    );
+                    b.aabbNeedsUpdate = true;
+                  }
                 }
 
                 canonBodyMesh = car.getObjectByName("canon-body") || null;
@@ -7867,13 +9268,16 @@ function officeAsset(relativePath) {
               configureOrbitControlsForCarView(carCamera);
             }
             syncCarCameraYawTracking();
+          } else if (camera === freeCamera) {
+            /* keep free-camera orbit target */
           } else controls.target.copy(center);
           applyTextureAnisotropyToRoot(model);
+          setupPlantGroundTexture(model);
           scheduleRebuildBloomDarkenLists();
         },
         undefined,
         (err) => {
-          console.error("[office] office-table-embed65.gltf failed to load:", err);
+          console.error("[office] office-table-embed75.gltf failed to load:", err);
         },
       );
 
@@ -8076,7 +9480,7 @@ function officeAsset(relativePath) {
           if (keys.forward) targetSpeed = carState.maxSpeed;
           if (keys.reverse) {
             if (carState.speed > 0.3) targetSpeed = 0;
-            else targetSpeed = -carState.maxSpeed * 0.5;
+            else targetSpeed = -carState.maxSpeed * (carState.reverseSpeedFactor ?? 0.5);
           }
           if (keys.forward && keys.reverse) targetSpeed = 0;
           if (keys.brake) targetSpeed = 0;
@@ -8165,6 +9569,7 @@ function officeAsset(relativePath) {
           }
         }
         carState.driftAngle = 0;
+
         if (tableSideWallBody && !carFalling) {
           const carR = Math.max(halfW, halfL) * storedCarScale;
           for (let si = 0; si < tableSideWallBody.shapes.length; si++) {
@@ -8194,7 +9599,10 @@ function officeAsset(relativePath) {
         }
         if (!carFalling) {
           const carR = Math.max(halfW, halfL) * storedCarScale;
-          const wRadius = (wheelFL && wheelFL._physRadius) ? wheelFL._physRadius * storedCarScale : WHEEL_RADIUS * storedCarScale;
+          const wRadius =
+            wheelFL && wheelFL._physRadius
+              ? wheelFL._physRadius
+              : WHEEL_RADIUS * storedCarScale;
           const propBodiesToBlock = [
             dockingStationPhysBody, plantVasePhysBody, macScreenFramePhysBody,
             macBodyBasePhysBody, mainScreensPinPhysBody, mainScreensBasePhysBody,
@@ -8282,7 +9690,7 @@ function officeAsset(relativePath) {
             w._canonMesh.getWorldPosition(_wheelSyncWorldPos[wi]);
             const wx = _wheelSyncWorldPos[wi].x;
             const wz = _wheelSyncWorldPos[wi].z;
-            const wr = (w._physRadius || WHEEL_RADIUS) * storedCarScale;
+            const wr = w._physRadius || WHEEL_RADIUS * storedCarScale;
             for (const pb of _propSurf) {
               if (!pb) continue;
               if (pb._noClimb) continue;
@@ -8444,6 +9852,11 @@ function officeAsset(relativePath) {
                 }
               }
             }
+          }
+          {
+            const _wheelRestCap =
+              _carGroundSurfY + carBottomOffsetY + 0.05 * storedCarScale;
+            if (_restOnY > _wheelRestCap) _restOnY = _wheelRestCap;
           }
           const stepClimbing = unevenSurface;
           if (stepClimbing && car.position.y < _restOnY) {
@@ -9037,7 +10450,10 @@ function officeAsset(relativePath) {
           for (let s = 0; s < maxCarSteps && carTimeLeft > 0; s++) {
             const step = Math.min(carDt, carTimeLeft);
             updateCar(step);
-            if (carState.velY !== 0 && jumpInitialVelY > 0.02) {
+            if (
+              carState.velY !== 0 &&
+              (jumpInitialVelY > 0.02 || _rampLeftJumpActive)
+            ) {
               _rampJumpSimAirTime += step;
             }
             carTimeLeft -= step;
@@ -9119,14 +10535,66 @@ function officeAsset(relativePath) {
               wb.velocity.set(cvx, cvy, cvz);
               wb.position.set(_canonWorldPos.x, _canonWorldPos.y, _canonWorldPos.z);
               wb.quaternion.set(_canonWorldQuat.x, _canonWorldQuat.y, _canonWorldQuat.z, _canonWorldQuat.w);
+              const m = w._canonMesh;
+              if (m.geometry) {
+                m.getWorldScale(_wheelPhysScaleSync);
+                m.geometry.computeBoundingBox();
+                const bb = m.geometry.boundingBox;
+                const rawY = bb.max.y - bb.min.y;
+                const rawXZ =
+                  (bb.max.x - bb.min.x + (bb.max.z - bb.min.z)) / 2;
+                const cylHeight = Math.max(0.05, rawY * _wheelPhysScaleSync.y);
+                const cylRadius = (rawXZ * _wheelPhysScaleSync.x) / 2;
+                m._physRadius = cylRadius;
+                m._physHeight = cylHeight;
+                w._physRadius = cylRadius;
+                w._physHeight = cylHeight;
+                const sh = wb.shapes[0];
+                if (sh && sh.radiusTop !== undefined) {
+                  const tol = 1e-3;
+                  if (
+                    Math.abs(sh.radiusTop - cylRadius) > tol ||
+                    Math.abs(sh.height - cylHeight) > tol
+                  ) {
+                    wb.removeShape(sh);
+                    wb.addShape(
+                      new CANNON.Cylinder(
+                        cylRadius,
+                        cylRadius,
+                        cylHeight,
+                        16,
+                      ),
+                    );
+                    wb.updateMassProperties();
+                  }
+                }
+              }
               wb.aabbNeedsUpdate = true;
             }
             if (canonBodyPhys && canonBodyMesh) {
               const cbBox = new THREE.Box3().setFromObject(canonBodyMesh);
+              const cbSize = cbBox.getSize(_carBodyPhysBoxSizeSync);
+              const hx = cbSize.x / 2,
+                hy = cbSize.y / 2,
+                hz = cbSize.z / 2;
               const cbCenter = cbBox.getCenter(_canonWorldPos);
               canonBodyMesh.getWorldQuaternion(_canonWorldQuat);
               canonBodyPhys.position.set(cbCenter.x, cbCenter.y, cbCenter.z);
               canonBodyPhys.quaternion.set(_canonWorldQuat.x, _canonWorldQuat.y, _canonWorldQuat.z, _canonWorldQuat.w);
+              const boxSh = canonBodyPhys.shapes[0];
+              if (boxSh && boxSh.halfExtents) {
+                const he = boxSh.halfExtents;
+                const tol = 1e-4;
+                if (
+                  Math.abs(he.x - hx) > tol ||
+                  Math.abs(he.y - hy) > tol ||
+                  Math.abs(he.z - hz) > tol
+                ) {
+                  he.set(hx, hy, hz);
+                  canonBodyPhys.updateMassProperties();
+                }
+              }
+              canonBodyPhys.aabbNeedsUpdate = true;
             }
             if (car.userData._carPhysWires) {
               for (const { wire, body } of car.userData._carPhysWires) {
@@ -9456,6 +10924,17 @@ function officeAsset(relativePath) {
                 }
               }
             }
+            for (let si = 0; si < _starInstances.length; si++) {
+              const starBody = _starInstances[si]?.physBody;
+              if (!starBody) continue;
+              if (bi !== starBody && bj !== starBody) continue;
+              const other = bi === starBody ? bj : bi;
+              if (!_allCarBodies.includes(other)) continue;
+              if (starBody._frozen) {
+                starBody._frozen = false;
+                starBody.wakeUp();
+              }
+            }
           }
           if (
             rampLeftObject &&
@@ -9678,6 +11157,7 @@ function officeAsset(relativePath) {
             jumpInitialVelY = Math.max(0, carState.velY);
             _rampJumpSimAirTime = 0;
             jumpLaunchUp.copy(carUpLerp);
+            _jumpAirLeanBlend = 0;
             jumpLaunchSpeed = leaveSpeed;
           }
           wasOnRamp = nowOnRamp;
@@ -9711,13 +11191,27 @@ function officeAsset(relativePath) {
               .normalize();
           }
           if (carState.velY !== 0) {
-            const fx = Math.sin(carState.angle + carState.driftAngle);
-            const fz = Math.cos(carState.angle + carState.driftAngle);
-            const hSpeed = Math.max(1, Math.abs(carState.speed));
-            const pitchAngle = Math.atan2(carState.velY, hSpeed * 8);
-            const sinP = Math.sin(pitchAngle);
-            const cosP = Math.cos(pitchAngle);
-            targetUp = new THREE.Vector3(-sinP * fx, cosP, -sinP * fz).normalize();
+            if (!wasInAir) {
+              jumpStartTime = nowSec;
+              jumpLaunchUp.copy(carUpLerp);
+              _jumpAirLeanBlend = 0;
+            }
+            if (jumpInitialVelY > 0.02 || _rampLeftJumpActive) {
+              applyJumpAirForwardTilt(_jumpAirLeanUp, dt);
+              targetUp = _jumpAirLeanUp;
+            } else {
+              const fx = Math.sin(carState.angle + carState.driftAngle);
+              const fz = Math.cos(carState.angle + carState.driftAngle);
+              const hSpeed = Math.max(1, Math.abs(carState.speed));
+              const pitchAngle = Math.atan2(carState.velY, hSpeed * 8);
+              const sinP = Math.sin(pitchAngle);
+              const cosP = Math.cos(pitchAngle);
+              targetUp = new THREE.Vector3(
+                -sinP * fx,
+                cosP,
+                -sinP * fz,
+              ).normalize();
+            }
           }
           if (carState.velY !== 0) wasInAir = true;
           const onGround =
@@ -9745,6 +11239,7 @@ function officeAsset(relativePath) {
             _carCam1MatrixOrbitSettled = false;
             _rampJumpDidSlowMo = false;
             _rampJumpSimAirTime = 0;
+            _jumpAirLeanBlend = 0;
             _jumpFlameWaveLoopActive = false;
             flameEffectsVisible = false;
           }
@@ -9755,20 +11250,33 @@ function officeAsset(relativePath) {
             carOnRampY === null &&
             carState.velY === 0 &&
             _carSurfRange > CAR_STEP_SURF_DELTA_MIN;
-          const airTiltLerp = 5 + 5 * Math.min(1, jumpLaunchSpeed / Math.max(0.01, carState.maxSpeed));
+          const airTiltLerp =
+            jumpInitialVelY > 0.02 || _rampLeftJumpActive
+              ? JUMP_AIR_TILT_LERP
+              : AIR_TILT_LERP_MIN +
+                (AIR_TILT_LERP_MAX - AIR_TILT_LERP_MIN) *
+                  Math.min(1, jumpLaunchSpeed / Math.max(0.01, carState.maxSpeed));
           const groundTiltLerp = inLandingRecovery
             ? LANDING_TILT_LERP
             : onStepTransition
               ? stepTiltLerp
               : rampTiltLerp;
-          if (!justLanded)
-            carUpLerp.lerp(
-              targetUp,
-              Math.min(
-                1,
-                dt * (carState.velY !== 0 ? airTiltLerp : groundTiltLerp),
-              ),
-            );
+          if (!justLanded) {
+            if (
+              carState.velY !== 0 &&
+              (jumpInitialVelY > 0.02 || _rampLeftJumpActive)
+            ) {
+              carUpLerp.copy(_jumpAirLeanUp);
+            } else {
+              carUpLerp.lerp(
+                targetUp,
+                Math.min(
+                  1,
+                  dt * (carState.velY !== 0 ? airTiltLerp : groundTiltLerp),
+                ),
+              );
+            }
+          }
           _quatY.setFromAxisAngle(
             _flatUp,
             carState.angle + carState.driftAngle,
@@ -9781,9 +11289,12 @@ function officeAsset(relativePath) {
           if (tiltAngle < 1e-6) {
             _quatTilt.identity();
           } else {
-            _tiltAxis.set(uz, 0, -ux);
-            if (_tiltAxis.lengthSq() < 1e-12) _tiltAxis.set(1, 0, 0);
-            else _tiltAxis.normalize();
+            _tiltAxis.crossVectors(_flatUp, carUpLerp);
+            if (_tiltAxis.lengthSq() < 1e-12) {
+              _tiltAxis.set(uz, 0, -ux);
+              if (_tiltAxis.lengthSq() < 1e-12) _tiltAxis.set(1, 0, 0);
+            }
+            _tiltAxis.normalize();
             _quatTilt.setFromAxisAngle(_tiltAxis, tiltAngle);
           }
           car.quaternion.copy(_quatTilt).multiply(_quatY);
@@ -10070,6 +11581,9 @@ function officeAsset(relativePath) {
             } else {
               controls.target.copy(car.position);
             }
+          } else if (camera === freeCamera && car) {
+            getCarCameraLookAtPoint(_carMatrixLookAt);
+            controls.target.copy(_carMatrixLookAt);
           }
           if (camera === carCameraFollow) updateCarCameraFollow();
 
@@ -10079,7 +11593,8 @@ function officeAsset(relativePath) {
               bottlePhysBody, certifiedPhysBody, gumDispenserPhysBody,
               dockingStationPhysBody, plantVasePhysBody, macScreenFramePhysBody,
               macBodyBasePhysBody, mainScreensPinPhysBody, mainScreensBasePhysBody,
-              conusPhysBody,
+              ..._conusInstances.map((inst) => inst.physBody),
+              ..._starInstances.map((inst) => inst.physBody),
             ].filter(Boolean);
             for (const b of clampBodies) {
               if (b.type !== CANNON.Body.DYNAMIC && b.type !== CANNON.Body.KINEMATIC) continue;
@@ -10108,7 +11623,7 @@ function officeAsset(relativePath) {
               bottlePhysBody, certifiedPhysBody, gumDispenserPhysBody,
               dockingStationPhysBody, plantVasePhysBody, macScreenFramePhysBody,
               macBodyBasePhysBody, mainScreensPinPhysBody, mainScreensBasePhysBody,
-              conusPhysBody,
+              ..._conusInstances.map((inst) => inst.physBody),
             ].filter(Boolean);
             for (const b of tableClampBodies) {
               if (b.type !== CANNON.Body.DYNAMIC) continue;
@@ -10135,6 +11650,13 @@ function officeAsset(relativePath) {
             syncGumDispenserFromPhysics();
             syncAllPropsFromPhysics();
             syncConusFromPhysics();
+            for (let i = 0; i < _starInstances.length; i++) {
+              const inst = _starInstances[i];
+              const pb = inst?.physBody;
+              if (!pb || pb._frozen) continue;
+              resolveKnockablePropTableInnerBlock(pb);
+            }
+            syncStarFromPhysics();
           }
           const _dispenserMoving = _gumDispenserBecameDynamic && gumDispenserPhysBody && !gumDispenserPhysBody._frozen;
           const _skipGumInstSync =

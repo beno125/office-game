@@ -17,10 +17,17 @@ export default defineConfig({
 
   output: "server",
 
-  // Avoid HMR WebSocket clashing when many old `wix dev` / Vite processes are still running (default 24678).
+  // Vite's WS (HMR / module runner) defaults to port 24678. If that port is taken by an old
+  // `wix dev` / `astro dev` process, the client hangs on "[vite] connecting…" and the page stays white.
+  // Use a high, stable port pair; free 24678 with `lsof -nP -iTCP:24678 -sTCP:LISTEN` + kill if needed.
   vite: {
     server: {
-      hmr: { port: 25778 },
+      hmr: {
+        protocol: "ws",
+        host: "127.0.0.1",
+        port: 58989,
+        clientPort: 58989,
+      },
     },
   },
 });

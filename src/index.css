@@ -19,6 +19,8 @@ body {
 
 .office-scene-root canvas {
   display: block;
+  position: relative;
+  z-index: 0;
 }
 
 /* From legacy office-scene.html — used by officeSceneModule.js */

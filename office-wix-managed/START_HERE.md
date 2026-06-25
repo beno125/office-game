@@ -138,7 +138,7 @@ lsof -nP -iTCP:4321 -sTCP:LISTEN
 
 Then **`kill <pid>`** (or close the terminals that started those dev servers). Start **`npm run dev`** again.
 
-This project sets a custom **HMR port (`25778`)** in `astro.config.mjs` to reduce clashes with the default `24678`.
+This project sets **`vite.server.hmr`** to **`127.0.0.1:58989`** (see `astro.config.mjs`) so Vite does not fight the default **`24678`** port when old dev servers are still running. If the page still hangs on **`[vite] connecting…`**, free **`24678`** anyway: `lsof -nP -iTCP:24678 -sTCP:LISTEN` then **`kill <pid>`**, or run **`npm run dev:astro`** from `office-wix-managed` / **`npm run dev:wix-astro`** from the repo root (plain Astro, no Wix proxy).
 
 **2. `@wix/stores` / optimizeDeps**  
 `@wix/astro` expects **`@wix/stores`** to be installed. It is listed in `package.json`; run **`npm install`** if you see “Failed to resolve dependency: @wix/stores”.
@@ -153,9 +153,10 @@ Use the exact **localhost** URL and port printed after **`npm run dev`** (it cha
 
 ## Starting completely over (wrong site / wrong account)
 
-1. Delete the mistaken site in the **wrong** Wix account (dashboard), if it still exists.
-2. `npx wix logout` → `npx wix login` (correct account).
-3. Delete **`wix.config.json`** and the **`.wix/`** folder in this directory.
-4. Run **step 4** again.
+1. In the **wrong** Wix dashboard, delete or ignore the mistaken site if you no longer need it (optional).
+2. **`npx wix logout`** then **`npx wix login`** — complete sign-in in the browser so the CLI is on the **correct** account.
+3. Ensure **`wix.config.json`** and the **`.wix/`** folder are gone in `office-wix-managed/` (this checkout no longer has **`wix.config.json`** — delete **`.wix/`** too if it appears after a dev run).
+4. Run **step 4** ( **`headless link`** ) again from **`office-wix-managed`** in a real terminal.
+5. Commit the new **`wix.config.json`**. Run **`npm run release`** again — the old **`*.wix-site-host.com`** URL stays on the old account; you get a **new** hosted URL under the correct account.
 
 More detail: [CONNECT_WIX.md](./CONNECT_WIX.md).
