@@ -27,7 +27,13 @@ const animateIdx = lines.findIndex((l) => /^\s*animate\(\);\s*$/.test(l));
 if (animateIdx < 0) {
   throw new Error(`animate() not found in ${htmlPath}`);
 }
-const inner = lines.slice(58, animateIdx + 1).join("\n");
+const moduleImportIdx = lines.findIndex((l) =>
+  /import \* as THREE from "three"/.test(l),
+);
+if (moduleImportIdx < 0) {
+  throw new Error(`THREE import not found in ${htmlPath}`);
+}
+const inner = lines.slice(moduleImportIdx, animateIdx + 1).join("\n");
 
 const marker = `import { RectAreaLightUniformsLib } from "three/addons/lights/RectAreaLightUniformsLib.js";`;
 
@@ -135,9 +141,9 @@ s = s.replace(
 
 s = s.replace(
   `      loader.load(
-        "office-table-embed75.gltf",`,
+        "office-table-embed76.gltf",`,
   `      loader.load(
-        officeAsset("office-table-embed75.gltf"),`,
+        officeAsset("office-table-embed76.gltf"),`,
 );
 
 s = s.replace(

@@ -8,7 +8,7 @@
       * {
         margin: 0;
         padding: 0;
-        box-sizing: border-box; 
+        box-sizing: border-box;
       }
       html,
       body {
@@ -29,7 +29,11 @@
         z-index: 9999;
         padding: 6px 10px;
         border-radius: 6px;
-        font: 11px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace;
+        font:
+          11px/1.35 ui-monospace,
+          SFMono-Regular,
+          Menlo,
+          monospace;
         color: #dce8ff;
         background: rgba(8, 12, 22, 0.72);
         border: 1px solid rgba(120, 160, 255, 0.25);
@@ -140,7 +144,8 @@
       }
 
       function applyCarFollowCameraFromAngles() {
-        if (camera !== carCameraFollow || !car || _carFollowCamDistance < 1e-6) return;
+        if (camera !== carCameraFollow || !car || _carFollowCamDistance < 1e-6)
+          return;
         const worldYaw = clampCarFollowCamWorldYaw(_carFollowCamWorldYaw);
         _carFollowCamWorldYaw = worldYaw;
         const horizDist = _carFollowCamDistance * Math.cos(_carFollowCamElev);
@@ -155,7 +160,10 @@
 
       function configureOrbitControlsForCarView(forCamera) {
         if (forCamera === freeCamera) {
-          controls.minDistance = Math.max(0.12, getCarCameraMinDistance() * 0.22);
+          controls.minDistance = Math.max(
+            0.12,
+            getCarCameraMinDistance() * 0.22,
+          );
           controls.maxDistance = 120;
           controls.enableZoom = true;
           controls.zoomSpeed = 1.15;
@@ -207,8 +215,7 @@
         return (
           car &&
           isCarCameraOrbitDefault() &&
-          (_rampJumpMatrixActive ||
-            (_rampJumpDidSlowMo && carState.velY !== 0))
+          (_rampJumpMatrixActive || (_rampJumpDidSlowMo && carState.velY !== 0))
         );
       }
 
@@ -241,7 +248,8 @@
       }
 
       function syncCarOrbitCamYawFromPosition() {
-        if (!isCarCameraOrbitDefault() || !car || _carOrbitCamDistance < 1e-6) return;
+        if (!isCarCameraOrbitDefault() || !car || _carOrbitCamDistance < 1e-6)
+          return;
         getCarCameraOffsetFromPosition(carCamera, _carCamOffset);
         const horizDist = Math.hypot(_carCamOffset.x, _carCamOffset.z);
         if (horizDist < 1e-6) return;
@@ -251,7 +259,8 @@
       }
 
       function applyCarOrbitCameraFromAngles() {
-        if (!isCarCameraOrbitDefault() || !car || _carOrbitCamDistance < 1e-6) return;
+        if (!isCarCameraOrbitDefault() || !car || _carOrbitCamDistance < 1e-6)
+          return;
         if (isCarCameraJumpEffectActive()) return;
         const worldYaw = clampCarFollowCamWorldYaw(_carOrbitCamWorldYaw);
         _carOrbitCamWorldYaw = worldYaw;
@@ -362,7 +371,8 @@
       }
 
       function updateCarCam1MatrixReturn(rawDt) {
-        if (!_carCam1MatrixReturnActive || camera !== carCamera || !car) return false;
+        if (!_carCam1MatrixReturnActive || camera !== carCamera || !car)
+          return false;
         _carCam1MatrixReturnT = Math.min(
           1,
           _carCam1MatrixReturnT + rawDt * CAR_CAM_MATRIX_RETURN_SPEED,
@@ -413,9 +423,7 @@
             _rampJumpMatrixOrbitProgress *
             (3 - 2 * _rampJumpMatrixOrbitProgress);
           const orbitAngle =
-            _rampJumpMatrixOrbitSign *
-            RAMP_JUMP_MATRIX_ORBIT *
-            rotEase;
+            _rampJumpMatrixOrbitSign * RAMP_JUMP_MATRIX_ORBIT * rotEase;
           buildMatrixOrbitCameraOffset(orbitAngle, orbitDist);
           _carCamOffset.add(
             applyRampJumpMatrixCameraDrift(
@@ -489,11 +497,7 @@
         );
         const minDist = getCarCameraMinDistance();
         const targetDist = Math.max(
-          THREE.MathUtils.lerp(
-            restDist,
-            restDist * zoomT,
-            _carCam1JumpEffect,
-          ),
+          THREE.MathUtils.lerp(restDist, restDist * zoomT, _carCam1JumpEffect),
           minDist,
         );
         _carCamOffset.multiplyScalar(targetDist / dist);
@@ -551,7 +555,11 @@
       }
 
       function rollRampJumpMatrixCameraStyle() {
-        _rampJumpMatrixPitchBias = THREE.MathUtils.lerp(0.06, 0.28, Math.random());
+        _rampJumpMatrixPitchBias = THREE.MathUtils.lerp(
+          0.06,
+          0.28,
+          Math.random(),
+        );
         _rampJumpMatrixAzimuthBias = (Math.random() - 0.5) * 0.85;
         _rampJumpMatrixSideBias = (Math.random() - 0.5) * 0.48;
         _rampJumpMatrixOrbitSign = Math.random() < 0.5 ? -1 : 1;
@@ -579,7 +587,9 @@
 
       function applyRampJumpMatrixCameraDrift(orbitProgress, dist) {
         const arc = Math.sin(Math.PI * orbitProgress);
-        const spin = Math.sin(orbitProgress * Math.PI * 4 + _rampJumpSlowMoDriftPhase);
+        const spin = Math.sin(
+          orbitProgress * Math.PI * 4 + _rampJumpSlowMoDriftPhase,
+        );
         const k = dist * RAMP_JUMP_MATRIX_DRIFT_SCALE;
         const maxDown = dist * RAMP_JUMP_CAM_MAX_DOWN_DRIFT_FRAC;
         _rampJumpCamDriftOffset.set(
@@ -681,7 +691,10 @@
 
       function captureRampJumpMatrixCameraBasis() {
         const minOrbit = getCarMatrixOrbitMinDistance();
-        _carMatrixOrbitDist = Math.max(_rampJumpCamRestOffset.length(), minOrbit);
+        _carMatrixOrbitDist = Math.max(
+          _rampJumpCamRestOffset.length(),
+          minOrbit,
+        );
         _carCamOffset.copy(_rampJumpCamRestOffset);
         const horizLen = Math.hypot(_carCamOffset.x, _carCamOffset.z);
         _rampJumpMatrixHorizDist = Math.max(horizLen, minOrbit * 0.85);
@@ -717,12 +730,9 @@
 
       function getRampJumpAirProgress() {
         if (jumpInitialVelY <= 0.02) return 0;
-        const totalAirTime = (2 * jumpInitialVelY) / Math.max(0.01, CAR_GRAVITY);
-        return THREE.MathUtils.clamp(
-          _rampJumpSimAirTime / totalAirTime,
-          0,
-          1,
-        );
+        const totalAirTime =
+          (2 * jumpInitialVelY) / Math.max(0.01, CAR_GRAVITY);
+        return THREE.MathUtils.clamp(_rampJumpSimAirTime / totalAirTime, 0, 1);
       }
 
       function getRampJumpMatrixOrbitProgress() {
@@ -739,8 +749,7 @@
 
       function getRampJumpSlowMoScale() {
         if (!_rampJumpDidSlowMo || !isCarCameraOrbitDefault()) return 1;
-        const matrixHang =
-          _rampJumpMatrixActive && carState.velY !== 0;
+        const matrixHang = _rampJumpMatrixActive && carState.velY !== 0;
         const effectiveBlend = matrixHang
           ? Math.max(_rampJumpFxBlend, 0.85)
           : _rampJumpFxBlend;
@@ -906,9 +915,7 @@
 
       function getScreenPixelCount() {
         const dpr = window.devicePixelRatio || 1;
-        return Math.round(
-          window.innerWidth * window.innerHeight * dpr * dpr,
-        );
+        return Math.round(window.innerWidth * window.innerHeight * dpr * dpr);
       }
 
       function useVisualParity() {
@@ -1063,9 +1070,8 @@
           /Intel|UHD|Iris|Mali|Adreno 5|Adreno 6[0-3]|Powervr/i.test(gpu);
         const isAppleSilicon =
           /Apple M/i.test(gpu) || (/Mac/i.test(ua) && /Apple/i.test(gpu));
-        const isDiscreteGpu = /NVIDIA|GeForce|RTX|GTX|Radeon RX|AMD Radeon/i.test(
-          gpu,
-        );
+        const isDiscreteGpu =
+          /NVIDIA|GeForce|RTX|GTX|Radeon RX|AMD Radeon/i.test(gpu);
 
         let score = 52;
         if (isMobile && !isTablet) score -= 28;
@@ -1234,12 +1240,16 @@
           if (typeof carShadowLight !== "undefined") {
             carShadowLight.castShadow = s.shadows;
             if (s.shadows && s.shadowMapSize > 0) {
-              carShadowLight.shadow.mapSize.set(s.shadowMapSize, s.shadowMapSize);
+              carShadowLight.shadow.mapSize.set(
+                s.shadowMapSize,
+                s.shadowMapSize,
+              );
               carShadowLight.shadow.radius = s.shadowMapSize >= 512 ? 4 : 2;
             }
           }
           if (typeof smaaPass !== "undefined") smaaPass.enabled = s.smaa;
-          if (typeof sharpenPass !== "undefined") sharpenPass.enabled = s.sharpen;
+          if (typeof sharpenPass !== "undefined")
+            sharpenPass.enabled = s.sharpen;
           sceneBloomEnabled = s.bloom;
         }
         if (physicsWorld) {
@@ -1319,7 +1329,9 @@
 
       const carLightsBloomLayer = new THREE.Layers();
       carLightsBloomLayer.set(CAR_LIGHTS_BLOOM_LAYER);
-      const darkBloomMaterial = new THREE.MeshBasicMaterial({ color: 0x000000 });
+      const darkBloomMaterial = new THREE.MeshBasicMaterial({
+        color: 0x000000,
+      });
       const darkBloomPointsMaterial = new THREE.PointsMaterial({
         color: 0x000000,
         size: 0.001,
@@ -1622,7 +1634,11 @@
           for (let mi = 0; mi < mats.length; mi++) {
             const m = mats[mi];
             if (!m) continue;
-            for (let ki = 0; ki < TEXTURE_MAP_KEYS_FOR_ANISOTROPY.length; ki++) {
+            for (
+              let ki = 0;
+              ki < TEXTURE_MAP_KEYS_FOR_ANISOTROPY.length;
+              ki++
+            ) {
               const t = m[TEXTURE_MAP_KEYS_FOR_ANISOTROPY[ki]];
               if (t && t.isTexture) t.anisotropy = maxA;
             }
@@ -1669,58 +1685,6 @@
       }
       let controls = createOrbitControls(camera);
       controls.target.set(0, 0, 0);
-
-      function createAxisTextSprite(text, hexColor) {
-        const canvas = document.createElement("canvas");
-        const ctx = canvas.getContext("2d");
-        const s = 128;
-        canvas.width = s;
-        canvas.height = s;
-        ctx.clearRect(0, 0, s, s);
-        ctx.font = "bold 88px system-ui, sans-serif";
-        ctx.fillStyle = hexColor;
-        ctx.textAlign = "center";
-        ctx.textBaseline = "middle";
-        ctx.fillText(text, s / 2, s / 2);
-        const map = new THREE.CanvasTexture(canvas);
-        map.colorSpace = THREE.SRGBColorSpace;
-        map.needsUpdate = true;
-        const mat = new THREE.SpriteMaterial({
-          map,
-          depthTest: false,
-          transparent: true,
-          opacity: 0.95,
-        });
-        const sprite = new THREE.Sprite(mat);
-        sprite.scale.setScalar(0.55);
-        sprite.renderOrder = 1000;
-        return sprite;
-      }
-
-      const axisLen = 3;
-      const visualXYZ = new THREE.Group();
-      visualXYZ.name = "visualXYZ";
-      const axes = new THREE.AxesHelper(axisLen);
-      axes.traverse((o) => {
-        if (o.material) {
-          o.material.depthTest = false;
-          o.material.transparent = true;
-          o.material.opacity = 0.9;
-        }
-      });
-      axes.renderOrder = 999;
-      visualXYZ.add(axes);
-      const labelGap = 0.25;
-      const sx = createAxisTextSprite("X", "#ff3333");
-      sx.position.set(axisLen + labelGap, 0, 0);
-      visualXYZ.add(sx);
-      const sy = createAxisTextSprite("Y", "#44ff44");
-      sy.position.set(0, axisLen + labelGap, 0);
-      visualXYZ.add(sy);
-      const sz = createAxisTextSprite("Z", "#4488ff");
-      sz.position.set(0, 0, axisLen + labelGap);
-      visualXYZ.add(sz);
-      scene.add(visualXYZ);
 
       // Lights + windowTris: one blend (lightBlend, 0→1) drives both.
       // Dark / “blinds closed”: lightBlend → 0 (Key O) — tilted tris, darker scene.
@@ -1815,7 +1779,9 @@
             darkMode[k] = v;
           }
         }
-        try { applyLightBlend(lightBlend); } catch (e) {}
+        try {
+          applyLightBlend(lightBlend);
+        } catch (e) {}
       }
       // Lights that should ONLY appear in dark mode (intensity = baseIntensity * (1-lightBlend)).
       const _darkModeOnlyLights = [];
@@ -1969,8 +1935,7 @@
           ml.visible = ml.intensity > 0.001;
           if (entry.darkAngle != null && entry.brightAngle != null) {
             ml.angle =
-              entry.darkAngle +
-              (entry.brightAngle - entry.darkAngle) * b;
+              entry.darkAngle + (entry.brightAngle - entry.darkAngle) * b;
           }
           if (entry.darkPenumbra != null && entry.brightPenumbra != null) {
             ml.penumbra =
@@ -2034,7 +1999,8 @@
         if (e.code === "KeyC") {
           e.preventDefault();
           let nextCam;
-          if (camera === carCamera || camera === carCameraFollow) nextCam = testCamera;
+          if (camera === carCamera || camera === carCameraFollow)
+            nextCam = testCamera;
           else if (camera === gumsTankCamera) nextCam = testCamera;
           else if (camera === freeCamera) nextCam = carCamera;
           else nextCam = carCamera;
@@ -2054,7 +2020,8 @@
             } else {
               controls.target.copy(car.position);
             }
-            if (camera === carCameraFollow) syncCarFollowCamAnglesFromPosition(camera);
+            if (camera === carCameraFollow)
+              syncCarFollowCamAnglesFromPosition(camera);
             configureOrbitControlsForCarView(camera);
             syncCarCameraYawTracking();
           } else controls.target.set(0, 0, 0);
@@ -2168,7 +2135,9 @@
       let carWheelBox = null;
       let carWheelBoxPhys = null;
       let bottleGroup = null;
-      let bottleBodyMesh = null, bottleBaseMesh = null, bottleCupMesh = null;
+      let bottleBodyMesh = null,
+        bottleBaseMesh = null,
+        bottleCupMesh = null;
       let bottlePhisicMesh = null;
       let bottlePhysBody = null;
       let certifiedGroup = null;
@@ -2292,7 +2261,8 @@
       let tableSpawn = new THREE.Vector3(0, 0, 0);
       let tableMinY = 0;
       let tableSurfaceY = 0;
-      let tablePlateHalfX = Infinity, tablePlateHalfZ = Infinity;
+      let tablePlateHalfX = Infinity,
+        tablePlateHalfZ = Infinity;
       let tablePlateCenter = new THREE.Vector3();
       let _currentWorldModel = null;
       let _officeWorldRoot = null;
@@ -2310,7 +2280,9 @@
           console.warn("Office ArmatureAction clip not found in GLTF");
           return;
         }
-        _officeArmatureAction = _officeAnimMixer.clipAction(_officeAnimClips[0]);
+        _officeArmatureAction = _officeAnimMixer.clipAction(
+          _officeAnimClips[0],
+        );
       }
 
       function resetOfficeArmatureBindPose() {
@@ -2390,13 +2362,21 @@
         const ease = t * t * (3 - 2 * t);
         const zOut = _handWalkRestPos.z + HAND_WALK_Z_OFFSET;
         if (_handWalkZPhase === 1) {
-          handWalkPart.position.z = THREE.MathUtils.lerp(_handWalkRestPos.z, zOut, ease);
+          handWalkPart.position.z = THREE.MathUtils.lerp(
+            _handWalkRestPos.z,
+            zOut,
+            ease,
+          );
           if (t >= 1) {
             _handWalkZPhase = 2;
             _handWalkZMoveT = 0;
           }
         } else if (_handWalkZPhase === 2) {
-          handWalkPart.position.z = THREE.MathUtils.lerp(zOut, _handWalkRestPos.z, ease);
+          handWalkPart.position.z = THREE.MathUtils.lerp(
+            zOut,
+            _handWalkRestPos.z,
+            ease,
+          );
           if (t >= 1) {
             handWalkPart.position.z = _handWalkRestPos.z;
             _handWalkZPhase = 0;
@@ -2478,7 +2458,6 @@
         updateHandWalkZMove(dt);
       }
 
-
       let carFalling = false;
       let carFloorTimer = 0;
       let tablePlateMesh = null;
@@ -2544,12 +2523,11 @@
         if (!_cupSlideActive || !gumsTankCupBody) return;
         const elapsed = performance.now() - _cupSlideStart;
         const t = Math.min(elapsed / CUP_SLIDE_DURATION, 1);
-        const ease = t < 0.5
-          ? 2 * t * t
-          : 1 - 2 * (1 - t) * (1 - t);
-        const offset = ease < 0.5
-          ? CUP_SLIDE_DISTANCE * (ease * 2)
-          : CUP_SLIDE_DISTANCE * (2 - ease * 2);
+        const ease = t < 0.5 ? 2 * t * t : 1 - 2 * (1 - t) * (1 - t);
+        const offset =
+          ease < 0.5
+            ? CUP_SLIDE_DISTANCE * (ease * 2)
+            : CUP_SLIDE_DISTANCE * (2 - ease * 2);
         gumsTankCupBody.position.x = _cupOrigX + offset;
         if (t >= 1) {
           gumsTankCupBody.position.x = _cupOrigX;
@@ -2559,7 +2537,10 @@
 
       function _releaseGumBatch() {
         if (_gumReleaseIdx < 0) return;
-        const end = Math.min(_gumReleaseIdx + GUM_RELEASE_BATCH, gumsAddedCount);
+        const end = Math.min(
+          _gumReleaseIdx + GUM_RELEASE_BATCH,
+          gumsAddedCount,
+        );
         for (let i = _gumReleaseIdx; i < end; i++) {
           const b = gumBodies[i];
           gumReleased.add(i);
@@ -2714,8 +2695,7 @@
                   angMax = Math.max(angMax, a);
                 }
                 const angSpan = angMax - angMin;
-                const useArcU =
-                  angSpan > 0.5 && angSpan <= Math.PI * 2.05;
+                const useArcU = angSpan > 0.5 && angSpan <= Math.PI * 2.05;
                 const iw = tex.image.width;
                 const ih = tex.image.height;
                 const imgAspect = iw > 0 && ih > 0 ? iw / ih : 1;
@@ -2824,7 +2804,15 @@
               const bright = 40 + Math.floor(Math.random() * 80);
               fCtx.fillStyle = `rgba(${bright},${bright - 5},${bright - 10},${0.4 + Math.random() * 0.5})`;
               fCtx.beginPath();
-              fCtx.ellipse(x, y, r, r * (0.6 + Math.random() * 0.8), Math.random() * Math.PI, 0, Math.PI * 2);
+              fCtx.ellipse(
+                x,
+                y,
+                r,
+                r * (0.6 + Math.random() * 0.8),
+                Math.random() * Math.PI,
+                0,
+                Math.PI * 2,
+              );
               fCtx.fill();
             }
             for (let i = 0; i < 400; i++) {
@@ -3144,7 +3132,8 @@
           const parentName = (node.parent && node.parent.name) || "";
           if (name === "tableSideWall" || parentName === "tableSideWall") {
             if (Array.isArray(node.material)) {
-              for (let i = 0; i < node.material.length; i++) node.material[i] = tableSideWallMaterial;
+              for (let i = 0; i < node.material.length; i++)
+                node.material[i] = tableSideWallMaterial;
             } else {
               node.material = tableSideWallMaterial;
             }
@@ -3744,12 +3733,16 @@
         }),
       );
       physicsWorld.addContactMaterial(
-        new CANNON.ContactMaterial(certifiedMaterial, tablePlatePhysicsMaterial, {
-          friction: 0.8,
-          restitution: 0.02,
-          contactEquationStiffness: 1e7,
-          contactEquationRelaxation: 3,
-        }),
+        new CANNON.ContactMaterial(
+          certifiedMaterial,
+          tablePlatePhysicsMaterial,
+          {
+            friction: 0.8,
+            restitution: 0.02,
+            contactEquationStiffness: 1e7,
+            contactEquationRelaxation: 3,
+          },
+        ),
       );
       physicsWorld.addContactMaterial(
         new CANNON.ContactMaterial(certifiedMaterial, carMaterial, {
@@ -3776,12 +3769,16 @@
         }),
       );
       physicsWorld.addContactMaterial(
-        new CANNON.ContactMaterial(gumDispenserMaterial, tablePlatePhysicsMaterial, {
-          friction: 0.6,
-          restitution: 0.02,
-          contactEquationStiffness: 1e9,
-          contactEquationRelaxation: 3,
-        }),
+        new CANNON.ContactMaterial(
+          gumDispenserMaterial,
+          tablePlatePhysicsMaterial,
+          {
+            friction: 0.6,
+            restitution: 0.02,
+            contactEquationStiffness: 1e9,
+            contactEquationRelaxation: 3,
+          },
+        ),
       );
       physicsWorld.addContactMaterial(
         new CANNON.ContactMaterial(gumDispenserMaterial, carMaterial, {
@@ -4028,10 +4025,8 @@
             gumsTankPhysicCupObject = node;
           if (!gumsBodyObject && raw === "gumsBodyPhysic")
             gumsBodyObject = node;
-          if (!gumsStandObject && raw === "gumsStand")
-            gumsStandObject = node;
-          if (!gumsRampObject && raw === "gumsRamp")
-            gumsRampObject = node;
+          if (!gumsStandObject && raw === "gumsStand") gumsStandObject = node;
+          if (!gumsRampObject && raw === "gumsRamp") gumsRampObject = node;
         });
       }
 
@@ -4107,7 +4102,12 @@
         scene.add(bottleGroup);
         bottleGroup.updateMatrixWorld(true);
 
-        const parts = [bottleBodyMesh, bottleBaseMesh, bottleCupMesh, bottlePhisicMesh].filter(Boolean);
+        const parts = [
+          bottleBodyMesh,
+          bottleBaseMesh,
+          bottleCupMesh,
+          bottlePhisicMesh,
+        ].filter(Boolean);
         for (const mesh of parts) {
           bottleGroup.attach(mesh);
         }
@@ -4137,11 +4137,15 @@
         physicsWorld.addBody(bottlePhysBody);
 
         _bottleInitPos = new CANNON.Vec3(phCenter.x, phCenter.y, phCenter.z);
-        _bottleInitQuat = new CANNON.Quaternion(phQuat.x, phQuat.y, phQuat.z, phQuat.w);
+        _bottleInitQuat = new CANNON.Quaternion(
+          phQuat.x,
+          phQuat.y,
+          phQuat.z,
+          phQuat.w,
+        );
       }
 
-      function showTablePlateWireframe() {
-      }
+      function showTablePlateWireframe() {}
 
       function setupFloorPhysics(model) {
         let floorMesh = null;
@@ -4164,7 +4168,7 @@
           collisionFilterMask: -1,
         });
         floorPhysBody.addShape(
-          new CANNON.Box(new CANNON.Vec3(size.x / 2, hy, size.z / 2))
+          new CANNON.Box(new CANNON.Vec3(size.x / 2, hy, size.z / 2)),
         );
         physicsWorld.addBody(floorPhysBody);
       }
@@ -4191,7 +4195,11 @@
           const center = bb.getCenter(new THREE.Vector3());
           const size = bb.getSize(new THREE.Vector3());
           if (size.x < 0.001 || size.y < 0.001 || size.z < 0.001) return;
-          const halfExtents = new CANNON.Vec3(size.x / 2, size.y / 2, size.z / 2);
+          const halfExtents = new CANNON.Vec3(
+            size.x / 2,
+            size.y / 2,
+            size.z / 2,
+          );
           const offset = new CANNON.Vec3(center.x, center.y, center.z);
           tableSideWallBody.addShape(new CANNON.Box(halfExtents), offset);
           shapeCount++;
@@ -4205,7 +4213,8 @@
         handNode0Mesh = null;
         handWalkPart = model.getObjectByName("handWalk") || null;
         model.traverse((node) => {
-          if (node.isMesh && node.name === "handPhisics") handPhisicsMesh = node;
+          if (node.isMesh && node.name === "handPhisics")
+            handPhisicsMesh = node;
           if (node.isMesh && node.name === "node_0") handNode0Mesh = node;
           if (node.isMesh && node.name === "handWalkTrigger") {
             handWalkTriggerMesh = node;
@@ -4224,7 +4233,9 @@
           const attachBone =
             handNode0Mesh.skeleton.bones.find((b) => b.name === "Bone.014") ||
             handNode0Mesh.skeleton.bones.find((b) => b.name === "Bone.012") ||
-            handNode0Mesh.skeleton.bones[handNode0Mesh.skeleton.bones.length - 1];
+            handNode0Mesh.skeleton.bones[
+              handNode0Mesh.skeleton.bones.length - 1
+            ];
           if (attachBone) attachBone.attach(handPhisicsMesh);
         }
 
@@ -4241,12 +4252,9 @@
         }
         const nV = verts.length / 3;
         if (nV < 3) return;
-        const cx =
-          verts.reduce((s, v, i) => (i % 3 === 0 ? s + v : s), 0) / nV;
-        const cy =
-          verts.reduce((s, v, i) => (i % 3 === 1 ? s + v : s), 0) / nV;
-        const cz =
-          verts.reduce((s, v, i) => (i % 3 === 2 ? s + v : s), 0) / nV;
+        const cx = verts.reduce((s, v, i) => (i % 3 === 0 ? s + v : s), 0) / nV;
+        const cy = verts.reduce((s, v, i) => (i % 3 === 1 ? s + v : s), 0) / nV;
+        const cz = verts.reduce((s, v, i) => (i % 3 === 2 ? s + v : s), 0) / nV;
         for (let i = 0; i < verts.length; i += 3) {
           verts[i] -= cx;
           verts[i + 1] -= cy;
@@ -4323,7 +4331,8 @@
         const dz = car.position.z - _v0.z;
 
         if (Math.abs(dy) >= heY + carR) return false;
-        if (Math.abs(dx) >= heX + carR || Math.abs(dz) >= heZ + carR) return false;
+        if (Math.abs(dx) >= heX + carR || Math.abs(dz) >= heZ + carR)
+          return false;
 
         const overlapX = heX + carR - Math.abs(dx);
         const overlapZ = heZ + carR - Math.abs(dz);
@@ -4362,8 +4371,12 @@
       }
 
       const CERTIFIED_PART_NAMES = [
-        "certifiedBody", "certifiedDesignText", "certifiedTitle",
-        "cetifiedCircle", "cetifiedBackground", "wixLogo",
+        "certifiedBody",
+        "certifiedDesignText",
+        "certifiedTitle",
+        "cetifiedCircle",
+        "cetifiedBackground",
+        "wixLogo",
       ];
 
       function setupCertifiedPhysics(model) {
@@ -4415,12 +4428,22 @@
         });
         certifiedPhysBody.addShape(shape);
         certifiedPhysBody.position.set(phCenter.x, phCenter.y, phCenter.z);
-        certifiedPhysBody.quaternion.set(phQuat.x, phQuat.y, phQuat.z, phQuat.w);
+        certifiedPhysBody.quaternion.set(
+          phQuat.x,
+          phQuat.y,
+          phQuat.z,
+          phQuat.w,
+        );
         certifiedPhysBody._frozen = true;
         physicsWorld.addBody(certifiedPhysBody);
 
         _certifiedInitPos = new CANNON.Vec3(phCenter.x, phCenter.y, phCenter.z);
-        _certifiedInitQuat = new CANNON.Quaternion(phQuat.x, phQuat.y, phQuat.z, phQuat.w);
+        _certifiedInitQuat = new CANNON.Quaternion(
+          phQuat.x,
+          phQuat.y,
+          phQuat.z,
+          phQuat.w,
+        );
 
         certifiedPhysBody.addEventListener("collide", (e) => {
           if (!certifiedPhysBody._frozen) return;
@@ -4559,7 +4582,8 @@
         model.traverse((node) => {
           if (!node.isMesh) return;
           if (node.name === "starPhysic") physicMesh = node;
-          if (STAR_VISUAL_PART_NAMES.includes(node.name)) visualParts.push(node);
+          if (STAR_VISUAL_PART_NAMES.includes(node.name))
+            visualParts.push(node);
         });
         if (!physicMesh) return;
 
@@ -4567,13 +4591,18 @@
 
         const phBB = new THREE.Box3().setFromObject(physicMesh);
         const phCenter = phBB.getCenter(new THREE.Vector3());
-        const phSize = phBB.getSize(new THREE.Vector3());
+        const phQuat = new THREE.Quaternion();
+        physicMesh.getWorldQuaternion(phQuat);
+
+        physicMesh.geometry.computeBoundingBox();
+        const geoBB = physicMesh.geometry.boundingBox;
+        const localSize = new THREE.Vector3().subVectors(geoBB.max, geoBB.min);
+        const worldScale = new THREE.Vector3();
+        physicMesh.getWorldScale(worldScale);
 
         const starGroup = new THREE.Group();
         starGroup.name = "starGroup";
         starGroup.position.copy(phCenter);
-        const phQuat = new THREE.Quaternion();
-        physicMesh.getWorldQuaternion(phQuat);
         starGroup.quaternion.copy(phQuat);
         scene.add(starGroup);
         starGroup.updateMatrixWorld(true);
@@ -4584,53 +4613,90 @@
         starGroup.attach(physicMesh);
         physicMesh.visible = false;
 
-        const hx = phSize.x / 2;
-        const hy = phSize.y / 2;
-        const hz = phSize.z / 2;
+        const hx = (localSize.x / 2) * Math.abs(worldScale.x);
+        const hy = (localSize.y / 2) * Math.abs(worldScale.y);
+        const hz = (localSize.z / 2) * Math.abs(worldScale.z);
         const shape = new CANNON.Box(new CANNON.Vec3(hx, hy, hz));
         const starPhysBody = new CANNON.Body({
-          mass: 0.32,
+          mass: 0.15,
           material: propMaterial,
-          linearDamping: 0.72,
-          angularDamping: 0.78,
-          allowSleep: true,
-          sleepSpeedLimit: 0.12,
-          sleepTimeLimit: 0.35,
+          linearDamping: 0.6,
+          angularDamping: 0.6,
+          allowSleep: false,
           collisionFilterGroup: 1,
           collisionFilterMask: -1,
+          ccdSpeedThreshold: 1,
+          ccdIterations: 10,
         });
         starPhysBody.addShape(shape);
         starPhysBody.position.set(phCenter.x, phCenter.y, phCenter.z);
         starPhysBody.quaternion.set(phQuat.x, phQuat.y, phQuat.z, phQuat.w);
-        placeOrientedBodyOnTableTop(starPhysBody);
-        starPhysBody._frozen = true;
         physicsWorld.addBody(starPhysBody);
-        const initPos = new CANNON.Vec3(
-          starPhysBody.position.x,
-          starPhysBody.position.y,
-          starPhysBody.position.z,
-        );
-        const initQuat = new CANNON.Quaternion(
-          starPhysBody.quaternion.x,
-          starPhysBody.quaternion.y,
-          starPhysBody.quaternion.z,
-          starPhysBody.quaternion.w,
-        );
-        _starInstances.push({
-          group: starGroup,
-          physBody: starPhysBody,
-          initPos,
-          initQuat,
-        });
+        _starInstances.push({ group: starGroup, physBody: starPhysBody });
         syncStarFromPhysics();
-        starGroup.updateMatrixWorld(true);
-        const visBB = new THREE.Box3().setFromObject(starGroup);
-        const tableTop = getTableSurfaceY();
-        if (!visBB.isEmpty() && tableTop != null) {
-          const visLift = tableTop + 0.02 - visBB.min.y;
-          if (visLift > 0.001) {
-            starPhysBody.position.y += visLift;
-            initPos.copy(starPhysBody.position);
+      }
+
+      function placeStarOnTable(inst, clearance = 0.018) {
+        const body = inst?.physBody;
+        const group = inst?.group;
+        if (!body || !group) return;
+        const tableTop = getTableTopY();
+        if (tableTop == null) return;
+        const floorY = tableTop + clearance;
+
+        placeOrientedBodyOnTableTop(body, clearance);
+        syncStarFromPhysics();
+        group.updateMatrixWorld(true);
+        const visBB = new THREE.Box3().setFromObject(group);
+        if (!visBB.isEmpty() && visBB.min.y < floorY) {
+          body.position.y += floorY - visBB.min.y;
+        }
+        syncStarFromPhysics();
+      }
+
+      function clampStarOnTable(inst, clearance = 0.018) {
+        const body = inst?.physBody;
+        const group = inst?.group;
+        if (!body || !group || !tablePlateBody) return;
+        if (body.type !== CANNON.Body.DYNAMIC) return;
+        const tableTop = getTableTopY();
+        if (tableTop == null) return;
+        const tpHe = tablePlateBody.shapes[0].halfExtents;
+        if (Math.abs(body.position.x - tablePlateBody.position.x) >= tpHe.x)
+          return;
+        if (Math.abs(body.position.z - tablePlateBody.position.z) >= tpHe.z)
+          return;
+
+        const floorY = tableTop + clearance;
+        let lift = 0;
+        const physBottom = getOrientedBodyMinY(body);
+        if (physBottom < floorY) lift = floorY - physBottom;
+
+        group.position.set(body.position.x, body.position.y, body.position.z);
+        group.quaternion.set(
+          body.quaternion.x,
+          body.quaternion.y,
+          body.quaternion.z,
+          body.quaternion.w,
+        );
+        group.updateMatrixWorld(true);
+        const visBB = new THREE.Box3().setFromObject(group);
+        if (!visBB.isEmpty() && visBB.min.y < floorY) {
+          lift = Math.max(lift, floorY - visBB.min.y);
+        }
+        if (lift > 0.0005) {
+          body.position.y += lift;
+          if (body.velocity.y < 0) body.velocity.y = 0;
+        }
+      }
+
+      function finalizeStarOnTable() {
+        for (let i = 0; i < _starInstances.length; i++) {
+          placeStarOnTable(_starInstances[i]);
+          const body = _starInstances[i]?.physBody;
+          if (body) {
+            body.velocity.set(0, 0, 0);
+            body.angularVelocity.set(0, 0, 0);
           }
         }
         syncStarFromPhysics();
@@ -4638,19 +4704,9 @@
 
       function getTableTopY() {
         if (!tablePlateBody?.shapes?.[0]) return null;
-        return tablePlateBody.position.y + tablePlateBody.shapes[0].halfExtents.y;
-      }
-
-      function getTableSurfaceY() {
-        if (tablePlateMesh) {
-          tablePlateMesh.updateMatrixWorld(true);
-          const tb = new THREE.Box3().setFromObject(tablePlateMesh);
-          if (!tb.isEmpty()) return tb.max.y;
-        }
-        if (typeof tableSurfaceY === "number" && Number.isFinite(tableSurfaceY)) {
-          return tableSurfaceY;
-        }
-        return getTableTopY();
+        return (
+          tablePlateBody.position.y + tablePlateBody.shapes[0].halfExtents.y
+        );
       }
 
       function getOrientedBodyMinY(body) {
@@ -4672,8 +4728,8 @@
         return minY;
       }
 
-      function placeOrientedBodyOnTableTop(body, clearance = 0.06) {
-        const tableTop = getTableSurfaceY();
+      function placeOrientedBodyOnTableTop(body, clearance = 0.018) {
+        const tableTop = getTableTopY();
         if (tableTop == null) return;
         const lift = tableTop + clearance - getOrientedBodyMinY(body);
         if (Math.abs(lift) > 1e-6) body.position.y += lift;
@@ -4684,13 +4740,11 @@
           const inst = _starInstances[i];
           if (!inst?.group || !inst?.physBody) continue;
           const body = inst.physBody;
-          if (body._frozen && inst.initPos && inst.initQuat) {
-            body.position.copy(inst.initPos);
-            body.quaternion.copy(inst.initQuat);
-            body.velocity.set(0, 0, 0);
-            body.angularVelocity.set(0, 0, 0);
-          }
-          inst.group.position.set(body.position.x, body.position.y, body.position.z);
+          inst.group.position.set(
+            body.position.x,
+            body.position.y,
+            body.position.z,
+          );
           inst.group.quaternion.set(
             body.quaternion.x,
             body.quaternion.y,
@@ -4705,8 +4759,10 @@
       function setupDrawerGroup(model) {
         const parts = [];
         model.traverse((node) => {
-          if (node.isMesh && DRAWER_PART_NAMES.includes(node.name)) parts.push(node);
-          if (node.isMesh && node.name === "drawerEffect") _drawerEffectMesh = node;
+          if (node.isMesh && DRAWER_PART_NAMES.includes(node.name))
+            parts.push(node);
+          if (node.isMesh && node.name === "drawerEffect")
+            _drawerEffectMesh = node;
         });
         if (parts.length === 0) return;
 
@@ -4747,7 +4803,8 @@
         } else if (_drawerState === "closing") {
           const t = Math.min(elapsed / DRAWER_SLIDE_DURATION, 1);
           const ease = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
-          drawerGroup.position.z = _drawerOrigZ + DRAWER_SLIDE_DISTANCE * (1 - ease);
+          drawerGroup.position.z =
+            _drawerOrigZ + DRAWER_SLIDE_DISTANCE * (1 - ease);
           if (t >= 1) {
             drawerGroup.position.z = _drawerOrigZ;
             _drawerState = "closed";
@@ -4913,7 +4970,9 @@
           vertexShader: _particleVertexShader,
           fragmentShader: _particleFragmentShader,
           uniforms: { uTime: { value: 0 }, uOpacity: { value: 0 } },
-          transparent: true, depthWrite: false, blending: THREE.NormalBlending,
+          transparent: true,
+          depthWrite: false,
+          blending: THREE.NormalBlending,
         });
         _portalParticles = new THREE.Points(pGeo, pMat);
         _portalParticles.renderOrder = 1010;
@@ -5018,7 +5077,10 @@
         if (shapeType === "cylinder") {
           physicMesh.geometry.computeBoundingBox();
           const geoBB = physicMesh.geometry.boundingBox;
-          const localSize = new THREE.Vector3().subVectors(geoBB.max, geoBB.min);
+          const localSize = new THREE.Vector3().subVectors(
+            geoBB.max,
+            geoBB.min,
+          );
           const worldScale = new THREE.Vector3();
           physicMesh.getWorldScale(worldScale);
           const localRadiusX = (localSize.x / 2) * Math.abs(worldScale.x);
@@ -5027,7 +5089,9 @@
           const height = localSize.y * Math.abs(worldScale.y);
           shape = new CANNON.Cylinder(radius, radius, height, 16);
         } else {
-          shape = new CANNON.Box(new CANNON.Vec3(size.x / 2, size.y / 2, size.z / 2));
+          shape = new CANNON.Box(
+            new CANNON.Vec3(size.x / 2, size.y / 2, size.z / 2),
+          );
         }
         const body = new CANNON.Body({
           mass: 0,
@@ -5110,7 +5174,8 @@
         const relZ = body.position.z - tablePlateBody.position.z;
         const innerHalfX = Math.max(tpHe.x - propRX, 0.05);
         const innerHalfZ = Math.max(tpHe.z - propRZ, 0.05);
-        if (Math.abs(relX) >= innerHalfX || Math.abs(relZ) >= innerHalfZ) return;
+        if (Math.abs(relX) >= innerHalfX || Math.abs(relZ) >= innerHalfZ)
+          return;
 
         const escapeX = innerHalfX - Math.abs(relX);
         const escapeZ = innerHalfZ - Math.abs(relZ);
@@ -5125,8 +5190,12 @@
       }
 
       const PROP_PHYS_NAMES = [
-        "dockingStationPhysic", "plantVasePhysic", "macScreenFramePhysic",
-        "macBodyBasePhysic", "mainScreensPin", "mainScreensBase",
+        "dockingStationPhysic",
+        "plantVasePhysic",
+        "macScreenFramePhysic",
+        "macBodyBasePhysic",
+        "mainScreensPin",
+        "mainScreensBase",
       ];
       const _propBodies = {};
       const _propMeshes = {};
@@ -5145,7 +5214,12 @@
         };
         for (const name of PROP_PHYS_NAMES) {
           try {
-            const result = setupSimplePropPhysics(model, name, propMasses[name] || 15, propShapes[name]);
+            const result = setupSimplePropPhysics(
+              model,
+              name,
+              propMasses[name] || 15,
+              propShapes[name],
+            );
             if (result) {
               _propBodies[name] = result.body;
               _propMeshes[name] = result.mesh;
@@ -5159,10 +5233,10 @@
         if (plantVasePhysBody) plantVasePhysBody._noClimb = true;
         macScreenFramePhysBody = _propBodies["macScreenFramePhysic"] || null;
         macBodyBasePhysBody = _propBodies["macBodyBasePhysic"] || null;
-        if (macBodyBasePhysBody) macBodyBasePhysBody._driveableStep = CAR_DRIVEABLE_PROP_MAX_STEP;
+        if (macBodyBasePhysBody)
+          macBodyBasePhysBody._driveableStep = CAR_DRIVEABLE_PROP_MAX_STEP;
         mainScreensPinPhysBody = _propBodies["mainScreensPin"] || null;
         mainScreensBasePhysBody = _propBodies["mainScreensBase"] || null;
-
       }
 
       let _macCarStartYaw = 0;
@@ -5184,10 +5258,7 @@
           0,
           kbSize.z * MAC_CAR_START_LOCAL_Z,
         );
-        outPos
-          .copy(_macSpawnLocal)
-          .applyQuaternion(_macKbQuat)
-          .add(kbCenter);
+        outPos.copy(_macSpawnLocal).applyQuaternion(_macKbQuat).add(kbCenter);
         outPos.y = kbBox.max.y;
         _macKbRight.set(1, 0, 0).applyQuaternion(_macKbQuat);
         _macCarStartYaw =
@@ -5201,13 +5272,25 @@
           const mesh = _propMeshes[name];
           if (!body || !mesh) continue;
           mesh.position.set(body.position.x, body.position.y, body.position.z);
-          mesh.quaternion.set(body.quaternion.x, body.quaternion.y, body.quaternion.z, body.quaternion.w);
+          mesh.quaternion.set(
+            body.quaternion.x,
+            body.quaternion.y,
+            body.quaternion.z,
+            body.quaternion.w,
+          );
         }
       }
 
       const GUM_DISPENSER_PART_NAMES = [
-        "gumsCup", "gumsTank", "gumsBody", "gumsStand", "gumsRamp", "gumsStoper",
-        "gumsBodyPhysic", "gumsTankPhysic", "gumsTankPhysicCup",
+        "gumsCup",
+        "gumsTank",
+        "gumsBody",
+        "gumsStand",
+        "gumsRamp",
+        "gumsStoper",
+        "gumsBodyPhysic",
+        "gumsTankPhysic",
+        "gumsTankPhysicCup",
       ];
 
       function setupGumDispenserPhysics(model) {
@@ -5215,7 +5298,8 @@
         const groupParts = [];
         model.traverse((node) => {
           if (node.name === "GumDispenserAllPhysic") physicMesh = node;
-          if (GUM_DISPENSER_PART_NAMES.includes(node.name)) groupParts.push(node);
+          if (GUM_DISPENSER_PART_NAMES.includes(node.name))
+            groupParts.push(node);
         });
         if (!physicMesh) return;
         gumDispenserPhysicMesh = physicMesh;
@@ -5238,7 +5322,9 @@
           gumDispenserGroup.attach(part);
         }
         const extraParts = [
-          gumsTankPhysicObject, gumsTankPhysicCupObject, gumsBodyObject,
+          gumsTankPhysicObject,
+          gumsTankPhysicCupObject,
+          gumsBodyObject,
         ].filter(Boolean);
         for (const ep of extraParts) {
           if (!groupParts.includes(ep)) {
@@ -5252,9 +5338,15 @@
         const hy = phSize.y / 2;
         const hz = phSize.z / 2;
         const shape = new CANNON.Box(new CANNON.Vec3(hx, hy, hz));
-        const GD_MASK = ~(PHYS_GROUP_GUM_SPHERE | PHYS_GROUP_GUMS_TRIMESH |
-          PHYS_GROUP_GUMS_BODY | PHYS_GROUP_GUMS_STAND | PHYS_GROUP_GUMS_RAMP |
-          PHYS_GROUP_GUMS_STOPPER | PHYS_GROUP_GUMS_INNER);
+        const GD_MASK = ~(
+          PHYS_GROUP_GUM_SPHERE |
+          PHYS_GROUP_GUMS_TRIMESH |
+          PHYS_GROUP_GUMS_BODY |
+          PHYS_GROUP_GUMS_STAND |
+          PHYS_GROUP_GUMS_RAMP |
+          PHYS_GROUP_GUMS_STOPPER |
+          PHYS_GROUP_GUMS_INNER
+        );
         gumDispenserPhysBody = new CANNON.Body({
           mass: 10000.0,
           type: CANNON.Body.DYNAMIC,
@@ -5271,7 +5363,12 @@
         });
         gumDispenserPhysBody.addShape(shape);
         gumDispenserPhysBody.position.set(phCenter.x, phCenter.y, phCenter.z);
-        gumDispenserPhysBody.quaternion.set(phQuat.x, phQuat.y, phQuat.z, phQuat.w);
+        gumDispenserPhysBody.quaternion.set(
+          phQuat.x,
+          phQuat.y,
+          phQuat.z,
+          phQuat.w,
+        );
         gumDispenserPhysBody._frozen = true;
         physicsWorld.addBody(gumDispenserPhysBody);
 
@@ -5282,15 +5379,36 @@
           }
         });
 
-        _gumDispenserInitPos = new CANNON.Vec3(phCenter.x, phCenter.y, phCenter.z);
-        _gumDispenserInitQuat = new CANNON.Quaternion(phQuat.x, phQuat.y, phQuat.z, phQuat.w);
+        _gumDispenserInitPos = new CANNON.Vec3(
+          phCenter.x,
+          phCenter.y,
+          phCenter.z,
+        );
+        _gumDispenserInitQuat = new CANNON.Quaternion(
+          phQuat.x,
+          phQuat.y,
+          phQuat.z,
+          phQuat.w,
+        );
         _gumDispenserInternalBodies = [
-          gumsTankPhysBody, gumsTankCupBody,
-          gumsBodyPhysBody, gumsStandPhysBody, gumsRampPhysBody,
+          gumsTankPhysBody,
+          gumsTankCupBody,
+          gumsBodyPhysBody,
+          gumsStandPhysBody,
+          gumsRampPhysBody,
         ].filter(Boolean);
         for (const b of _gumDispenserInternalBodies) {
-          b._gdOrigPos = new CANNON.Vec3(b.position.x, b.position.y, b.position.z);
-          b._gdOrigQuat = new CANNON.Quaternion(b.quaternion.x, b.quaternion.y, b.quaternion.z, b.quaternion.w);
+          b._gdOrigPos = new CANNON.Vec3(
+            b.position.x,
+            b.position.y,
+            b.position.z,
+          );
+          b._gdOrigQuat = new CANNON.Quaternion(
+            b.quaternion.x,
+            b.quaternion.y,
+            b.quaternion.z,
+            b.quaternion.w,
+          );
         }
       }
 
@@ -5336,7 +5454,11 @@
           }
         }
 
-        if (_gumDispenserInternalBodies.length === 0 || gumDispenserPhysBody._frozen) return;
+        if (
+          _gumDispenserInternalBodies.length === 0 ||
+          gumDispenserPhysBody._frozen
+        )
+          return;
 
         _gumDispenserInitQuat.conjugate(_gdInvInitQuat);
         _gdRelQuat.copy(_gdInvInitQuat);
@@ -5487,14 +5609,14 @@
       });
       certifiedBodyMaterial.onBeforeCompile = (shader) => {
         shader.fragmentShader = shader.fragmentShader.replace(
-          '#include <output_fragment>',
+          "#include <output_fragment>",
           `
           vec3 viewDir = normalize(vViewPosition);
           float fresnelTerm = pow(1.0 - abs(dot(normal, viewDir)), 2.0);
           vec3 edgeGlow = vec3(1.0, 1.0, 1.0) * fresnelTerm * 1.8;
           outgoingLight += edgeGlow;
           #include <output_fragment>
-          `
+          `,
         );
       };
 
@@ -5646,9 +5768,15 @@
             parentName === "headphonesButtons"
           ) {
             mat = headphonesPlasticMaterial;
-          } else if (name === "headphonesEars" || parentName === "headphonesEars") {
+          } else if (
+            name === "headphonesEars" ||
+            parentName === "headphonesEars"
+          ) {
             mat = headphonesEarsMaterial;
-          } else if (name === "headphonesLight" || parentName === "headphonesLight") {
+          } else if (
+            name === "headphonesLight" ||
+            parentName === "headphonesLight"
+          ) {
             mat = headphonesLightMaterial;
           }
           if (mat) {
@@ -6059,11 +6187,14 @@
       }
       const CHARGER_SIZE_MIN = 0.62;
       const CHARGER_SIZE_SPAN = 1.45;
-      const chargerParticleHeightTail = new Float32Array(CHARGER_PARTICLE_COUNT);
+      const chargerParticleHeightTail = new Float32Array(
+        CHARGER_PARTICLE_COUNT,
+      );
       for (let i = 0; i < CHARGER_PARTICLE_COUNT; i++) {
         const smallness = THREE.MathUtils.clamp(
           1 -
-            (chargerParticleSizeScale[i] - CHARGER_SIZE_MIN) / CHARGER_SIZE_SPAN,
+            (chargerParticleSizeScale[i] - CHARGER_SIZE_MIN) /
+              CHARGER_SIZE_SPAN,
           0,
           1,
         );
@@ -6593,7 +6724,8 @@
           if (!mesh || !mesh.parent) continue;
           const effect = createExhaustFireEffect();
           effect.anchorMesh = mesh;
-          effect.points.material.uniforms.uSize.value = EXHAUST_FLAME_SIZE * 0.14;
+          effect.points.material.uniforms.uSize.value =
+            EXHAUST_FLAME_SIZE * 0.14;
           effect.points.rotation.x = -Math.PI / 2;
           effect.points.visible = false;
           for (let i = 0; i < effect.spread.length; i++) {
@@ -6757,11 +6889,7 @@
         const du = uMax - uMin || 1;
         const dv = vMax - vMin || 1;
         for (let i = 0; i < uv.count; i++) {
-          uv.setXY(
-            i,
-            (uv.getX(i) - uMin) / du,
-            (uv.getY(i) - vMin) / dv,
-          );
+          uv.setXY(i, (uv.getX(i) - uMin) / du, (uv.getY(i) - vMin) / dv);
         }
         uv.needsUpdate = true;
       }
@@ -6772,15 +6900,11 @@
         remapMeshUVsToFullQuad(mesh);
         if (macScreenRenderTarget) macScreenRenderTarget.dispose();
         const macRt = getMacScreenRtDimensions();
-        macScreenRenderTarget = new THREE.WebGLRenderTarget(
-          macRt.w,
-          macRt.h,
-          {
-            minFilter: THREE.LinearFilter,
-            magFilter: THREE.LinearFilter,
-            depthBuffer: true,
-          },
-        );
+        macScreenRenderTarget = new THREE.WebGLRenderTarget(macRt.w, macRt.h, {
+          minFilter: THREE.LinearFilter,
+          magFilter: THREE.LinearFilter,
+          depthBuffer: true,
+        });
         macScreenRenderTarget.texture.colorSpace = THREE.SRGBColorSpace;
         macScreenRenderTarget.texture.flipY = false;
         macFrontCamera = new THREE.PerspectiveCamera(
@@ -6809,7 +6933,10 @@
         _macFrontLookAt.y = car.position.y + _macFrontGrilleHeight;
 
         macFrontCamera.position.copy(_macFrontLookAt);
-        macFrontCamera.position.addScaledVector(_macCarFaceDir, _macFrontCamDist);
+        macFrontCamera.position.addScaledVector(
+          _macCarFaceDir,
+          _macFrontCamDist,
+        );
         macFrontCamera.position.y = _macFrontLookAt.y + _macCarSize.y * 0.04;
         macFrontCamera.lookAt(_macFrontLookAt);
         macFrontCamera.up.set(0, 1, 0);
@@ -6840,16 +6967,21 @@
 
       function _safeRemoveBody(body) {
         if (!body) return;
-        try { physicsWorld.removeBody(body); } catch (e) {}
+        try {
+          physicsWorld.removeBody(body);
+        } catch (e) {}
       }
       function _disposeObject3D(obj) {
         if (!obj) return;
         obj.traverse((n) => {
           if (n.isMesh || n.isPoints || n.isLine) {
-            try { if (n.geometry) n.geometry.dispose(); } catch (e) {}
+            try {
+              if (n.geometry) n.geometry.dispose();
+            } catch (e) {}
             try {
               if (n.material) {
-                if (Array.isArray(n.material)) n.material.forEach((m) => m && m.dispose && m.dispose());
+                if (Array.isArray(n.material))
+                  n.material.forEach((m) => m && m.dispose && m.dispose());
                 else if (n.material.dispose) n.material.dispose();
               }
             } catch (e) {}
@@ -6858,7 +6990,9 @@
       }
       function _removeFromScene(obj) {
         if (!obj) return;
-        try { scene.remove(obj); } catch (e) {}
+        try {
+          scene.remove(obj);
+        } catch (e) {}
         _disposeObject3D(obj);
       }
 
@@ -6885,10 +7019,7 @@
             newUv[i * 2 + 1] = (uvAttr.getY(i) - vMin) / vRange;
           }
           mesh.geometry = mesh.geometry.clone();
-          mesh.geometry.setAttribute(
-            "uv",
-            new THREE.BufferAttribute(newUv, 2),
-          );
+          mesh.geometry.setAttribute("uv", new THREE.BufferAttribute(newUv, 2));
         }
         const coverTex = tex.clone();
         coverTex.center.set(0.5, 0.5);
@@ -6915,10 +7046,18 @@
         const zMin = bb.min.z;
         const zMax = bb.max.z;
         const positions = new Float32Array([
-          xMin, y, zMin,
-          xMax, y, zMin,
-          xMin, y, zMax,
-          xMax, y, zMax,
+          xMin,
+          y,
+          zMin,
+          xMax,
+          y,
+          zMin,
+          xMin,
+          y,
+          zMax,
+          xMax,
+          y,
+          zMax,
         ]);
         const uvs = new Float32Array([0, 0, 1, 0, 0, 1, 1, 1]);
         const geo = new THREE.BufferGeometry();
@@ -6954,7 +7093,10 @@
             }
             node.material.needsUpdate = true;
           }
-          if (node.name === "bookFrame2Image" || node.name === "bookFrame3Image") {
+          if (
+            node.name === "bookFrame2Image" ||
+            node.name === "bookFrame3Image"
+          ) {
             node.geometry = node.geometry.clone();
             node.material = node.material.clone();
           }
@@ -7033,7 +7175,9 @@
               uAxis.crossVectors(new THREE.Vector3(1, 0, 0), nWorld);
             }
             uAxis.normalize();
-            const vAxis = new THREE.Vector3().crossVectors(nWorld, uAxis).normalize();
+            const vAxis = new THREE.Vector3()
+              .crossVectors(nWorld, uAxis)
+              .normalize();
 
             const rotY = new THREE.Matrix4().makeRotationY(Math.PI / 2);
             uAxis.applyMatrix4(rotY);
@@ -7192,10 +7336,15 @@
           uAxis.crossVectors(new THREE.Vector3(1, 0, 0), nWorld);
         }
         uAxis.normalize();
-        const vAxis = new THREE.Vector3().crossVectors(nWorld, uAxis).normalize();
+        const vAxis = new THREE.Vector3()
+          .crossVectors(nWorld, uAxis)
+          .normalize();
 
         if (rotationMode === "surfaceNormal") {
-          const rotN = new THREE.Matrix4().makeRotationAxis(nWorld, rotYRadians);
+          const rotN = new THREE.Matrix4().makeRotationAxis(
+            nWorld,
+            rotYRadians,
+          );
           uAxis.applyMatrix4(rotN);
           vAxis.applyMatrix4(rotN);
           if (fineRotateRadians !== 0) {
@@ -7433,7 +7582,9 @@
               uAxis.crossVectors(refUp, nWorld);
             }
             uAxis.normalize();
-            const vAxis = new THREE.Vector3().crossVectors(nWorld, uAxis).normalize();
+            const vAxis = new THREE.Vector3()
+              .crossVectors(nWorld, uAxis)
+              .normalize();
 
             const rotFaceX = new THREE.Matrix4().makeRotationAxis(
               nWorld,
@@ -7573,7 +7724,9 @@
           });
         }
         if (!ground?.isMesh) {
-          console.warn("[office] plantGround.001 not found; ground texture skipped.");
+          console.warn(
+            "[office] plantGround.001 not found; ground texture skipped.",
+          );
           return;
         }
 
@@ -7717,7 +7870,7 @@ diffuseColor.a = 1.0;
               );
             };
             const geo = new THREE.PlaneGeometry(1, 1);
-            const nLeaves = 98;
+            const nLeaves = 90;
             const rand = createSeededRng(1337);
             const _anchorW = new THREE.Vector3();
             const _up = new THREE.Vector3(0, 1, 0);
@@ -7727,6 +7880,7 @@ diffuseColor.a = 1.0;
             const _stemUp = new THREE.Vector3();
             const _wv = new THREE.Vector3();
             const _blendIn = new THREE.Vector3();
+            const _jitterW = new THREE.Vector3();
 
             const randomUnitSphere = (target) => {
               const u = rand();
@@ -7754,15 +7908,12 @@ diffuseColor.a = 1.0;
             plant1.updateMatrixWorld(true);
             const plantVertWorld = [];
             plant1.traverse((node) => {
-              if (!node.isMesh || !node.geometry?.attributes?.position)
-                return;
+              if (!node.isMesh || !node.geometry?.attributes?.position) return;
               const pos = node.geometry.attributes.position;
               const mw = node.matrixWorld;
-              const step = pos.count > 12000 ? 4 : pos.count > 6000 ? 2 : 1;
+              const step = pos.count > 30000 ? 3 : pos.count > 15000 ? 2 : 1;
               for (let i = 0; i < pos.count; i += step) {
-                _wv
-                  .set(pos.getX(i), pos.getY(i), pos.getZ(i))
-                  .applyMatrix4(mw);
+                _wv.set(pos.getX(i), pos.getY(i), pos.getZ(i)).applyMatrix4(mw);
                 plantVertWorld.push(_wv.x, _wv.y, _wv.z);
               }
             });
@@ -7786,7 +7937,7 @@ diffuseColor.a = 1.0;
                   (plantVertWorld[k * 3 + sortAxis] - coordMin) / cSpan;
               }
             }
-            const leafPickPool = [];
+            const leafAnchorVerts = [];
             const centroidW = new THREE.Vector3();
             if (nv > 0) {
               let cx = 0,
@@ -7802,31 +7953,87 @@ diffuseColor.a = 1.0;
               centroidW.copy(centerW);
             }
 
-            for (let i = 0; i < nLeaves; i++) {
-              const mesh = new THREE.Mesh(geo, mat);
-              if (nv > 0) {
-                const tCenter = THREE.MathUtils.clamp(
-                  (i + 0.5 + (rand() - 0.5) * 1.05) / nLeaves,
-                  0.02,
-                  0.98,
-                );
-                let vertK = -1;
-                for (let att = 0; att < 8 && vertK < 0; att++) {
-                  const half =
-                    (0.48 / nLeaves + 0.034) * Math.pow(1.55, att);
-                  const lo = Math.max(0, tCenter - half);
-                  const hi = Math.min(1, tCenter + half);
-                  leafPickPool.length = 0;
-                  for (let k = 0; k < nv; k++) {
-                    const tv = tNorm[k];
-                    if (tv >= lo && tv <= hi) leafPickPool.push(k);
-                  }
-                  if (leafPickPool.length > 0) {
-                    vertK =
-                      leafPickPool[(rand() * leafPickPool.length) | 0];
+            const buildPlantLeafAnchors = () => {
+              leafAnchorVerts.length = 0;
+              if (nv <= 0) return;
+              const used = new Uint8Array(nv);
+              const minDistSq = new Float32Array(nv);
+              minDistSq.fill(Infinity);
+
+              let seedK = 0;
+              for (let k = 1; k < nv; k++) {
+                const ky = plantVertWorld[k * 3 + 1];
+                const sy = plantVertWorld[seedK * 3 + 1];
+                if (ky < sy) seedK = k;
+              }
+              leafAnchorVerts.push(seedK);
+              used[seedK] = 1;
+              minDistSq[seedK] = 0;
+
+              const updateMinDist = (fromK) => {
+                const fi = fromK * 3;
+                const fx = plantVertWorld[fi];
+                const fy = plantVertWorld[fi + 1];
+                const fz = plantVertWorld[fi + 2];
+                for (let k = 0; k < nv; k++) {
+                  if (used[k]) continue;
+                  const vi = k * 3;
+                  const dx = plantVertWorld[vi] - fx;
+                  const dy = plantVertWorld[vi + 1] - fy;
+                  const dz = plantVertWorld[vi + 2] - fz;
+                  const d2 = dx * dx + dy * dy + dz * dz;
+                  if (d2 < minDistSq[k]) minDistSq[k] = d2;
+                }
+              };
+              updateMinDist(seedK);
+
+              while (leafAnchorVerts.length < nLeaves) {
+                let bestK = -1;
+                let bestD2 = -1;
+                for (let k = 0; k < nv; k++) {
+                  if (used[k]) continue;
+                  if (minDistSq[k] > bestD2) {
+                    bestD2 = minDistSq[k];
+                    bestK = k;
                   }
                 }
-                if (vertK < 0) vertK = (rand() * nv) | 0;
+                if (bestK < 0) break;
+                leafAnchorVerts.push(bestK);
+                used[bestK] = 1;
+                minDistSq[bestK] = 0;
+                updateMinDist(bestK);
+              }
+
+              while (leafAnchorVerts.length < nLeaves) {
+                leafAnchorVerts.push(
+                  leafAnchorVerts[
+                    (leafAnchorVerts.length * 17 + 3) % leafAnchorVerts.length
+                  ],
+                );
+              }
+            };
+
+            const computeLeafOutward = (vertK, target) => {
+              const vi = vertK * 3;
+              target.set(
+                plantVertWorld[vi] - centroidW.x,
+                plantVertWorld[vi + 1] - centroidW.y,
+                plantVertWorld[vi + 2] - centroidW.z,
+              );
+              if (target.lengthSq() < 1e-10) target.set(0, 1, 0);
+              else target.normalize();
+              const t = tNorm[vertK] ?? 0.5;
+              target.lerp(_up, Math.max(0, t - 0.42) * 0.35).normalize();
+              return target;
+            };
+
+            buildPlantLeafAnchors();
+
+            for (let i = 0; i < nLeaves; i++) {
+              const mesh = new THREE.Mesh(geo, mat);
+              let vertK = -1;
+              if (nv > 0) {
+                vertK = leafAnchorVerts[i];
                 const vi = vertK * 3;
                 _anchorW.set(
                   plantVertWorld[vi],
@@ -7837,15 +8044,21 @@ diffuseColor.a = 1.0;
                 randomPointInBox(_anchorW);
               }
 
-              _blendIn.copy(centroidW).sub(_anchorW);
-              if (_blendIn.lengthSq() < 1e-10) randomUnitSphere(_blendIn);
-              else _blendIn.normalize();
-              randomUnitSphere(_stemUp);
-              const mixR = 0.8 + rand() * 0.2;
-              _stemUp
-                .multiplyScalar(mixR)
-                .addScaledVector(_blendIn, 1 - mixR)
-                .normalize();
+              if (nv > 0 && vertK >= 0) {
+                _blendIn.copy(centroidW).sub(_anchorW);
+                if (_blendIn.lengthSq() < 1e-10) randomUnitSphere(_blendIn);
+                else _blendIn.normalize();
+                randomUnitSphere(_stemUp);
+                const mixR = 0.68 + rand() * 0.32;
+                _stemUp
+                  .multiplyScalar(mixR)
+                  .addScaledVector(_blendIn, 1 - mixR)
+                  .normalize();
+                computeLeafOutward(vertK, _jitterW);
+                _stemUp.lerp(_jitterW, 0.12 + rand() * 0.18).normalize();
+              } else {
+                _stemUp.set(0, 1, 0);
+              }
 
               const s = 0.3 + rand() * 0.75;
               const w = baseSpan * 0.102 * s;
@@ -7858,7 +8071,9 @@ diffuseColor.a = 1.0;
               mesh.quaternion.copy(_qBase).premultiply(_qTwist);
 
               plant1.worldToLocal(mesh.position.copy(_anchorW));
-              _topOffPlantLocal.set(0, h * 0.5, 0).applyQuaternion(mesh.quaternion);
+              _topOffPlantLocal
+                .set(0, h * 0.5, 0)
+                .applyQuaternion(mesh.quaternion);
               mesh.position.sub(_topOffPlantLocal);
 
               leafGroup.add(mesh);
@@ -7943,7 +8158,7 @@ diffuseColor.a = 1.0;
 
       const loader = new GLTFLoader();
       loader.load(
-        "office-table-embed75.gltf",
+        "office-table-embed76.gltf",
         (gltf) => {
           logOfficeMeshParts(gltf);
           const model = gltf.scene;
@@ -7951,14 +8166,6 @@ diffuseColor.a = 1.0;
           _officeWorldRoot = model;
           _currentWorldModel = model;
           model.updateMatrixWorld(true);
-          {
-            const _ob = new THREE.Box3().setFromObject(model);
-            if (!_ob.isEmpty()) {
-              _ob.getCenter(visualXYZ.position);
-              visualXYZ.position.y += 0.45;
-            }
-            visualXYZ.scale.setScalar(0.5);
-          }
           applyPerformanceShadowPolicy(model);
           initOfficeAnimations(gltf);
           findScreenMeshes(model);
@@ -7977,7 +8184,7 @@ diffuseColor.a = 1.0;
                 });
                 if (!src) {
                   console.warn(
-                    "No outdoorBackground in office-table-embed75.gltf or fallback " +
+                    "No outdoorBackground in office-table-embed76.gltf or fallback " +
                       OUTDOOR_FALLBACK_GLTF +
                       ". Re-export embed36 with an object named outdoorBackground.",
                   );
@@ -8029,7 +8236,13 @@ diffuseColor.a = 1.0;
                   collisionFilterMask: -1,
                 });
                 tablePlateBody.addShape(
-                  new CANNON.Box(new CANNON.Vec3(_szEarly.x / 2, plateThickness / 2, _szEarly.z / 2))
+                  new CANNON.Box(
+                    new CANNON.Vec3(
+                      _szEarly.x / 2,
+                      plateThickness / 2,
+                      _szEarly.z / 2,
+                    ),
+                  ),
                 );
                 physicsWorld.addBody(tablePlateBody);
                 tablePlateHalfX = _szEarly.x / 2;
@@ -8137,15 +8350,19 @@ diffuseColor.a = 1.0;
                   verts.push(_pv.x, _pv.y, _pv.z);
                 }
                 if (idx)
-                  for (let i = 0; i < idx.count; i++) inds.push(vo + idx.getX(i));
+                  for (let i = 0; i < idx.count; i++)
+                    inds.push(vo + idx.getX(i));
                 else for (let i = 0; i < n; i++) inds.push(vo + i);
                 vo += n;
               });
               if (verts.length < 9 || inds.length < 3) return null;
               const nV = verts.length / 3;
-              const cx = verts.reduce((s, v, i) => (i % 3 === 0 ? s + v : s), 0) / nV;
-              const cy = verts.reduce((s, v, i) => (i % 3 === 1 ? s + v : s), 0) / nV;
-              const cz = verts.reduce((s, v, i) => (i % 3 === 2 ? s + v : s), 0) / nV;
+              const cx =
+                verts.reduce((s, v, i) => (i % 3 === 0 ? s + v : s), 0) / nV;
+              const cy =
+                verts.reduce((s, v, i) => (i % 3 === 1 ? s + v : s), 0) / nV;
+              const cz =
+                verts.reduce((s, v, i) => (i % 3 === 2 ? s + v : s), 0) / nV;
               for (let i = 0; i < verts.length; i += 3) {
                 verts[i] = (verts[i] - cx) * sc;
                 verts[i + 1] = (verts[i + 1] - cy) * sc;
@@ -8177,11 +8394,19 @@ diffuseColor.a = 1.0;
               scheduleRebuildBloomDarkenLists();
               return { body };
             }
-            const tankResult = addGumsTankPhysicsTrimesh(gumsTankPhysicObject, 0x00ff88, 1.0);
+            const tankResult = addGumsTankPhysicsTrimesh(
+              gumsTankPhysicObject,
+              0x00ff88,
+              1.0,
+            );
             if (tankResult) {
               gumsTankPhysBody = tankResult.body;
             }
-            const cupResult = addGumsTankPhysicsTrimesh(gumsTankPhysicCupObject, 0x00ff88, 1.0);
+            const cupResult = addGumsTankPhysicsTrimesh(
+              gumsTankPhysicCupObject,
+              0x00ff88,
+              1.0,
+            );
             if (cupResult) {
               gumsTankCupBody = cupResult.body;
               gumsTankCupBody.collisionFilterMask = 0;
@@ -8209,15 +8434,19 @@ diffuseColor.a = 1.0;
                   bVerts.push(bv.x, bv.y, bv.z);
                 }
                 if (idx)
-                  for (let i = 0; i < idx.count; i++) bInds.push(bVo + idx.getX(i));
+                  for (let i = 0; i < idx.count; i++)
+                    bInds.push(bVo + idx.getX(i));
                 else for (let i = 0; i < n; i++) bInds.push(bVo + i);
                 bVo += n;
               });
               if (bVerts.length >= 9 && bInds.length >= 3) {
                 const nV = bVerts.length / 3;
-                const cx = bVerts.reduce((s, v, i) => (i % 3 === 0 ? s + v : s), 0) / nV;
-                const cy = bVerts.reduce((s, v, i) => (i % 3 === 1 ? s + v : s), 0) / nV;
-                const cz = bVerts.reduce((s, v, i) => (i % 3 === 2 ? s + v : s), 0) / nV;
+                const cx =
+                  bVerts.reduce((s, v, i) => (i % 3 === 0 ? s + v : s), 0) / nV;
+                const cy =
+                  bVerts.reduce((s, v, i) => (i % 3 === 1 ? s + v : s), 0) / nV;
+                const cz =
+                  bVerts.reduce((s, v, i) => (i % 3 === 2 ? s + v : s), 0) / nV;
                 for (let i = 0; i < bVerts.length; i += 3) {
                   bVerts[i] -= cx;
                   bVerts[i + 1] -= cy;
@@ -8263,15 +8492,19 @@ diffuseColor.a = 1.0;
                   sVerts.push(sv.x, sv.y, sv.z);
                 }
                 if (idx)
-                  for (let i = 0; i < idx.count; i++) sInds.push(sVo + idx.getX(i));
+                  for (let i = 0; i < idx.count; i++)
+                    sInds.push(sVo + idx.getX(i));
                 else for (let i = 0; i < n; i++) sInds.push(sVo + i);
                 sVo += n;
               });
               if (sVerts.length >= 9 && sInds.length >= 3) {
                 const nV = sVerts.length / 3;
-                const cx = sVerts.reduce((s, v, i) => (i % 3 === 0 ? s + v : s), 0) / nV;
-                const cy = sVerts.reduce((s, v, i) => (i % 3 === 1 ? s + v : s), 0) / nV;
-                const cz = sVerts.reduce((s, v, i) => (i % 3 === 2 ? s + v : s), 0) / nV;
+                const cx =
+                  sVerts.reduce((s, v, i) => (i % 3 === 0 ? s + v : s), 0) / nV;
+                const cy =
+                  sVerts.reduce((s, v, i) => (i % 3 === 1 ? s + v : s), 0) / nV;
+                const cz =
+                  sVerts.reduce((s, v, i) => (i % 3 === 2 ? s + v : s), 0) / nV;
                 const standPhysScale = 1.1;
                 for (let i = 0; i < sVerts.length; i += 3) {
                   sVerts[i] = (sVerts[i] - cx) * standPhysScale;
@@ -8318,15 +8551,19 @@ diffuseColor.a = 1.0;
                   rVerts.push(rv.x, rv.y, rv.z);
                 }
                 if (idx)
-                  for (let i = 0; i < idx.count; i++) rInds.push(rVo + idx.getX(i));
+                  for (let i = 0; i < idx.count; i++)
+                    rInds.push(rVo + idx.getX(i));
                 else for (let i = 0; i < n; i++) rInds.push(rVo + i);
                 rVo += n;
               });
               if (rVerts.length >= 9 && rInds.length >= 3) {
                 const nV = rVerts.length / 3;
-                const cx = rVerts.reduce((s, v, i) => (i % 3 === 0 ? s + v : s), 0) / nV;
-                const cy = rVerts.reduce((s, v, i) => (i % 3 === 1 ? s + v : s), 0) / nV;
-                const cz = rVerts.reduce((s, v, i) => (i % 3 === 2 ? s + v : s), 0) / nV;
+                const cx =
+                  rVerts.reduce((s, v, i) => (i % 3 === 0 ? s + v : s), 0) / nV;
+                const cy =
+                  rVerts.reduce((s, v, i) => (i % 3 === 1 ? s + v : s), 0) / nV;
+                const cz =
+                  rVerts.reduce((s, v, i) => (i % 3 === 2 ? s + v : s), 0) / nV;
                 for (let i = 0; i < rVerts.length; i += 3) {
                   rVerts[i] -= cx;
                   rVerts[i + 1] -= cy;
@@ -8440,7 +8677,9 @@ diffuseColor.a = 1.0;
                       collisionFilterGroup: PHYS_GROUP_GUMS_STOPPER,
                       collisionFilterMask: PHYS_GROUP_GUM_SPHERE,
                     });
-                    gumsStoperBody.addShape(new CANNON.Box(new CANNON.Vec3(sx, sy, sz)));
+                    gumsStoperBody.addShape(
+                      new CANNON.Box(new CANNON.Vec3(sx, sy, sz)),
+                    );
                     physicsWorld.addBody(gumsStoperBody);
                   }
                   const maxLyBottom = lyTop - tWall - 0.04;
@@ -8484,14 +8723,12 @@ diffuseColor.a = 1.0;
                     gumRadiusGlobal = gumRadPhys;
                     const cin = tWall + gumRadiusGlobal * 1.1;
                     /** Floor only needs sphere radius above inner bottom — do not add tWall (wall thickness is horizontal). */
-                    const minYClamp =
-                      lyBottom + gumRadiusGlobal * 1.05;
+                    const minYClamp = lyBottom + gumRadiusGlobal * 1.05;
                     let topAllow = Math.min(
                       _lb.max.y - Math.max(0.012, gumRadiusGlobal * 0.42),
                       lyTop - gumRadiusGlobal * 0.12,
                     );
-                    const minTopForClamp =
-                      minYClamp + gumRadiusGlobal * 0.12;
+                    const minTopForClamp = minYClamp + gumRadiusGlobal * 0.12;
                     if (topAllow < minTopForClamp) topAllow = minTopForClamp;
                     _gumTankClampLocal =
                       lx0 + cin < lx1 - cin &&
@@ -8592,7 +8829,6 @@ diffuseColor.a = 1.0;
                 console.warn("gumsTankPhysic: empty bounds for gum volume");
               }
             }
-
           } catch (e) {
             console.warn("Physics setup failed:", e);
           }
@@ -8667,8 +8903,10 @@ diffuseColor.a = 1.0;
             console.warn("GumDispenser physics setup failed:", e);
           }
           setupAllPropPhysics(model);
-          if (_propMeshes["mainScreensPin"]) _propMeshes["mainScreensPin"].visible = true;
-          if (_propMeshes["mainScreensBase"]) _propMeshes["mainScreensBase"].visible = true;
+          if (_propMeshes["mainScreensPin"])
+            _propMeshes["mainScreensPin"].visible = true;
+          if (_propMeshes["mainScreensBase"])
+            _propMeshes["mainScreensBase"].visible = true;
           try {
             applyConusMaterials(model);
             setupConusPhysics(model);
@@ -8687,16 +8925,25 @@ diffuseColor.a = 1.0;
           }
 
           const _hideNames = [
-            "certifiedBodyPhysic", "GumDispenserAllPhysic", "bottlePhisic",
-            "dockingStationPhysic", "plantVasePhysic", "macScreenFramePhysic",
-            "macBodyBasePhysic", "conusPhysic1", "conusPhysic2", "conusPhysic3",
+            "certifiedBodyPhysic",
+            "GumDispenserAllPhysic",
+            "bottlePhisic",
+            "dockingStationPhysic",
+            "plantVasePhysic",
+            "macScreenFramePhysic",
+            "macBodyBasePhysic",
+            "conusPhysic1",
+            "conusPhysic2",
+            "conusPhysic3",
             "starPhysic",
           ];
           [model, scene].forEach((root) => {
             root.traverse((node) => {
               if (_hideNames.includes(node.name)) {
                 node.visible = false;
-                node.traverse((child) => { child.visible = false; });
+                node.traverse((child) => {
+                  child.visible = false;
+                });
               }
             });
           });
@@ -8710,16 +8957,23 @@ diffuseColor.a = 1.0;
                 side: THREE.DoubleSide,
               });
             }
-            if (node.name === "cabblesTunnelInner" || node.name === "cabblesTunnelInnerFaces") {
+            if (
+              node.name === "cabblesTunnelInner" ||
+              node.name === "cabblesTunnelInnerFaces"
+            ) {
               node.material = new THREE.MeshStandardMaterial({
                 color: 0x555555,
                 roughness: 0.9,
                 metalness: 0,
               });
             }
-            if (node.name === "displayCable1" || node.name === "displayCable2" ||
-                node.name === "displayCableUsb" ||
-                node.name === "displayPowerCable1" || node.name === "displayPowerCable2") {
+            if (
+              node.name === "displayCable1" ||
+              node.name === "displayCable2" ||
+              node.name === "displayCableUsb" ||
+              node.name === "displayPowerCable1" ||
+              node.name === "displayPowerCable2"
+            ) {
               node.material = new THREE.MeshStandardMaterial({
                 color: 0x1a1a1a,
                 roughness: 0.85,
@@ -8799,7 +9053,9 @@ diffuseColor.a = 1.0;
                 collisionFilterMask: -1,
               });
               tablePlateBody.addShape(
-                new CANNON.Box(new CANNON.Vec3(size.x / 2, plateThickness / 2, size.z / 2))
+                new CANNON.Box(
+                  new CANNON.Vec3(size.x / 2, plateThickness / 2, size.z / 2),
+                ),
               );
               physicsWorld.addBody(tablePlateBody);
               tablePlateHalfX = size.x / 2;
@@ -8812,7 +9068,9 @@ diffuseColor.a = 1.0;
                 size.x * 1.5,
                 size.z * 1.5,
               );
-              const shadowPlaneMat = new THREE.ShadowMaterial({ opacity: 0.35 });
+              const shadowPlaneMat = new THREE.ShadowMaterial({
+                opacity: 0.35,
+              });
               carShadowPlane = new THREE.Mesh(shadowPlaneGeo, shadowPlaneMat);
               carShadowPlane.rotation.x = -Math.PI / 2;
               const _shadowCenter = new THREE.Vector3(
@@ -8843,8 +9101,16 @@ diffuseColor.a = 1.0;
               tableSurfaceY = reflectionPlaneSurfaceY;
             else if (reflectionPlaneWorldPosition)
               tableSurfaceY = reflectionPlaneWorldPosition.y;
-            if (tablePlateBody && (tablePlateBody.position.y + 0.25) !== tableSurfaceY) {
+            if (
+              tablePlateBody &&
+              tablePlateBody.position.y + 0.25 !== tableSurfaceY
+            ) {
               tablePlateBody.position.y = tableSurfaceY - 0.25;
+            }
+            try {
+              finalizeStarOnTable();
+            } catch (e) {
+              console.warn("Star table placement failed:", e);
             }
             showTablePlateWireframe();
             const carGltfPath = "./car-game13.gltf";
@@ -8924,7 +9190,10 @@ diffuseColor.a = 1.0;
                       });
                       node.layers.enable(CAR_LIGHTS_BLOOM_LAYER);
                     }
-                    if (node.name === "frontLightCase" || node.name === "rearLightCase") {
+                    if (
+                      node.name === "frontLightCase" ||
+                      node.name === "rearLightCase"
+                    ) {
                       node.material = new THREE.MeshStandardMaterial({
                         color: 0x111111,
                         metalness: 0,
@@ -8969,7 +9238,9 @@ diffuseColor.a = 1.0;
                   _lbGroup.position.copy(_lbCenter);
                   _lbParent.add(_lbGroup);
                   const _origBodyPos = _lbBody.position.clone().sub(_lbCenter);
-                  const _origLightPos = _lbLight.position.clone().sub(_lbCenter);
+                  const _origLightPos = _lbLight.position
+                    .clone()
+                    .sub(_lbCenter);
                   _lbParent.remove(_lbBody);
                   _lbParent.remove(_lbLight);
                   _lbBody.position.copy(_origBodyPos);
@@ -8978,7 +9249,8 @@ diffuseColor.a = 1.0;
                   _lbGroup.add(_lbLight);
 
                   const _lbSize = _lbBox.getSize(new THREE.Vector3());
-                  const _lbSpacing = _lbSize.x > _lbSize.z ? _lbSize.x : _lbSize.z;
+                  const _lbSpacing =
+                    _lbSize.x > _lbSize.z ? _lbSize.x : _lbSize.z;
                   for (let side = -1; side <= 1; side += 2) {
                     for (let i = 1; i <= 2; i++) {
                       const clone = _lbGroup.clone(true);
@@ -9058,8 +9330,13 @@ diffuseColor.a = 1.0;
                   .filter(Boolean);
                 for (const part of airInParts) {
                   part.baseQuat = part.quaternion.clone();
-                  part.openQuat = part.baseQuat.clone().multiply(_quatAirInDrive);
-                  const stagger = AIR_IN_STAGGER[part.name] || { open: 0, close: 0 };
+                  part.openQuat = part.baseQuat
+                    .clone()
+                    .multiply(_quatAirInDrive);
+                  const stagger = AIR_IN_STAGGER[part.name] || {
+                    open: 0,
+                    close: 0,
+                  };
                   part.openDelay = stagger.open;
                   part.closeDelay = stagger.close;
                   part.openT = 0;
@@ -9188,7 +9465,8 @@ diffuseColor.a = 1.0;
                   }
                   carBottomOffsetY = Math.max(0, spawnSurfaceY - refGroundY);
                   carWheelBottomOffsetY = carBottomOffsetY;
-                  tableMinY = tableTopY + Math.max(0.05, carBottomOffsetY * 0.5);
+                  tableMinY =
+                    tableTopY + Math.max(0.05, carBottomOffsetY * 0.5);
                   tableSpawn.set(
                     spawnX,
                     spawnSurfaceY + carBottomOffsetY,
@@ -9303,7 +9581,11 @@ diffuseColor.a = 1.0;
 
                 const _sceneBox = new THREE.Box3().setFromObject(model);
                 const _sceneSize = _sceneBox.getSize(new THREE.Vector3());
-                const _sceneMaxDim = Math.max(_sceneSize.x, _sceneSize.y, _sceneSize.z);
+                const _sceneMaxDim = Math.max(
+                  _sceneSize.x,
+                  _sceneSize.y,
+                  _sceneSize.z,
+                );
                 getCarCameraLookAtPoint(_macSpawnWorld);
                 placeCarViewCameras(_macSpawnWorld, _sceneMaxDim);
                 syncCarCameraYawTracking();
@@ -9379,7 +9661,10 @@ diffuseColor.a = 1.0;
         },
         undefined,
         (err) => {
-          console.error("[office] office-table-embed75.gltf failed to load:", err);
+          console.error(
+            "[office] office-table-embed76.gltf failed to load:",
+            err,
+          );
         },
       );
 
@@ -9576,7 +9861,9 @@ diffuseColor.a = 1.0;
           if (keys.forward) targetSpeed = carState.maxSpeed;
           if (keys.reverse) {
             if (carState.speed > 0.3) targetSpeed = 0;
-            else targetSpeed = -carState.maxSpeed * (carState.reverseSpeedFactor ?? 0.5);
+            else
+              targetSpeed =
+                -carState.maxSpeed * (carState.reverseSpeedFactor ?? 0.5);
           }
           if (keys.forward && keys.reverse) targetSpeed = 0;
           if (keys.brake) targetSpeed = 0;
@@ -9591,7 +9878,9 @@ diffuseColor.a = 1.0;
             carState._brakeTime += dt;
             const brakeRamp = Math.min(carState._brakeTime / 1.2, 1);
             const brakePower = 8 + brakeRamp * 30;
-            carState.speed -= Math.sign(carState.speed) * Math.min(Math.abs(carState.speed), brakePower * dt);
+            carState.speed -=
+              Math.sign(carState.speed) *
+              Math.min(Math.abs(carState.speed), brakePower * dt);
           } else {
             carState._brakeTime = 0;
           }
@@ -9645,7 +9934,10 @@ diffuseColor.a = 1.0;
             const speed = carState.speed;
             const sign = speed > 0 ? 1 : -1;
             const steer = sign > 0 ? carState.steerAngle : -carState.steerAngle;
-            const speedFactor = Math.min(1, Math.abs(speed) / carState.maxSpeed);
+            const speedFactor = Math.min(
+              1,
+              Math.abs(speed) / carState.maxSpeed,
+            );
             const effectiveTurnRate = carState.turnRate * speedFactor;
             const centerX =
               car.position.x + rightX * (speed / (effectiveTurnRate * steer));
@@ -9675,9 +9967,14 @@ diffuseColor.a = 1.0;
             const dx = car.position.x - off.x;
             const dy = car.position.y - off.y;
             const dz = car.position.z - off.z;
-            if (Math.abs(dx) >= he.x + carR || Math.abs(dy) >= he.y + carR || Math.abs(dz) >= he.z + carR) continue;
-            const overlapX = (he.x + carR) - Math.abs(dx);
-            const overlapZ = (he.z + carR) - Math.abs(dz);
+            if (
+              Math.abs(dx) >= he.x + carR ||
+              Math.abs(dy) >= he.y + carR ||
+              Math.abs(dz) >= he.z + carR
+            )
+              continue;
+            const overlapX = he.x + carR - Math.abs(dx);
+            const overlapZ = he.z + carR - Math.abs(dz);
             if (overlapX <= 0 || overlapZ <= 0) continue;
             if (overlapX < overlapZ) {
               car.position.x += Math.sign(dx) * overlapX;
@@ -9700,8 +9997,12 @@ diffuseColor.a = 1.0;
               ? wheelFL._physRadius
               : WHEEL_RADIUS * storedCarScale;
           const propBodiesToBlock = [
-            dockingStationPhysBody, plantVasePhysBody, macScreenFramePhysBody,
-            macBodyBasePhysBody, mainScreensPinPhysBody, mainScreensBasePhysBody,
+            dockingStationPhysBody,
+            plantVasePhysBody,
+            macScreenFramePhysBody,
+            macBodyBasePhysBody,
+            mainScreensPinPhysBody,
+            mainScreensBasePhysBody,
           ];
           for (let _pass = 0; _pass < 4; _pass++) {
             let anyOverlap = false;
@@ -9735,7 +10036,11 @@ diffuseColor.a = 1.0;
 
                   const stepHeight = propTop - carBottom;
                   const climbMax = pb._driveableStep ?? wRadius;
-                  if (!pb._noClimb && stepHeight > 0 && stepHeight <= climbMax) {
+                  if (
+                    !pb._noClimb &&
+                    stepHeight > 0 &&
+                    stepHeight <= climbMax
+                  ) {
                     continue;
                   }
 
@@ -9746,14 +10051,22 @@ diffuseColor.a = 1.0;
                   }
                   carState.speed = 0;
                 } else {
-                  if (Math.abs(dx) >= he.x + carR || Math.abs(dz) >= he.z + carR) continue;
-                  const overlapX = (he.x + carR) - Math.abs(dx);
-                  const overlapZ = (he.z + carR) - Math.abs(dz);
+                  if (
+                    Math.abs(dx) >= he.x + carR ||
+                    Math.abs(dz) >= he.z + carR
+                  )
+                    continue;
+                  const overlapX = he.x + carR - Math.abs(dx);
+                  const overlapZ = he.z + carR - Math.abs(dz);
                   if (overlapX <= 0 || overlapZ <= 0) continue;
 
                   const stepHeight = propTop - carBottom;
                   const climbMax = pb._driveableStep ?? wRadius;
-                  if (!pb._noClimb && stepHeight > 0 && stepHeight <= climbMax) {
+                  if (
+                    !pb._noClimb &&
+                    stepHeight > 0 &&
+                    stepHeight <= climbMax
+                  ) {
                     continue;
                   }
 
@@ -9775,11 +10088,20 @@ diffuseColor.a = 1.0;
           _carRearAxleSurfY = tableSurfaceY;
           _carGroundSurfY = tableSurfaceY;
           const _propSurf = [
-            dockingStationPhysBody, plantVasePhysBody, macScreenFramePhysBody,
-            macBodyBasePhysBody, mainScreensPinPhysBody, mainScreensBasePhysBody,
+            dockingStationPhysBody,
+            plantVasePhysBody,
+            macScreenFramePhysBody,
+            macBodyBasePhysBody,
+            mainScreensPinPhysBody,
+            mainScreensBasePhysBody,
           ];
           const _wheels = [wheelFL, wheelFR, wheelRL, wheelRR];
-          const _wSurfY = [tableSurfaceY, tableSurfaceY, tableSurfaceY, tableSurfaceY];
+          const _wSurfY = [
+            tableSurfaceY,
+            tableSurfaceY,
+            tableSurfaceY,
+            tableSurfaceY,
+          ];
           for (let wi = 0; wi < 4; wi++) {
             const w = _wheels[wi];
             if (!w || !w._canonMesh) continue;
@@ -9819,8 +10141,10 @@ diffuseColor.a = 1.0;
           }
           _carSurfRange = _maxWheelSurf - _minWheelSurf;
         }
-        const edgeX = Math.abs(car.position.x - tablePlateCenter.x) > tablePlateHalfX;
-        const edgeZ = Math.abs(car.position.z - tablePlateCenter.z) > tablePlateHalfZ;
+        const edgeX =
+          Math.abs(car.position.x - tablePlateCenter.x) > tablePlateHalfX;
+        const edgeZ =
+          Math.abs(car.position.z - tablePlateCenter.z) > tablePlateHalfZ;
         const offTable = edgeX || edgeZ;
         if (offTable && !carFalling) {
           carFalling = true;
@@ -9842,9 +10166,13 @@ diffuseColor.a = 1.0;
           let floorTopY = null;
           if (floorPhysBody) {
             const fShape = floorPhysBody.shapes[0];
-            if (fShape) floorTopY = floorPhysBody.position.y + fShape.halfExtents.y;
+            if (fShape)
+              floorTopY = floorPhysBody.position.y + fShape.halfExtents.y;
           }
-          if (floorTopY != null && car.position.y - carBottomOffsetY <= floorTopY) {
+          if (
+            floorTopY != null &&
+            car.position.y - carBottomOffsetY <= floorTopY
+          ) {
             car.position.y = floorTopY + carBottomOffsetY;
             carState.velY = 0;
             carState.speed = 0;
@@ -9871,8 +10199,12 @@ diffuseColor.a = 1.0;
           if (carState.velY <= 0) {
             const _carRLand = Math.max(halfW, halfL) * storedCarScale;
             const _propLandBodies = [
-              dockingStationPhysBody, plantVasePhysBody, macScreenFramePhysBody,
-              macBodyBasePhysBody, mainScreensPinPhysBody, mainScreensBasePhysBody,
+              dockingStationPhysBody,
+              plantVasePhysBody,
+              macScreenFramePhysBody,
+              macBodyBasePhysBody,
+              mainScreensPinPhysBody,
+              mainScreensBasePhysBody,
             ];
             for (const pb of _propLandBodies) {
               if (!pb) continue;
@@ -9888,7 +10220,10 @@ diffuseColor.a = 1.0;
                 if (Math.abs(car.position.x - bx) >= he.x + _carRLand) continue;
                 if (Math.abs(car.position.z - bz) >= he.z + _carRLand) continue;
                 const propTop = by + he.y;
-                if (propTop > _landOnY && car.position.y - carBottomOffsetY <= propTop + 0.1) {
+                if (
+                  propTop > _landOnY &&
+                  car.position.y - carBottomOffsetY <= propTop + 0.1
+                ) {
                   _landOnY = propTop + carBottomOffsetY;
                 }
               }
@@ -9901,7 +10236,10 @@ diffuseColor.a = 1.0;
             }
             carState.velY = 0;
           }
-        } else if (wasOnRamp && car.position.y > tableSpawn.y + 0.2 * storedCarScale) {
+        } else if (
+          wasOnRamp &&
+          car.position.y > tableSpawn.y + 0.2 * storedCarScale
+        ) {
           carState.velY = -0.5;
         } else {
           const surfDelta = _carFrontAxleSurfY - _carRearAxleSurfY;
@@ -9924,8 +10262,12 @@ diffuseColor.a = 1.0;
           } else {
             const _carRRest = Math.max(halfW, halfL) * storedCarScale;
             const _propRestBodies = [
-              dockingStationPhysBody, plantVasePhysBody, macScreenFramePhysBody,
-              macBodyBasePhysBody, mainScreensPinPhysBody, mainScreensBasePhysBody,
+              dockingStationPhysBody,
+              plantVasePhysBody,
+              macScreenFramePhysBody,
+              macBodyBasePhysBody,
+              mainScreensPinPhysBody,
+              mainScreensBasePhysBody,
             ];
             for (const pb of _propRestBodies) {
               if (!pb) continue;
@@ -9982,7 +10324,7 @@ diffuseColor.a = 1.0;
         if (!carFalling) {
           if (car.position.y < tableMinY) car.position.y = tableMinY;
         }
-        
+
         if (
           !Number.isFinite(car.position.x) ||
           !Number.isFinite(car.position.y) ||
@@ -10073,7 +10415,8 @@ diffuseColor.a = 1.0;
         rawScene.traverse((node) => {
           if (node.isMesh) {
             if (Array.isArray(node.material)) {
-              for (let i = 0; i < node.material.length; i++) node.material[i] = airPlaneMaterial;
+              for (let i = 0; i < node.material.length; i++)
+                node.material[i] = airPlaneMaterial;
             } else {
               node.material = airPlaneMaterial;
             }
@@ -10120,7 +10463,8 @@ diffuseColor.a = 1.0;
         for (let i = 0; i < n; i++) {
           const curr = corners[i];
           const next = corners[(i + 1) % n];
-          const dx = next[0] - curr[0], dz = next[1] - curr[1];
+          const dx = next[0] - curr[0],
+            dz = next[1] - curr[1];
           const len = Math.sqrt(dx * dx + dz * dz);
           edgeDirs.push({ ux: dx / len, uz: dz / len, len });
         }
@@ -10130,17 +10474,23 @@ diffuseColor.a = 1.0;
           const curr = corners[i];
           segs.push({
             type: "straight",
-            sx: curr[0] + ed.ux * R, sz: curr[1] + ed.uz * R,
+            sx: curr[0] + ed.ux * R,
+            sz: curr[1] + ed.uz * R,
             ex: corners[(i + 1) % n][0] - ed.ux * R,
             ez: corners[(i + 1) % n][1] - ed.uz * R,
-            dx: ed.ux, dz: ed.uz,
+            dx: ed.ux,
+            dz: ed.uz,
             len: Math.max(straightLen, 0),
           });
           const edNext = edgeDirs[(i + 1) % n];
           const cornerPt = corners[(i + 1) % n];
           const arcStart = [cornerPt[0] - ed.ux * R, cornerPt[1] - ed.uz * R];
-          const arcEnd = [cornerPt[0] + edNext.ux * R, cornerPt[1] + edNext.uz * R];
-          const inNx = -ed.uz, inNz = ed.ux;
+          const arcEnd = [
+            cornerPt[0] + edNext.ux * R,
+            cornerPt[1] + edNext.uz * R,
+          ];
+          const inNx = -ed.uz,
+            inNz = ed.ux;
           const cross = ed.ux * edNext.uz - ed.uz * edNext.ux;
           const sign = cross > 0 ? 1 : -1;
           const cx = arcStart[0] + inNx * R * sign;
@@ -10152,8 +10502,11 @@ diffuseColor.a = 1.0;
           while (sweep < -Math.PI) sweep += 2 * Math.PI;
           segs.push({
             type: "arc",
-            cx, cz, r: R,
-            startAngle, sweep,
+            cx,
+            cz,
+            r: R,
+            startAngle,
+            sweep,
             len: Math.abs(sweep) * R,
             turnSign: sign,
           });
@@ -10174,16 +10527,17 @@ diffuseColor.a = 1.0;
             for (let j = 0; j <= steps; j++) {
               const frac = j / steps;
               const angle = s.startAngle + s.sweep * frac;
-              pathPoints.push(new THREE.Vector3(
-                s.cx + Math.cos(angle) * s.r,
-                pathY,
-                s.cz + Math.sin(angle) * s.r,
-              ));
+              pathPoints.push(
+                new THREE.Vector3(
+                  s.cx + Math.cos(angle) * s.r,
+                  pathY,
+                  s.cz + Math.sin(angle) * s.r,
+                ),
+              );
             }
           }
         }
         pathPoints.push(pathPoints[0].clone());
-
       }
 
       const GUM_CAR_DISTURB_MS = 900;
@@ -10201,12 +10555,17 @@ diffuseColor.a = 1.0;
 
       function bindGumCarCollide(body) {
         body.addEventListener("collide", (e) => {
-          if (e.body && e.body.material === carMaterial) wakeGumFromCarHit(body);
+          if (e.body && e.body.material === carMaterial)
+            wakeGumFromCarHit(body);
         });
       }
 
       function isGumCarDisturbed(body) {
-        return body && body._carDisturbedUntil && performance.now() < body._carDisturbedUntil;
+        return (
+          body &&
+          body._carDisturbedUntil &&
+          performance.now() < body._carDisturbedUntil
+        );
       }
 
       function syncGumInstancedTransforms() {
@@ -10377,7 +10736,8 @@ diffuseColor.a = 1.0;
           if (gentle) {
             if (py < c.minY) _gumClampTmp.y = c.minY;
           } else {
-            if (!skipY) _gumClampTmp.y = THREE.MathUtils.clamp(py, c.minY, c.maxY);
+            if (!skipY)
+              _gumClampTmp.y = THREE.MathUtils.clamp(py, c.minY, c.maxY);
           }
           _gumClampTmp.z = THREE.MathUtils.clamp(pz, c.minZ, c.maxZ);
           const clampedX = _gumClampTmp.x !== px;
@@ -10405,9 +10765,12 @@ diffuseColor.a = 1.0;
         _gumClampTmp.applyMatrix4(_invTankMwGumClamp);
         const pad = gumRadiusGlobal * 2;
         return (
-          _gumClampTmp.x >= c.minX - pad && _gumClampTmp.x <= c.maxX + pad &&
-          _gumClampTmp.y >= c.minY - pad && _gumClampTmp.y <= c.maxY + pad &&
-          _gumClampTmp.z >= c.minZ - pad && _gumClampTmp.z <= c.maxZ + pad
+          _gumClampTmp.x >= c.minX - pad &&
+          _gumClampTmp.x <= c.maxX + pad &&
+          _gumClampTmp.y >= c.minY - pad &&
+          _gumClampTmp.y <= c.maxY + pad &&
+          _gumClampTmp.z >= c.minZ - pad &&
+          _gumClampTmp.z <= c.maxZ + pad
         );
       }
 
@@ -10612,7 +10975,12 @@ diffuseColor.a = 1.0;
             _wheelsList[3] = wheelRR;
             car.updateMatrixWorld(true);
             const _syncInvDt = dt > 0 ? 1 / dt : 0;
-            const _wheelBodies = [canonFLBody, canonFRBody, canonRLBody, canonRRBody];
+            const _wheelBodies = [
+              canonFLBody,
+              canonFRBody,
+              canonRLBody,
+              canonRRBody,
+            ];
             for (let wi = 0; wi < 4; wi++) {
               const w = _wheelsList[wi];
               const wb = _wheelBodies[wi];
@@ -10626,19 +10994,29 @@ diffuseColor.a = 1.0;
               const cvSpd = Math.sqrt(cvx * cvx + cvy * cvy + cvz * cvz);
               if (cvSpd > MAX_CAR_PHYS_VEL) {
                 const cvScale = MAX_CAR_PHYS_VEL / cvSpd;
-                cvx *= cvScale; cvy *= cvScale; cvz *= cvScale;
+                cvx *= cvScale;
+                cvy *= cvScale;
+                cvz *= cvScale;
               }
               wb.velocity.set(cvx, cvy, cvz);
-              wb.position.set(_canonWorldPos.x, _canonWorldPos.y, _canonWorldPos.z);
-              wb.quaternion.set(_canonWorldQuat.x, _canonWorldQuat.y, _canonWorldQuat.z, _canonWorldQuat.w);
+              wb.position.set(
+                _canonWorldPos.x,
+                _canonWorldPos.y,
+                _canonWorldPos.z,
+              );
+              wb.quaternion.set(
+                _canonWorldQuat.x,
+                _canonWorldQuat.y,
+                _canonWorldQuat.z,
+                _canonWorldQuat.w,
+              );
               const m = w._canonMesh;
               if (m.geometry) {
                 m.getWorldScale(_wheelPhysScaleSync);
                 m.geometry.computeBoundingBox();
                 const bb = m.geometry.boundingBox;
                 const rawY = bb.max.y - bb.min.y;
-                const rawXZ =
-                  (bb.max.x - bb.min.x + (bb.max.z - bb.min.z)) / 2;
+                const rawXZ = (bb.max.x - bb.min.x + (bb.max.z - bb.min.z)) / 2;
                 const cylHeight = Math.max(0.05, rawY * _wheelPhysScaleSync.y);
                 const cylRadius = (rawXZ * _wheelPhysScaleSync.x) / 2;
                 m._physRadius = cylRadius;
@@ -10654,12 +11032,7 @@ diffuseColor.a = 1.0;
                   ) {
                     wb.removeShape(sh);
                     wb.addShape(
-                      new CANNON.Cylinder(
-                        cylRadius,
-                        cylRadius,
-                        cylHeight,
-                        16,
-                      ),
+                      new CANNON.Cylinder(cylRadius, cylRadius, cylHeight, 16),
                     );
                     wb.updateMassProperties();
                   }
@@ -10676,7 +11049,12 @@ diffuseColor.a = 1.0;
               const cbCenter = cbBox.getCenter(_canonWorldPos);
               canonBodyMesh.getWorldQuaternion(_canonWorldQuat);
               canonBodyPhys.position.set(cbCenter.x, cbCenter.y, cbCenter.z);
-              canonBodyPhys.quaternion.set(_canonWorldQuat.x, _canonWorldQuat.y, _canonWorldQuat.z, _canonWorldQuat.w);
+              canonBodyPhys.quaternion.set(
+                _canonWorldQuat.x,
+                _canonWorldQuat.y,
+                _canonWorldQuat.z,
+                _canonWorldQuat.w,
+              );
               const boxSh = canonBodyPhys.shapes[0];
               if (boxSh && boxSh.halfExtents) {
                 const he = boxSh.halfExtents;
@@ -10694,15 +11072,28 @@ diffuseColor.a = 1.0;
             }
             if (car.userData._carPhysWires) {
               for (const { wire, body } of car.userData._carPhysWires) {
-                wire.position.set(body.position.x, body.position.y, body.position.z);
-                wire.quaternion.set(body.quaternion.x, body.quaternion.y, body.quaternion.z, body.quaternion.w);
+                wire.position.set(
+                  body.position.x,
+                  body.position.y,
+                  body.position.z,
+                );
+                wire.quaternion.set(
+                  body.quaternion.x,
+                  body.quaternion.y,
+                  body.quaternion.z,
+                  body.quaternion.w,
+                );
               }
             }
             if (gumsAddedCount > 0 && gumBodies.length > 0) {
               const wakeMargin = gumRadiusGlobal * 2;
               const _gumLimit = Math.min(gumsAddedCount, gumBodies.length);
               const _carWakeBodies = [
-                canonFLBody, canonFRBody, canonRLBody, canonRRBody, canonBodyPhys,
+                canonFLBody,
+                canonFRBody,
+                canonRLBody,
+                canonRRBody,
+                canonBodyPhys,
               ].filter(Boolean);
               for (let cbi = 0; cbi < _carWakeBodies.length; cbi++) {
                 const wb = _carWakeBodies[cbi];
@@ -10720,11 +11111,17 @@ diffuseColor.a = 1.0;
                 } else {
                   wxH = wyH = wzH = wakeMargin + 0.5;
                 }
-                const cpx = wb.position.x, cpy = wb.position.y, cpz = wb.position.z;
+                const cpx = wb.position.x,
+                  cpy = wb.position.y,
+                  cpz = wb.position.z;
                 for (let gi = 0; gi < _gumLimit; gi++) {
                   const gb = gumBodies[gi];
                   if (!gb) continue;
-                  if (gb.type === CANNON.Body.DYNAMIC && gb.sleepState !== CANNON.Body.SLEEPING) continue;
+                  if (
+                    gb.type === CANNON.Body.DYNAMIC &&
+                    gb.sleepState !== CANNON.Body.SLEEPING
+                  )
+                    continue;
                   const dx = Math.abs(gb.position.x - cpx);
                   const dy = Math.abs(gb.position.y - cpy);
                   const dz = Math.abs(gb.position.z - cpz);
@@ -10753,13 +11150,18 @@ diffuseColor.a = 1.0;
               !gumsReadyToDrop && gumReleased.size === 0 ? 0.86 : 0.82;
             const gumDampingWhileFilling = gumsReadyToDrop
               ? 0.28
-              : (_gumDispenserBecameDynamic ? 0.4 : gumDampAfterFill);
+              : _gumDispenserBecameDynamic
+                ? 0.4
+                : gumDampAfterFill;
             const maxGumSpd = _gumDispenserBecameDynamic ? 30 : 4;
             const maxFallSpd = _gumDispenserBecameDynamic ? 30 : 3;
             for (let gi = 0; gi < gumsAddedCount; gi++) {
               const gb = gumBodies[gi];
               if (gb.type === CANNON.Body.STATIC) continue;
-              if (gb.type === CANNON.Body.DYNAMIC && (!gumReleased.has(gi) || _gumDispenserBecameDynamic))
+              if (
+                gb.type === CANNON.Body.DYNAMIC &&
+                (!gumReleased.has(gi) || _gumDispenserBecameDynamic)
+              )
                 gb.linearDamping = gumDampingWhileFilling;
               const v = gb.velocity;
               if (v.y < -maxFallSpd) v.y = -maxFallSpd;
@@ -10772,57 +11174,62 @@ diffuseColor.a = 1.0;
               }
             }
             if (physicsStepDt > 0) {
-            if (_gumDispenserBecameDynamic) syncGumDispenserFromPhysics();
-            const fixedStep = _gumDispenserBecameDynamic ? GUM_PHYS_FIXED_STEP_DYNAMIC : GUM_PHYS_FIXED_STEP;
-            const maxSub = gumsReadyToDrop
-              ? perfGumMaxSubstepsFill
-              : _gumDispenserBecameDynamic
-                ? perfGumMaxSubstepsDynamic
-                : perfGumMaxSubstepsMixed;
-            const subSteps = Math.min(Math.ceil(physicsStepDt / fixedStep), maxSub);
-            const gumSepUseImpulse =
-              gumsReadyToDrop || gumReleased.size > 0;
-            let allTankGumsStatic =
-              !gumsReadyToDrop && gumReleased.size === 0;
-            if (allTankGumsStatic) {
-              for (let gi = 0; gi < gumsAddedCount; gi++) {
-                if (gumBodies[gi].type !== CANNON.Body.STATIC) {
-                  allTankGumsStatic = false;
-                  break;
+              if (_gumDispenserBecameDynamic) syncGumDispenserFromPhysics();
+              const fixedStep = _gumDispenserBecameDynamic
+                ? GUM_PHYS_FIXED_STEP_DYNAMIC
+                : GUM_PHYS_FIXED_STEP;
+              const maxSub = gumsReadyToDrop
+                ? perfGumMaxSubstepsFill
+                : _gumDispenserBecameDynamic
+                  ? perfGumMaxSubstepsDynamic
+                  : perfGumMaxSubstepsMixed;
+              const subSteps = Math.min(
+                Math.ceil(physicsStepDt / fixedStep),
+                maxSub,
+              );
+              const gumSepUseImpulse = gumsReadyToDrop || gumReleased.size > 0;
+              let allTankGumsStatic =
+                !gumsReadyToDrop && gumReleased.size === 0;
+              if (allTankGumsStatic) {
+                for (let gi = 0; gi < gumsAddedCount; gi++) {
+                  if (gumBodies[gi].type !== CANNON.Body.STATIC) {
+                    allTankGumsStatic = false;
+                    break;
+                  }
                 }
+              } else {
+                allTankGumsStatic = false;
               }
-            } else {
-              allTankGumsStatic = false;
-            }
-            if (allTankGumsStatic) {
-              physicsWorld.step(1 / 60, physicsStepDt, 3);
-              gumTankAllStaticThisFrame = true;
-            } else {
-              gumTankAllStaticThisFrame = false;
-              if (gumsTankPhysicObject) {
-                gumsTankPhysicObject.updateMatrixWorld(true);
-                _gumTankMwCached.copy(gumsTankPhysicObject.matrixWorld);
-                _invTankMwGumClamp.copy(_gumTankMwCached).invert();
-              }
-              if (_gumDispenserBecameDynamic) {
-                syncGumDispenserFromPhysics();
+              if (allTankGumsStatic) {
+                physicsWorld.step(1 / 60, physicsStepDt, 3);
+                gumTankAllStaticThisFrame = true;
+              } else {
+                gumTankAllStaticThisFrame = false;
                 if (gumsTankPhysicObject) {
-                  gumDispenserGroup.updateMatrixWorld(true);
                   gumsTankPhysicObject.updateMatrixWorld(true);
                   _gumTankMwCached.copy(gumsTankPhysicObject.matrixWorld);
                   _invTankMwGumClamp.copy(_gumTankMwCached).invert();
                 }
-                physicsWorld.step(1 / 60, physicsStepDt, 2);
-              } else {
-                for (let si = 0; si < subSteps; si++) {
+                if (_gumDispenserBecameDynamic) {
+                  syncGumDispenserFromPhysics();
+                  if (gumsTankPhysicObject) {
+                    gumDispenserGroup.updateMatrixWorld(true);
+                    gumsTankPhysicObject.updateMatrixWorld(true);
+                    _gumTankMwCached.copy(gumsTankPhysicObject.matrixWorld);
+                    _invTankMwGumClamp.copy(_gumTankMwCached).invert();
+                  }
+                  physicsWorld.step(1 / 60, physicsStepDt, 2);
+                } else {
+                  for (let si = 0; si < subSteps; si++) {
+                    clampGumsInsideTankLocalAabb();
+                    physicsWorld.step(fixedStep);
+                    clampGumsInsideTankLocalAabb();
+                    if (gumsReadyToDrop)
+                      separateOverlappingGumSpheres(gumSepUseImpulse);
+                  }
                   clampGumsInsideTankLocalAabb();
-                  physicsWorld.step(fixedStep);
-                  clampGumsInsideTankLocalAabb();
-                  if (gumsReadyToDrop) separateOverlappingGumSpheres(gumSepUseImpulse);
                 }
-                clampGumsInsideTankLocalAabb();
               }
-            }
             } else if (
               physicsStepDt <= 0 &&
               _gumPrevFrameTankAllStatic &&
@@ -10832,18 +11239,18 @@ diffuseColor.a = 1.0;
             }
             if (!gumsReadyToDrop) {
               if (!_gumDispenserBecameDynamic) {
-              for (let gi = 0; gi < gumsAddedCount; gi++) {
-                if (gumReleased.has(gi)) continue;
-                if (!isGumInsideTank(gi)) continue;
-                const b = gumBodies[gi];
-                if (isGumCarDisturbed(b)) continue;
-                if (b.type === CANNON.Body.DYNAMIC && b.sleepState === 2) {
-                  b.type = CANNON.Body.STATIC;
-                  b.velocity.set(0, 0, 0);
-                  b.angularVelocity.set(0, 0, 0);
-                  b.updateMassProperties();
+                for (let gi = 0; gi < gumsAddedCount; gi++) {
+                  if (gumReleased.has(gi)) continue;
+                  if (!isGumInsideTank(gi)) continue;
+                  const b = gumBodies[gi];
+                  if (isGumCarDisturbed(b)) continue;
+                  if (b.type === CANNON.Body.DYNAMIC && b.sleepState === 2) {
+                    b.type = CANNON.Body.STATIC;
+                    b.velocity.set(0, 0, 0);
+                    b.angularVelocity.set(0, 0, 0);
+                    b.updateMassProperties();
+                  }
                 }
-              }
               }
               /** COM speed only — wait until motion is actually small before counting “settled”. */
               const settleLinMax = 0.45;
@@ -10858,16 +11265,13 @@ diffuseColor.a = 1.0;
                 if (b.type === CANNON.Body.STATIC) continue;
                 anyDynamicTank = true;
                 const v = b.velocity;
-                const lin = Math.sqrt(
-                  v.x * v.x + v.y * v.y + v.z * v.z,
-                );
+                const lin = Math.sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
                 if (lin > settleLinMax) {
                   allSlowLin = false;
                   break;
                 }
               }
-              if (anyDynamicTank && allSlowLin)
-                gumsTankSettleAccum += dt;
+              if (anyDynamicTank && allSlowLin) gumsTankSettleAccum += dt;
               else gumsTankSettleAccum = 0;
               const timeFuse =
                 gumReleased.size === 0 &&
@@ -10875,7 +11279,7 @@ diffuseColor.a = 1.0;
               if (
                 !_gumDispenserBecameDynamic &&
                 ((anyDynamicTank && gumsTankSettleAccum >= settleHoldSec) ||
-                (anyDynamicTank && timeFuse))
+                  (anyDynamicTank && timeFuse))
               ) {
                 for (let gi = 0; gi < gumsAddedCount; gi++) {
                   if (gumReleased.has(gi)) continue;
@@ -10891,10 +11295,12 @@ diffuseColor.a = 1.0;
                 }
                 gumsTankSettleAccum = 0;
               }
-              const _dispenserStillMoving = _gumDispenserBecameDynamic && gumDispenserPhysBody &&
+              const _dispenserStillMoving =
+                _gumDispenserBecameDynamic &&
+                gumDispenserPhysBody &&
                 (Math.abs(gumDispenserPhysBody.velocity.x) > 0.5 ||
-                 Math.abs(gumDispenserPhysBody.velocity.y) > 0.5 ||
-                 Math.abs(gumDispenserPhysBody.velocity.z) > 0.5);
+                  Math.abs(gumDispenserPhysBody.velocity.y) > 0.5 ||
+                  Math.abs(gumDispenserPhysBody.velocity.z) > 0.5);
               if (_gumDispenserBecameDynamic && !_dispenserStillMoving) {
                 const dynSettleSpd2 = 0.3 * 0.3;
                 const dynSettleAng2 = 1.0 * 1.0;
@@ -10930,7 +11336,7 @@ diffuseColor.a = 1.0;
                   const b = gumBodies[gi];
                   if (b.type === CANNON.Body.DYNAMIC) {
                     b.linearDamping = 0.92;
-                    b.angularDamping = 0.90;
+                    b.angularDamping = 0.9;
                   }
                 }
                 const toFreeze = [];
@@ -10987,7 +11393,10 @@ diffuseColor.a = 1.0;
           let carOnRampShouldJump = false;
           let frontWheelsOffRamp = false;
           const _allCarBodies = [
-            canonFLBody, canonFRBody, canonRLBody, canonRRBody,
+            canonFLBody,
+            canonFRBody,
+            canonRLBody,
+            canonRRBody,
           ].filter(Boolean);
           for (let ci = 0; ci < physicsWorld.contacts.length; ci++) {
             const c = physicsWorld.contacts[ci];
@@ -11002,7 +11411,10 @@ diffuseColor.a = 1.0;
                 carOnTable = true;
               }
             }
-            if (bottlePhysBody && (bi === bottlePhysBody || bj === bottlePhysBody)) {
+            if (
+              bottlePhysBody &&
+              (bi === bottlePhysBody || bj === bottlePhysBody)
+            ) {
               const other = bi === bottlePhysBody ? bj : bi;
               if (_allCarBodies.includes(other)) {
                 if (bottlePhysBody._frozen) {
@@ -11011,7 +11423,10 @@ diffuseColor.a = 1.0;
                 }
               }
             }
-            if (certifiedPhysBody && (bi === certifiedPhysBody || bj === certifiedPhysBody)) {
+            if (
+              certifiedPhysBody &&
+              (bi === certifiedPhysBody || bj === certifiedPhysBody)
+            ) {
               const other = bi === certifiedPhysBody ? bj : bi;
               if (_allCarBodies.includes(other)) {
                 if (certifiedPhysBody._frozen) {
@@ -11020,23 +11435,8 @@ diffuseColor.a = 1.0;
                 }
               }
             }
-            for (let si = 0; si < _starInstances.length; si++) {
-              const starBody = _starInstances[si]?.physBody;
-              if (!starBody) continue;
-              if (bi !== starBody && bj !== starBody) continue;
-              const other = bi === starBody ? bj : bi;
-              if (!_allCarBodies.includes(other)) continue;
-              if (starBody._frozen) {
-                starBody._frozen = false;
-                starBody.wakeUp();
-              }
-            }
           }
-          if (
-            rampLeftObject &&
-            car &&
-            carState.velY <= 0
-          ) {
+          if (rampLeftObject && car && carState.velY <= 0) {
             rampLeftObject.updateMatrixWorld(true);
             carRampRayOrigin.set(
               car.position.x,
@@ -11100,7 +11500,8 @@ diffuseColor.a = 1.0;
               if (_rampNormal.y < 0) _rampNormal.negate();
               carRampNormalStored.copy(_rampNormal);
               if (carOnRampY === null) carOnRampY = hit.point.y;
-              if (Math.abs(carState.speed) >= CAR_RAMP_JUMP_MIN_SPEED) carOnRampShouldJump = true;
+              if (Math.abs(carState.speed) >= CAR_RAMP_JUMP_MIN_SPEED)
+                carOnRampShouldJump = true;
               break;
             }
             if (carOnRampY !== null && rampTargets.length > 0) {
@@ -11203,10 +11604,7 @@ diffuseColor.a = 1.0;
               _rampLeftJumpActive = true;
               const jumpSpeedT = THREE.MathUtils.clamp(
                 (leaveSpeed - CAR_RAMP_JUMP_MIN_SPEED) /
-                  Math.max(
-                    0.01,
-                    carState.maxSpeed - CAR_RAMP_JUMP_MIN_SPEED,
-                  ),
+                  Math.max(0.01, carState.maxSpeed - CAR_RAMP_JUMP_MIN_SPEED),
                 0,
                 1,
               );
@@ -11214,10 +11612,7 @@ diffuseColor.a = 1.0;
                 RAMP_JUMP_SLOW_MO_CHANCE +
                 (RAMP_JUMP_SLOW_MO_CHANCE_MAX - RAMP_JUMP_SLOW_MO_CHANCE) *
                   jumpSpeedT;
-              if (
-                Math.random() < slowMoRoll &&
-                isCarCameraOrbitDefault()
-              ) {
+              if (Math.random() < slowMoRoll && isCarCameraOrbitDefault()) {
                 snapshotCarOrbitCamRestPose();
                 rollRampJumpSlowMoCameraDrift();
                 _rampJumpDidSlowMo = true;
@@ -11351,7 +11746,10 @@ diffuseColor.a = 1.0;
               ? JUMP_AIR_TILT_LERP
               : AIR_TILT_LERP_MIN +
                 (AIR_TILT_LERP_MAX - AIR_TILT_LERP_MIN) *
-                  Math.min(1, jumpLaunchSpeed / Math.max(0.01, carState.maxSpeed));
+                  Math.min(
+                    1,
+                    jumpLaunchSpeed / Math.max(0.01, carState.maxSpeed),
+                  );
           const groundTiltLerp = inLandingRecovery
             ? LANDING_TILT_LERP
             : onStepTransition
@@ -11508,7 +11906,8 @@ diffuseColor.a = 1.0;
           if (flameEffectsVisible) {
             const flameElapsed = nowSec - flameWaveStartTime;
             const deskWaveEnd =
-              Math.max(0, flameEffects.length - 1) * flameDelayS + flameDurationS;
+              Math.max(0, flameEffects.length - 1) * flameDelayS +
+              flameDurationS;
             if (_jumpFlameWaveLoopActive) {
               if (carState.velY === 0) {
                 _jumpFlameWaveLoopActive = false;
@@ -11526,8 +11925,7 @@ diffuseColor.a = 1.0;
                 const ef = flameEffects[f];
                 const startAt = f * flameDelayS;
                 const endAt = startAt + flameDurationS;
-                const showThis =
-                  waveElapsed >= startAt && waveElapsed < endAt;
+                const showThis = waveElapsed >= startAt && waveElapsed < endAt;
                 ef.points.visible = showThis;
                 ef.trailPoints.visible = showThis;
                 ef.trailPoints2.visible = showThis;
@@ -11535,7 +11933,8 @@ diffuseColor.a = 1.0;
                 if (showThis) {
                   getDeskFlameAnchorPosition(ef.flameMesh, _deskFlamePos);
                   const pegHalfH = ef.flameAnchorHalfHeight || 0;
-                  const localProgress = (waveElapsed - startAt) / flameDurationS;
+                  const localProgress =
+                    (waveElapsed - startAt) / flameDurationS;
                   const risePhase = 0.25;
                   const easeIn = Math.min(
                     1,
@@ -11561,10 +11960,12 @@ diffuseColor.a = 1.0;
                   ef.trailPoints.material.uniforms.uFade.value = fadeOut * 0.58;
                   ef.trailPoints2.position.copy(_deskFlamePos);
                   ef.trailPoints2.position.y -= 1.5;
-                  ef.trailPoints2.material.uniforms.uFade.value = fadeOut * 0.34;
+                  ef.trailPoints2.material.uniforms.uFade.value =
+                    fadeOut * 0.34;
                   ef.trailPoints3.position.copy(_deskFlamePos);
                   ef.trailPoints3.position.y -= 2.3;
-                  ef.trailPoints3.material.uniforms.uFade.value = fadeOut * 0.22;
+                  ef.trailPoints3.material.uniforms.uFade.value =
+                    fadeOut * 0.22;
                   ef.points.material.uniforms.uTime.value = flameAnimTime;
                   ef.trailPoints.material.uniforms.uTime.value = flameAnimTime;
                   ef.trailPoints2.material.uniforms.uTime.value = flameAnimTime;
@@ -11616,7 +12017,8 @@ diffuseColor.a = 1.0;
                 ef.points.visible = false;
               }
             } else {
-              const baseFade = 1 - Math.pow(exhaustElapsed / EXHAUST_DURATION, 0.5);
+              const baseFade =
+                1 - Math.pow(exhaustElapsed / EXHAUST_DURATION, 0.5);
               const localProgress = exhaustElapsed / EXHAUST_DURATION;
               const risePhase = 0.25;
               const easeIn = Math.min(
@@ -11651,7 +12053,8 @@ diffuseColor.a = 1.0;
                 ef.points.position.copy(ef.anchorMesh.position);
                 ef.points.position.z -= 0.35;
                 ef.points.material.uniforms.uFade.value = fade;
-                ef.points.material.uniforms.uTime.value = clock.getElapsedTime();
+                ef.points.material.uniforms.uTime.value =
+                  clock.getElapsedTime();
                 for (let i = 0; i < ef.count; i++) {
                   ef.rise[i] += dt * EXHAUST_FLAME_RISE_SPEED;
                   if (ef.rise[i] > 1) ef.rise[i] -= 1;
@@ -11684,20 +12087,36 @@ diffuseColor.a = 1.0;
           if (camera === carCameraFollow) updateCarCameraFollow();
 
           if (floorPhysBody) {
-            const floorBottom = floorPhysBody.position.y - floorPhysBody.shapes[0].halfExtents.y;
+            const floorBottom =
+              floorPhysBody.position.y - floorPhysBody.shapes[0].halfExtents.y;
             const clampBodies = [
-              bottlePhysBody, certifiedPhysBody, gumDispenserPhysBody,
-              dockingStationPhysBody, plantVasePhysBody, macScreenFramePhysBody,
-              macBodyBasePhysBody, mainScreensPinPhysBody, mainScreensBasePhysBody,
+              bottlePhysBody,
+              certifiedPhysBody,
+              gumDispenserPhysBody,
+              dockingStationPhysBody,
+              plantVasePhysBody,
+              macScreenFramePhysBody,
+              macBodyBasePhysBody,
+              mainScreensPinPhysBody,
+              mainScreensBasePhysBody,
               ..._conusInstances.map((inst) => inst.physBody),
               ..._starInstances.map((inst) => inst.physBody),
             ].filter(Boolean);
             for (const b of clampBodies) {
-              if (b.type !== CANNON.Body.DYNAMIC && b.type !== CANNON.Body.KINEMATIC) continue;
+              if (
+                b.type !== CANNON.Body.DYNAMIC &&
+                b.type !== CANNON.Body.KINEMATIC
+              )
+                continue;
               if (b.position.y < floorBottom) {
-                const floorTop = floorPhysBody.position.y + floorPhysBody.shapes[0].halfExtents.y;
-                const he = b.shapes[0] ? getShapeHalfExtents(b.shapes[0]) : null;
-                b.position.y = floorTop + (he ? Math.min(he.x, he.y, he.z) : 0.1);
+                const floorTop =
+                  floorPhysBody.position.y +
+                  floorPhysBody.shapes[0].halfExtents.y;
+                const he = b.shapes[0]
+                  ? getShapeHalfExtents(b.shapes[0])
+                  : null;
+                b.position.y =
+                  floorTop + (he ? Math.min(he.x, he.y, he.z) : 0.1);
                 b.velocity.set(0, 0, 0);
                 b.angularVelocity.set(0, 0, 0);
               }
@@ -11706,7 +12125,9 @@ diffuseColor.a = 1.0;
               const gb = gumBodies[gi];
               if (gb.type !== CANNON.Body.DYNAMIC) continue;
               if (gb.position.y < floorBottom) {
-                const floorTop = floorPhysBody.position.y + floorPhysBody.shapes[0].halfExtents.y;
+                const floorTop =
+                  floorPhysBody.position.y +
+                  floorPhysBody.shapes[0].halfExtents.y;
                 gb.position.y = floorTop + gumRadiusGlobal;
                 gb.velocity.set(0, 0, 0);
               }
@@ -11716,17 +12137,25 @@ diffuseColor.a = 1.0;
             const tpHe = tablePlateBody.shapes[0].halfExtents;
             const tableTop = tablePlateBody.position.y + tpHe.y;
             const tableClampBodies = [
-              bottlePhysBody, certifiedPhysBody, gumDispenserPhysBody,
-              dockingStationPhysBody, plantVasePhysBody, macScreenFramePhysBody,
-              macBodyBasePhysBody, mainScreensPinPhysBody, mainScreensBasePhysBody,
+              bottlePhysBody,
+              certifiedPhysBody,
+              gumDispenserPhysBody,
+              dockingStationPhysBody,
+              plantVasePhysBody,
+              macScreenFramePhysBody,
+              macBodyBasePhysBody,
+              mainScreensPinPhysBody,
+              mainScreensBasePhysBody,
               ..._conusInstances.map((inst) => inst.physBody),
             ].filter(Boolean);
             for (const b of tableClampBodies) {
               if (b.type !== CANNON.Body.DYNAMIC) continue;
               if (b._frozen) continue;
               if (b.sleepState === CANNON.Body.SLEEPING) continue;
-              const overTableX = Math.abs(b.position.x - tablePlateBody.position.x) < tpHe.x;
-              const overTableZ = Math.abs(b.position.z - tablePlateBody.position.z) < tpHe.z;
+              const overTableX =
+                Math.abs(b.position.x - tablePlateBody.position.x) < tpHe.x;
+              const overTableZ =
+                Math.abs(b.position.z - tablePlateBody.position.z) < tpHe.z;
               if (!overTableX || !overTableZ) continue;
               const he = b.shapes[0] ? getShapeHalfExtents(b.shapes[0]) : null;
               if (!he) continue;
@@ -11747,14 +12176,14 @@ diffuseColor.a = 1.0;
             syncAllPropsFromPhysics();
             syncConusFromPhysics();
             for (let i = 0; i < _starInstances.length; i++) {
-              const inst = _starInstances[i];
-              const pb = inst?.physBody;
-              if (!pb || pb._frozen) continue;
-              resolveKnockablePropTableInnerBlock(pb);
+              clampStarOnTable(_starInstances[i]);
             }
             syncStarFromPhysics();
           }
-          const _dispenserMoving = _gumDispenserBecameDynamic && gumDispenserPhysBody && !gumDispenserPhysBody._frozen;
+          const _dispenserMoving =
+            _gumDispenserBecameDynamic &&
+            gumDispenserPhysBody &&
+            !gumDispenserPhysBody._frozen;
           const _skipGumInstSync =
             gumsAddedCount > 0 &&
             gumTankAllStaticThisFrame &&
@@ -11784,9 +12213,17 @@ diffuseColor.a = 1.0;
           }
           if (updateAirPlane) {
             const fl = airPlaneFlight;
-            const ySpd = fl.climbPitch !== undefined ? Math.abs((fl.yOffset - (fl._prevYOffset || fl.yOffset))) / Math.max(dt, 0.001) : 0;
+            const ySpd =
+              fl.climbPitch !== undefined
+                ? Math.abs(fl.yOffset - (fl._prevYOffset || fl.yOffset)) /
+                  Math.max(dt, 0.001)
+                : 0;
             fl._prevYOffset = fl.yOffset;
-            if (fl.speedVar === undefined) { fl.speedVar = 0; fl.speedTarget = 0; fl.speedTimer = 0; }
+            if (fl.speedVar === undefined) {
+              fl.speedVar = 0;
+              fl.speedTarget = 0;
+              fl.speedTimer = 0;
+            }
             fl.speedTimer += dt;
             if (fl.speedTimer > 2 + Math.random() * 3) {
               fl.speedTarget = (Math.random() - 0.5) * 3;
@@ -11794,7 +12231,9 @@ diffuseColor.a = 1.0;
             }
             fl.speedVar += (fl.speedTarget - fl.speedVar) * dt * 1.5;
             const curSpeed = fl.speed + fl.speedVar;
-            const hSpd = Math.sqrt(Math.max(curSpeed * curSpeed - ySpd * ySpd, 1));
+            const hSpd = Math.sqrt(
+              Math.max(curSpeed * curSpeed - ySpd * ySpd, 1),
+            );
             fl.t += hSpd * dt;
             if (fl.t >= fl.totalLen) fl.t -= fl.totalLen;
             if (fl.t < 0) fl.t += fl.totalLen;
@@ -11803,7 +12242,11 @@ diffuseColor.a = 1.0;
             let seg = fl.segments[0];
             let segIdx = 0;
             for (let i = 0; i < fl.segments.length; i++) {
-              if (rem <= fl.segments[i].len) { seg = fl.segments[i]; segIdx = i; break; }
+              if (rem <= fl.segments[i].len) {
+                seg = fl.segments[i];
+                segIdx = i;
+                break;
+              }
               rem -= fl.segments[i].len;
             }
 
@@ -11818,31 +12261,38 @@ diffuseColor.a = 1.0;
             const prevY = fl.yOffset;
             if (seg.type === "straight") {
               const yProgress = Math.min(fl.yTimer / fl.yDuration, 1);
-              const yEase = yProgress < 0.5
-                ? 4 * yProgress * yProgress * yProgress
-                : 1 - Math.pow(-2 * yProgress + 2, 3) / 2;
+              const yEase =
+                yProgress < 0.5
+                  ? 4 * yProgress * yProgress * yProgress
+                  : 1 - Math.pow(-2 * yProgress + 2, 3) / 2;
               fl.yOffset = fl.yStart + (fl.yTarget - fl.yStart) * yEase;
             }
             const yVel = (fl.yOffset - prevY) / Math.max(dt, 0.001);
 
             let px, pz, dirX, dirZ, turnAmount;
-            const TURN_PITCH = 40 * Math.PI / 180;
+            const TURN_PITCH = (40 * Math.PI) / 180;
             const TURN_BANK = 0.2;
             const BLEND_ZONE = 3.0;
             if (seg.type === "straight") {
               const frac = rem / seg.len;
-              const drift = Math.sin(fl.t * 0.7) * 0.4 + Math.sin(fl.t * 1.3) * 0.2;
+              const drift =
+                Math.sin(fl.t * 0.7) * 0.4 + Math.sin(fl.t * 1.3) * 0.2;
               const driftFade = Math.sin(frac * Math.PI);
               const perpX = -seg.dz;
               const perpZ = seg.dx;
-              px = seg.sx + (seg.ex - seg.sx) * frac + perpX * drift * driftFade;
-              pz = seg.sz + (seg.ez - seg.sz) * frac + perpZ * drift * driftFade;
+              px =
+                seg.sx + (seg.ex - seg.sx) * frac + perpX * drift * driftFade;
+              pz =
+                seg.sz + (seg.ez - seg.sz) * frac + perpZ * drift * driftFade;
               dirX = seg.dx;
               dirZ = seg.dz;
               const distFromEnd = seg.len - rem;
               const distFromStart = rem;
               const nextArc = fl.segments[(segIdx + 1) % fl.segments.length];
-              const prevArc = fl.segments[(segIdx - 1 + fl.segments.length) % fl.segments.length];
+              const prevArc =
+                fl.segments[
+                  (segIdx - 1 + fl.segments.length) % fl.segments.length
+                ];
               if (distFromEnd < BLEND_ZONE && nextArc.type === "arc") {
                 const t = 1 - distFromEnd / BLEND_ZONE;
                 const e = t * t * (3 - 2 * t);
@@ -11897,11 +12347,9 @@ diffuseColor.a = 1.0;
                 applyCarOrbitCameraFromAngles();
               }
             }
-            if (_carCam1Shake) carCamera.position.addScaledVector(_carCam1Shake, 0.78);
-            if (
-              _carCam1LandShakeTime <= 0 &&
-              !isCarCameraMatrixOrbitActive()
-            ) {
+            if (_carCam1Shake)
+              carCamera.position.addScaledVector(_carCam1Shake, 0.78);
+            if (_carCam1LandShakeTime <= 0 && !isCarCameraMatrixOrbitActive()) {
               enforceCarCameraMinDistance();
             }
             if (isCarCameraJumpEffectActive()) {
