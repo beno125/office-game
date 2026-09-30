@@ -1,23 +1,54 @@
 import { useEffect, useRef, useState } from "react";
+import { onOfficeSceneEvent } from "./game/officeSceneEvents.js";
 import { setOfficeSceneMount } from "./office/officeSceneMount.js";
 
-export default function OfficeScene() {
+/**
+ * @param {object} props
+ * @param {boolean} [props.hideModuleLoadingOverlay] — GameLoader owns the loading UI
+ * @param {() => void} [props.onModuleReady] — fired when the scene JS chunk has loaded
+ * @param {() => void} [props.onTransitionToKitchen] — swaps the active world
+ */
+export default function OfficeScene({
+  hideModuleLoadingOverlay = false,
+  onModuleReady,
+  onTransitionToKitchen,
+}) {
   const rootRef = useRef(null);
+  const onReadyRef = useRef(onModuleReady);
+  const onTransitionRef = useRef(onTransitionToKitchen);
+  onReadyRef.current = onModuleReady;
+  onTransitionRef.current = onTransitionToKitchen;
   const [phase, setPhase] = useState("loading");
 
   useEffect(() => {
     const root = rootRef.current;
     if (!root) return;
 
+    let disposed = false;
+    let sceneModule = null;
     setOfficeSceneMount(root);
+    const stopKitchenTransition = onOfficeSceneEvent(
+      "transition-to-kitchen",
+      () => onTransitionRef.current?.(),
+    );
     import("./office/officeSceneModule.js")
-      .then(() => setPhase("ready"))
+      .then((module) => {
+        sceneModule = module;
+        module.setOfficeSceneRendering(!disposed);
+        if (disposed) return;
+        setPhase("ready");
+        onReadyRef.current?.();
+      })
       .catch((err) => {
+        if (disposed) return;
         console.error("[OfficeScene] failed to load scene module:", err);
         setPhase("error");
       });
 
     return () => {
+      disposed = true;
+      stopKitchenTransition();
+      sceneModule?.setOfficeSceneRendering(false);
       setOfficeSceneMount(null);
     };
   }, []);
@@ -36,6 +67,9 @@ export default function OfficeScene() {
     zIndex: 2147483000,
   };
 
+  const showModuleOverlay =
+    !hideModuleLoadingOverlay && (phase === "loading" || phase === "error");
+
   return (
     <div
       ref={rootRef}
@@ -51,10 +85,10 @@ export default function OfficeScene() {
       }}
     >
       <div id="perfBadge" aria-hidden="true" />
-      {phase === "loading" && (
+      {showModuleOverlay && phase === "loading" && (
         <div style={overlayStyle}>Loading 3D scene…</div>
       )}
-      {phase === "error" && (
+      {showModuleOverlay && phase === "error" && (
         <div style={overlayStyle}>
           Scene bundle failed to load. Open DevTools → Console (F12) and check for red errors
           (network 404 on <code style={{ color: "#9cf" }}>/office-scene-optimized/</code> is common).

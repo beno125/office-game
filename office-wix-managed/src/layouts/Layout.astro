@@ -53,7 +53,242 @@ const { title = "Office" } = Astro.props;
     opacity: 1;
   }
 
-  .office-scene-root canvas {
+  .intro-start-button {
+    transition:
+      transform 120ms ease,
+      box-shadow 120ms ease,
+      filter 120ms ease;
+  }
+
+  .intro-start-button:hover {
+    transform: translate(3px, 4px);
+    box-shadow: 3px 3px 0 #080808 !important;
+    filter: brightness(1.06);
+  }
+
+  .intro-start-button:active {
+    transform: translate(5px, 6px);
+    box-shadow: 1px 1px 0 #080808 !important;
+    filter: brightness(0.94);
+  }
+
+  .intro-start-button:focus-visible {
+    outline: 4px solid #fff;
+    outline-offset: 5px;
+  }
+
+  .game-loader-progress {
+    height: 100%;
+    background: linear-gradient(90deg, #f00458, #ff6ca1, #f00458);
+    transition: width 220ms ease;
+    will-change: width;
+  }
+
+  .world-transition {
+    position: fixed;
+    inset: 0;
+    overflow: hidden;
+    isolation: isolate;
+    color: #fff;
+    background: #000;
+  }
+
+  .world-transition-stars {
+    position: absolute;
+    inset: -20%;
+    background-image:
+      radial-gradient(circle, #fff 0 1px, transparent 1.8px),
+      radial-gradient(circle, #7ee8ff 0 1.2px, transparent 2px),
+      radial-gradient(circle, #da75ff 0 1px, transparent 1.8px);
+    background-position: 0 0, 47px 71px, 91px 23px;
+    background-size: 83px 83px, 137px 137px, 109px 109px;
+    animation: transition-stars-rush 3.6s linear infinite;
+    opacity: 0.75;
+  }
+
+  .world-transition-vortex {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 125vmax;
+    height: 125vmax;
+    border-radius: 50%;
+    transform: translate(-50%, -50%);
+    background: repeating-conic-gradient(
+      from 20deg,
+      transparent 0 7deg,
+      rgba(92, 227, 255, 0.8) 9deg,
+      rgba(171, 70, 255, 0.9) 12deg,
+      transparent 17deg 28deg
+    );
+    -webkit-mask-image: radial-gradient(
+      circle,
+      transparent 0 15%,
+      #000 23% 70%,
+      transparent 82%
+    );
+    mask-image: radial-gradient(
+      circle,
+      transparent 0 15%,
+      #000 23% 70%,
+      transparent 82%
+    );
+    filter: blur(3px) saturate(1.35);
+    mix-blend-mode: screen;
+    opacity: 0.72;
+  }
+
+  .world-transition-vortex-a {
+    animation: transition-vortex-spin 6s linear infinite;
+  }
+
+  .world-transition-vortex-b {
+    width: 92vmax;
+    height: 92vmax;
+    background: repeating-conic-gradient(
+      from 210deg,
+      transparent 0 10deg,
+      rgba(255, 91, 238, 0.9) 12deg,
+      rgba(91, 172, 255, 0.9) 15deg,
+      transparent 19deg 35deg
+    );
+    animation: transition-vortex-spin-reverse 4.5s linear infinite;
+    opacity: 0.8;
+  }
+
+  .world-transition-tunnel {
+    position: absolute;
+    inset: 0;
+    background:
+      radial-gradient(circle at center, rgba(2, 0, 22, 0.72) 0 10%, transparent 29%),
+      repeating-radial-gradient(
+        circle at center,
+        transparent 0 6%,
+        rgba(119, 71, 255, 0.22) 7%,
+        transparent 9% 14%
+      );
+    animation: transition-tunnel-pulse 1.2s ease-in-out infinite alternate;
+  }
+
+  .world-transition-strips {
+    position: absolute;
+    z-index: 1;
+    inset: 0;
+    overflow: hidden;
+    perspective: 800px;
+    transform-style: flat;
+    contain: strict;
+    isolation: isolate;
+    pointer-events: none;
+  }
+
+  .world-transition-strips span {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: var(--strip-width);
+    height: var(--strip-length);
+    border-radius: 999px;
+    background: var(--strip-color);
+    box-shadow: 0 0 5px var(--strip-color), 0 0 10px var(--strip-color);
+    opacity: 0;
+    transform-origin: 50% 0;
+    backface-visibility: hidden;
+    animation: transition-strip-flight var(--strip-duration)
+      cubic-bezier(0.55, 0.02, 1, 0.42) var(--strip-delay) infinite;
+  }
+
+  .world-transition-car {
+    position: absolute;
+    z-index: 3;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+  }
+
+  .world-transition-car canvas {
+    width: 100%;
+    height: 100%;
+    display: block;
+    filter: drop-shadow(0 24px 28px rgba(0, 0, 0, 0.5));
+  }
+
+  .world-transition-copy {
+    position: absolute;
+    z-index: 4;
+    top: clamp(1.5rem, 6vh, 4rem);
+    left: 50%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    transform: translateX(-50%) translateZ(0);
+    backface-visibility: hidden;
+    will-change: transform;
+    text-align: center;
+    text-transform: uppercase;
+    text-shadow: 0 4px 20px #100028;
+  }
+
+  .world-transition-copy span {
+    font: 800 clamp(0.72rem, 1.3vw, 1rem)/1 system-ui, sans-serif;
+    letter-spacing: 0.38em;
+    opacity: 0.8;
+  }
+
+  .world-transition-copy strong {
+    margin-top: 0.35rem;
+    font: 1000 clamp(2.2rem, 7vw, 5.8rem)/0.9 system-ui, sans-serif;
+    letter-spacing: -0.055em;
+    -webkit-text-stroke: clamp(1px, 0.14vw, 3px) #fff;
+    color: #9f6cff;
+  }
+
+  @keyframes transition-vortex-spin {
+    to { transform: translate(-50%, -50%) rotate(360deg) scale(1.08); }
+  }
+
+  @keyframes transition-vortex-spin-reverse {
+    to { transform: translate(-50%, -50%) rotate(-360deg) scale(1.12); }
+  }
+
+  @keyframes transition-stars-rush {
+    to { transform: scale(1.22) rotate(3deg); }
+  }
+
+  @keyframes transition-tunnel-pulse {
+    to { transform: scale(1.08); filter: brightness(1.25); }
+  }
+
+  @keyframes transition-strip-flight {
+    0% {
+      opacity: 0;
+      transform: rotate(var(--strip-angle)) translateY(var(--strip-start))
+        translateZ(-1500px) scaleX(0.25) scaleY(0.06);
+    }
+    8% {
+      opacity: 0.95;
+    }
+    88% {
+      opacity: 1;
+    }
+    100% {
+      opacity: 0;
+      transform: rotate(var(--strip-angle)) translateY(132vmax)
+        translateZ(480px) scaleX(4.5) scaleY(11);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .world-transition-stars,
+    .world-transition-vortex,
+    .world-transition-tunnel,
+    .world-transition-strips span {
+      animation: none;
+    }
+  }
+
+  .office-scene-root canvas,
+  .kitchen-scene-root canvas {
     display: block;
     position: relative;
     z-index: 0;
