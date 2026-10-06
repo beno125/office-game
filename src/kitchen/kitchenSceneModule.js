@@ -926,7 +926,16 @@ export function isKitchenSceneReady() {
       }
 
       function applyPerformanceSettings() {
-        const s = perfSettings;
+        const kitchenUltraUsesHighSettings =
+          _kitchenWorldActive && perfTierIndex > VISUAL_PARITY_TIER;
+        const s = kitchenUltraUsesHighSettings
+          ? {
+              ...perfSettings,
+              ...PERF_TIER_PRESETS[VISUAL_PARITY_TIER],
+              name: perfSettings.name,
+              tier: perfTierIndex,
+            }
+          : perfSettings;
         if (useVisualParity()) {
           renderer.shadowMap.enabled = true;
           if (typeof carShadowLight !== "undefined") {
@@ -964,12 +973,28 @@ export function isKitchenSceneReady() {
           physicsWorld.solver.iterations = s.physicsIterations;
         }
         if (_kitchenWorldActive) {
-          renderer.shadowMap.enabled = false;
+          renderer.shadowMap.enabled = true;
           renderer.toneMappingExposure = 0.86;
           sceneBloomEnabled = false;
           carBloomMixPass.enabled = false;
           if (typeof carShadowLight !== "undefined") {
-            carShadowLight.castShadow = false;
+            carShadowLight.castShadow = true;
+            const shadowSize = _KITCHEN_SHADOW_MAP;
+            if (carShadowLight.shadow.mapSize.width !== shadowSize) {
+              carShadowLight.shadow.mapSize.set(shadowSize, shadowSize);
+              carShadowLight.shadow.map?.dispose();
+              carShadowLight.shadow.map = null;
+            }
+            carShadowLight.shadow.radius = 2;
+            const shadowCam = _kitchenShadowCamKitchen;
+            carShadowLight.shadow.camera.far = shadowCam.far;
+            carShadowLight.shadow.camera.left = shadowCam.left;
+            carShadowLight.shadow.camera.right = shadowCam.right;
+            carShadowLight.shadow.camera.top = shadowCam.top;
+            carShadowLight.shadow.camera.bottom = shadowCam.bottom;
+            carShadowLight.shadow.camera.updateProjectionMatrix();
+            carShadowLight.shadow.needsUpdate = true;
+            renderer.shadowMap.needsUpdate = true;
           }
           if (physicsWorld) {
             physicsWorld.solver.iterations = Math.min(s.physicsIterations, 14);
@@ -1932,13 +1957,12 @@ let _worldSwitched = false;
         bottom: -6,
       };
       const _kitchenShadowCamKitchen = {
-        far: 95,
-        left: -55,
-        right: 55,
-        top: 55,
-        bottom: -55,
+        far: 40,
+        left: -9,
+        right: 9,
+        top: 9,
+        bottom: -9,
       };
-
       function setKitchenPerfMode(active) {
         _kitchenWorldActive = !!active;
         applyPerformanceSettings();
@@ -1946,8 +1970,8 @@ let _worldSwitched = false;
         sceneBloomEnabled = false;
         carBloomMixPass.enabled = false;
         if (active) {
-          renderer.shadowMap.enabled = false;
-          carShadowLight.castShadow = false;
+          renderer.shadowMap.enabled = true;
+          carShadowLight.castShadow = true;
           sharpenPass.enabled = false;
           const sz = _KITCHEN_SHADOW_MAP;
           if (carShadowLight.shadow.mapSize.width !== sz) {
@@ -2327,6 +2351,7 @@ let _worldSwitched = false;
 
       let tableLightGlows = [];
       let _tableLightGlowTex = null;
+      let _tableLightGlowGeo = null;
 
       function getTableLightGlowTexture() {
         if (_tableLightGlowTex) return _tableLightGlowTex;
@@ -2347,7 +2372,10 @@ let _worldSwitched = false;
       }
 
       function createTableLightGlowSprite(tint, baseSize) {
-        const mat = new THREE.SpriteMaterial({
+        if (!_tableLightGlowGeo) {
+          _tableLightGlowGeo = new THREE.PlaneGeometry(1, 1);
+        }
+        const mat = new THREE.MeshBasicMaterial({
           map: getTableLightGlowTexture(),
           color: tint,
           transparent: true,
@@ -2355,13 +2383,16 @@ let _worldSwitched = false;
           depthWrite: false,
           depthTest: true,
           blending: THREE.AdditiveBlending,
+          side: THREE.DoubleSide,
+          toneMapped: false,
         });
-        const sprite = new THREE.Sprite(mat);
-        sprite.scale.set(baseSize, baseSize * 0.72, 1);
-        sprite.visible = false;
-        sprite.renderOrder = 4;
-        scene.add(sprite);
-        return sprite;
+        const glowPlane = new THREE.Mesh(_tableLightGlowGeo, mat);
+        glowPlane.rotation.x = -Math.PI / 2;
+        glowPlane.scale.set(baseSize, baseSize * 0.72, 1);
+        glowPlane.visible = false;
+        glowPlane.renderOrder = 4;
+        scene.add(glowPlane);
+        return glowPlane;
       }
 
       function getLocalReflectionBounds(mesh) {
@@ -2375,6 +2406,9 @@ let _worldSwitched = false;
           localHalfHeight: box
             ? Math.max(0.12, (box.max.y - box.min.y) * 0.5)
             : 0.12,
+          localHalfWidth: box
+            ? Math.max(0.1, (box.max.x - box.min.x) * 0.5)
+            : 0.1,
         };
       }
 
@@ -2394,13 +2428,20 @@ let _worldSwitched = false;
           const spec = specs[si];
           const mesh = carRoot.getObjectByName(spec.name);
           if (!mesh) continue;
-          tableLightGlows.push({
-            mesh,
-            sprite: createTableLightGlowSprite(spec.color, spec.size),
-            kind: spec.kind,
-            baseSize: spec.size,
-            ...getLocalReflectionBounds(mesh),
-          });
+          const bounds = getLocalReflectionBounds(mesh);
+          const pairOffset = bounds.localHalfWidth * 0.64;
+          for (let side = -1; side <= 1; side += 2) {
+            const localCenter = bounds.localCenter.clone();
+            localCenter.x += pairOffset * side;
+            tableLightGlows.push({
+              mesh,
+              sprite: createTableLightGlowSprite(spec.color, spec.size * 0.72),
+              kind: spec.kind,
+              baseSize: spec.size * 0.72,
+              localCenter,
+              localHalfHeight: bounds.localHalfHeight,
+            });
+          }
         }
         carRoot.traverse((node) => {
           if (!node.isMesh || node.name !== "lightBar1") return;
@@ -5202,7 +5243,11 @@ let _worldSwitched = false;
           if (camera === carCameraFollow) updateCarCameraFollow();
 
 
-          carShadowLight.position.set(car.position.x + 3, car.position.y + 20, car.position.z + 2);
+          carShadowLight.position.set(
+            car.position.x,
+            car.position.y + 20,
+            car.position.z,
+          );
           carShadowLight.target.position.copy(car.position);
           carShadowLight.target.updateMatrixWorld();
 
