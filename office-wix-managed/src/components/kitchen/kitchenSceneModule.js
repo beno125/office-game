@@ -671,7 +671,7 @@ export function isKitchenSceneReady() {
       }
 
       let _kitchenWorldActive = false;
-      const _KITCHEN_MAX_PIXEL_RATIO = 0.82;
+      const _KITCHEN_MAX_PIXEL_RATIO = 0.95;
       let _kitchenIdlePhysicsAccumulator = 0;
 
       function getRenderPixelRatio() {
@@ -846,6 +846,7 @@ export function isKitchenSceneReady() {
       const perfBadgeEl = document.getElementById("perfBadge");
 
       function getBloomRenderScale() {
+        if (_kitchenWorldActive && sceneBloomEnabled) return 0.42;
         return sceneBloomEnabled && perfBloomScale > 0 && perfBloomScale < 1
           ? perfBloomScale
           : 1;
@@ -964,6 +965,9 @@ export function isKitchenSceneReady() {
         }
         if (_kitchenWorldActive) {
           renderer.shadowMap.enabled = false;
+          renderer.toneMappingExposure = 0.86;
+          sceneBloomEnabled = false;
+          carBloomMixPass.enabled = false;
           if (typeof carShadowLight !== "undefined") {
             carShadowLight.castShadow = false;
           }
@@ -1169,12 +1173,12 @@ export function isKitchenSceneReady() {
       const renderScenePass = new RenderPass(scene, camera);
       const carLightsBloomPass = new UnrealBloomPass(
         new THREE.Vector2(window.innerWidth, window.innerHeight),
-        3.0,
-        1.6,
-        0.12,
+        0.35,
+        0.08,
+        0.72,
       );
-      carLightsBloomPass.highPassUniforms.smoothWidth.value = 0.4;
-      carLightsBloomPass.threshold = 0.006;
+      carLightsBloomPass.highPassUniforms.smoothWidth.value = 0.03;
+      carLightsBloomPass.threshold = 0.72;
 
       const bloomComposer = new EffectComposer(renderer);
       bloomComposer.renderToScreen = false;
@@ -1186,7 +1190,7 @@ export function isKitchenSceneReady() {
           uniforms: {
             baseTexture: { value: null },
             bloomTexture: { value: bloomComposer.renderTarget2.texture },
-            bloomIntensity: { value: 2.35 },
+            bloomIntensity: { value: 0.16 },
           },
           vertexShader: `
             varying vec2 vUv;
@@ -1262,7 +1266,7 @@ export function isKitchenSceneReady() {
       const finalComposer = new EffectComposer(renderer);
       const outputPass = new OutputPass();
       finalComposer.addPass(renderScenePass);
-
+      finalComposer.addPass(carBloomMixPass);
       finalComposer.addPass(smaaPass);
       finalComposer.addPass(sharpenPass);
       finalComposer.addPass(outputPass);
@@ -1270,6 +1274,7 @@ export function isKitchenSceneReady() {
       smaaPass.enabled = perfSettings.smaa;
       sharpenPass.enabled = false;
       sceneBloomEnabled = false;
+      carBloomMixPass.enabled = false;
 
       /** Composer RT needs stencil for kitchen lamp pools; optional MSAA on WebGL2. */
       function syncFinalComposerMsaaTargets() {
@@ -1511,15 +1516,15 @@ export function isKitchenSceneReady() {
       // Office preset is captured at startup so we can switch worlds back and forth.
       // Kitchen has a warmer, cozier evening vibe.
       const _darkModeKitchen = {
-        background: 0x05050a,
-        ambient: { color: 0xfff0e4, intensity: 0.14 },
-        hemisphere: { sky: 0xfff4e8, ground: 0xc8b8a8, intensity: 0.1 },
-        dirPink: { color: 0x000000, intensity: 0 },
-        dirBlue: { color: 0x000000, intensity: 0 },
-        dirFillPink: { color: 0x000000, intensity: 0 },
-        dirFillBlue: { color: 0x000000, intensity: 0 },
-        pointPink: { color: 0x000000, intensity: 0 },
-        pointBlue: { color: 0x000000, intensity: 0 },
+        background: 0x02030b,
+        ambient: { color: 0x18264f, intensity: 0.16 },
+        hemisphere: { sky: 0x245cff, ground: 0x2a073f, intensity: 0.12 },
+        dirPink: { color: 0xff2fa8, intensity: 0.2 },
+        dirBlue: { color: 0x2b9dff, intensity: 0.3 },
+        dirFillPink: { color: 0xb42cff, intensity: 0.12 },
+        dirFillBlue: { color: 0x30e3ff, intensity: 0.18 },
+        pointPink: { color: 0xff1f9d, intensity: 0.24 },
+        pointBlue: { color: 0x246bff, intensity: 0.3 },
         warmKey: { color: 0x000000, intensity: 0 },
         warmFill: { color: 0x000000, intensity: 0 },
       };
@@ -1701,8 +1706,8 @@ export function isKitchenSceneReady() {
             _kitchenFloorColorBright,
             b,
           );
-          _kitchenFloorMat.emissive.setHex(0xe8e4de);
-          _kitchenFloorMat.emissiveIntensity = (1 - b) * 0.12;
+          _kitchenFloorMat.emissive.setHex(0x16235a);
+          _kitchenFloorMat.emissiveIntensity = (1 - b) * 0.16;
         }
       }
       document.addEventListener("keydown", (e) => {
@@ -1813,10 +1818,18 @@ export function isKitchenSceneReady() {
       const car = new THREE.Group();
       car.rotation.order = "YXZ";
       scene.add(car);
+      const carKeyLight = new THREE.PointLight(0xc7eaff, 7.5, 16, 1.8);
+      carKeyLight.position.set(-1.2, 3.8, 1.8);
+      carKeyLight.name = "kitchenCarKeyLight";
+      car.add(carKeyLight);
+      const carRimLight = new THREE.PointLight(0xff4fc8, 3.5, 11, 1.8);
+      carRimLight.position.set(1.5, 2.4, -2.2);
+      carRimLight.name = "kitchenCarRimLight";
+      car.add(carRimLight);
 
       const MAX_STEER_DEG = 28;
       const MAX_STEER_RAD = (MAX_STEER_DEG * Math.PI) / 180;
-      const CAR_SCALE_MULTIPLIER = 1.24;
+      const CAR_SCALE_MULTIPLIER = 1.52;
       const carState = {
         speed: 0,
         angle: 0,
@@ -1904,7 +1917,7 @@ let _worldSwitched = false;
       function applySceneEnvironmentToMaterial(mat) {
         if (mat && scene.environment) mat.envMap = scene.environment;
       }
-      const _kitchenFloorColorDark = new THREE.Color(0xd6d0c8);
+      const _kitchenFloorColorDark = new THREE.Color(0x171b2f);
       const _kitchenFloorColorBright = new THREE.Color(0xffffff);
       const _KITCHEN_SHADOW_MAP = 256;
       const _DEFAULT_SHADOW_MAP = 512;
@@ -1929,6 +1942,9 @@ let _worldSwitched = false;
       function setKitchenPerfMode(active) {
         _kitchenWorldActive = !!active;
         applyPerformanceSettings();
+        renderer.toneMappingExposure = active ? 0.86 : 1;
+        sceneBloomEnabled = false;
+        carBloomMixPass.enabled = false;
         if (active) {
           renderer.shadowMap.enabled = false;
           carShadowLight.castShadow = false;
@@ -2547,6 +2563,7 @@ let _worldSwitched = false;
         _kitchenTableCoverLampMat = null;
         _kitchenTableCoverSideMat = null;
         _kitchenCoverTopMesh = null;
+        _mainTableTopAreaLight = null;
         if (_kitchenTableTopStencilWriter) {
           try {
             if (_kitchenTableTopStencilWriter.parent) {
@@ -2700,12 +2717,13 @@ let _worldSwitched = false;
       }
 
       const KITCHEN_COVER_TEX_DIR = kitchenAsset("textures/");
-      /** Fewer tiles along the long edge = larger tile pattern on the planes. */
-      const KITCHEN_COVER_TILES_X = 8;
+      /** More repeats keep the ceramic tile pattern at a smaller visual scale. */
+      const KITCHEN_COVER_TILES_X = 10.75;
       /** Original counter clone spacing (59 covers + 5% gap); separate from visual tile scale. */
       const KITCHEN_COUNTER_CLONE_TILES = 60;
       const KITCHEN_TABLE_COVER_CLONES = 59;
       let _kitchenCoverTopMesh = null;
+      let _mainTableTopAreaLight = null;
       let _kitchenTableTopLampOverlay = null;
       let _kitchenTableTopStencilWriter = null;
 
@@ -2741,12 +2759,22 @@ let _worldSwitched = false;
         });
       }
 
-      function _kitchenCoverMatLite(map, roughnessMap) {
+      function _kitchenCoverMatLite(
+        map,
+        normalMap,
+        roughnessMap,
+        aoMap,
+        metalnessMap,
+      ) {
         return new THREE.MeshPhysicalMaterial({
           map,
+          normalMap,
           roughnessMap,
-          roughness: 0.12,
-          metalness: 0.18,
+          aoMap,
+          aoMapIntensity: 0.65,
+          metalnessMap,
+          roughness: 0.78,
+          metalness: 1,
           envMapIntensity: 2.8,
           clearcoat: 1,
           clearcoatRoughness: 0.06,
@@ -2768,25 +2796,49 @@ let _worldSwitched = false;
       async function createKitchenTableCoverMaterials(topRepX, topRepY, sideRepX, sideRepY) {
         const tl = new THREE.TextureLoader();
         const loadTex = (file) => tl.loadAsync(KITCHEN_COVER_TEX_DIR + file);
-        const [map, roughnessMap] = await Promise.all([
-          loadTex("Tiles107_2K-JPG_Color.jpg"),
-          loadTex("Tiles107_2K-JPG_Roughness.jpg"),
+        const [map, normalMap, roughnessMap, aoMap, metalnessMap] = await Promise.all([
+          loadTex("2K/Poliigon_TilesCeramicWhite_6956_BaseColor.jpg"),
+          loadTex("2K/Poliigon_TilesCeramicWhite_6956_Normal.png"),
+          loadTex("2K/Poliigon_TilesCeramicWhite_6956_Roughness.jpg"),
+          loadTex("2K/Poliigon_TilesCeramicWhite_6956_AmbientOcclusion.jpg"),
+          loadTex("2K/Poliigon_TilesCeramicWhite_6956_Metallic.jpg"),
         ]);
         _configureKitchenCoverTexture(map, true);
+        _configureKitchenCoverTexture(normalMap, false);
         _configureKitchenCoverTexture(roughnessMap, false);
+        _configureKitchenCoverTexture(aoMap, false);
+        _configureKitchenCoverTexture(metalnessMap, false);
         const topMat = _kitchenCoverMatLite(
           _cloneCoverTexture(map, topRepX, topRepY),
+          _cloneCoverTexture(normalMap, topRepX, topRepY),
           _cloneCoverTexture(roughnessMap, topRepX, topRepY),
+          _cloneCoverTexture(aoMap, topRepX, topRepY),
+          _cloneCoverTexture(metalnessMap, topRepX, topRepY),
         );
         const sideMat = _kitchenCoverMatLite(
           _cloneCoverTexture(map, sideRepX, sideRepY),
+          _cloneCoverTexture(normalMap, sideRepX, sideRepY),
           _cloneCoverTexture(roughnessMap, sideRepX, sideRepY),
+          _cloneCoverTexture(aoMap, sideRepX, sideRepY),
+          _cloneCoverTexture(metalnessMap, sideRepX, sideRepY),
         );
         const baseMat = _kitchenCoverMatLite(
           _cloneCoverTexture(map, 1, 1),
+          _cloneCoverTexture(normalMap, 1, 1),
           _cloneCoverTexture(roughnessMap, 1, 1),
+          _cloneCoverTexture(aoMap, 1, 1),
+          _cloneCoverTexture(metalnessMap, 1, 1),
         );
-        baseMat.color.set(0xe6c3bd);
+        topMat.color.set(0x647bb8);
+        topMat.emissive.setHex(0x0d1d50);
+        topMat.emissiveIntensity = 0.2;
+        sideMat.color.set(0x9aaee0);
+        sideMat.emissive.setHex(0x1a2f70);
+        sideMat.emissiveMap = sideMat.aoMap;
+        sideMat.emissiveIntensity = 0.58;
+        baseMat.color.set(0x302544);
+        baseMat.emissive.setHex(0x160a2d);
+        baseMat.emissiveIntensity = 0.12;
         topMat.customProgramCacheKey = () => "kitchen_table_top_plane";
         sideMat.customProgramCacheKey = () => "kitchen_table_side_plane";
         baseMat.customProgramCacheKey = () => "kitchen_table_base";
@@ -2957,6 +3009,9 @@ let _worldSwitched = false;
           if (!mesh) return;
           const polyOffset = opts && opts.polyOffset;
           const depthWrite = !(opts && opts.depthWrite === false);
+          if (mesh.geometry.attributes.uv && !mesh.geometry.attributes.uv1) {
+            mesh.geometry.setAttribute("uv1", mesh.geometry.attributes.uv);
+          }
           mesh.material = mat;
           mesh.castShadow = false;
           mesh.receiveShadow = false;
@@ -3484,6 +3539,37 @@ let _worldSwitched = false;
             tablePlateHalfX = tSize.x / 2;
             tablePlateHalfZ = tSize.z / 2;
             tablePlateCenter.set(tCenter.x, tTopY, tCenter.z);
+            const cyanGamingKey = new THREE.PointLight(
+              0x00d9ff,
+              6,
+              44,
+              1.7,
+            );
+            cyanGamingKey.position.set(
+              tCenter.x - tSize.x * 0.32,
+              tTopY + 5.5,
+              tCenter.z - tSize.z * 0.2,
+            );
+            cyanGamingKey.userData.baseIntensity = 6;
+            cyanGamingKey.name = "kitchenCyanGamingKey";
+            scene.add(cyanGamingKey);
+            _darkModeOnlyLights.push(cyanGamingKey);
+
+            const magentaGamingKey = new THREE.PointLight(
+              0xff1f9d,
+              5.5,
+              42,
+              1.7,
+            );
+            magentaGamingKey.position.set(
+              tCenter.x + tSize.x * 0.3,
+              tTopY + 4.5,
+              tCenter.z + tSize.z * 0.18,
+            );
+            magentaGamingKey.userData.baseIntensity = 5.5;
+            magentaGamingKey.name = "kitchenMagentaGamingKey";
+            scene.add(magentaGamingKey);
+            _darkModeOnlyLights.push(magentaGamingKey);
             const plateThickness = 0.5;
             tablePlateBody = new CANNON.Body({
               type: CANNON.Body.STATIC,
@@ -3597,7 +3683,7 @@ let _worldSwitched = false;
                 const mat = new THREE.MeshStandardMaterial({
                   color: 0xffffff,
                   emissive: 0xffffff,
-                  emissiveIntensity: 6,
+                  emissiveIntensity: 1.25,
                   roughness: 0.5,
                   metalness: 0.0,
                 });
@@ -3605,7 +3691,7 @@ let _worldSwitched = false;
                 mesh.layers.enable(CAR_LIGHTS_BLOOM_LAYER);
                 _peselLightMeshes.push({
                   mesh: mesh,
-                  darkIntensity: 6,
+                  darkIntensity: 1.25,
                   brightIntensity: 1,
                 });
               };
@@ -3729,7 +3815,7 @@ let _worldSwitched = false;
                   Math.max(stripAlongX ? shelfSize.z : shelfSize.x, 0.05) +
                   _stripPad * 0.5;
                 const rect = new THREE.RectAreaLight(
-                  0xfff6ee,
+                  0xffffff,
                   0,
                   stripLen,
                   stripThick,
@@ -3748,7 +3834,7 @@ let _worldSwitched = false;
                 scene.add(rect);
                 _shelfDownLights.push({
                   light: rect,
-                  darkIntensity: 22,
+                  darkIntensity: 12,
                   brightIntensity: 2.5,
                 });
               }
@@ -3768,7 +3854,7 @@ let _worldSwitched = false;
                   .max.y;
               }
               const _bulbGeo = new THREE.SphereGeometry(0.18, 8, 6);
-              const _bulbMat = new THREE.MeshBasicMaterial({ color: 0xfffae8 });
+              const _bulbMat = new THREE.MeshBasicMaterial({ color: 0x9eeaff });
               for (let mi = 1; mi <= 14; mi += 2) {
                 const topMesh = _kitchenMeshByName.get("mainLightTop" + mi);
                 if (!topMesh) continue;
@@ -3778,7 +3864,7 @@ let _worldSwitched = false;
                 const srcY = topBox.min.y - 0.06;
                 const floorY = kitchenFloorTopY + 0.15;
                 const sp = new THREE.SpotLight(
-                  0xfff8f2,
+                  0xb8d8ff,
                   0,
                   0,
                   Math.PI / 2.4,
@@ -3798,7 +3884,7 @@ let _worldSwitched = false;
                 _mainLightDownPoints.push({
                   light: sp,
                   bulb,
-                  darkIntensity: 6,
+                  darkIntensity: 3,
                   brightIntensity: 14,
                   darkAngle: Math.PI / 2.1,
                   brightAngle: Math.PI / 3.4,
@@ -3841,34 +3927,35 @@ let _worldSwitched = false;
                   y: lampBox.min.y,
                   z: lampCenter.z,
                 });
+                const lampLightColor = li % 2 === 1 ? 0xff2bbd : 0x22dfff;
+                const sp = new THREE.SpotLight(
+                  lampLightColor,
+                  0,
+                  40,
+                  Math.PI / 7,
+                  0.78,
+                  1.5,
+                );
+                sp.position.set(
+                  lampCenter.x,
+                  lampBox.min.y - 0.1,
+                  lampCenter.z,
+                );
+                sp.target.position.set(
+                  lampCenter.x,
+                  lampBox.min.y - 30,
+                  lampCenter.z,
+                );
+                sp.castShadow = false;
+                sp.name = "lamp" + li + "Spot";
+                scene.add(sp);
+                scene.add(sp.target);
+                _mainLightDownPoints.push({
+                  light: sp,
+                  darkIntensity: 34,
+                  brightIntensity: 0,
+                });
                 if (li % 2 === 1) {
-                  const sp = new THREE.SpotLight(
-                    0x6633ee,
-                    0,
-                    44,
-                    Math.PI / 6.2,
-                    0.82,
-                    1.5,
-                  );
-                  sp.position.set(
-                    lampCenter.x,
-                    lampBox.min.y - 0.1,
-                    lampCenter.z,
-                  );
-                  sp.target.position.set(
-                    lampCenter.x,
-                    lampBox.min.y - 30,
-                    lampCenter.z,
-                  );
-                  sp.castShadow = false;
-                  sp.name = "lamp" + li + "Spot";
-                  scene.add(sp);
-                  scene.add(sp.target);
-                  _mainLightDownPoints.push({
-                    light: sp,
-                    darkIntensity: 76,
-                    brightIntensity: 0,
-                  });
                   const tableFill = new THREE.PointLight(0x7448ff, 0, 24, 1.6);
                   tableFill.position.set(lampCenter.x, lampBox.min.y - 0.35, lampCenter.z);
                   tableFill.name = "lamp" + li + "TableFill";
@@ -3892,7 +3979,7 @@ let _worldSwitched = false;
             carFalling = false;
             carFloorTimer = 0;
             try { _rampLeftJumpActive = false; _rampJumpMatrixActive = false; _rampJumpMatrixOrbitProgress = 0; _rampJumpFxBlend = 0; _rampJumpFxIn = 0; _carCam1JumpEffect = 0; _carCam1LandShakeTime = 0; _rampJumpCamRestOffset.set(0, 0, 0); jumpInitialVelY = 0; } catch (e) {}
-            try { _legacyDarkLightsScale = 0; applyDarkModePreset(_darkModeKitchen); } catch (e) {}
+            try { _legacyDarkLightsScale = 0.48; applyDarkModePreset(_darkModeKitchen); } catch (e) {}
             try { setKitchenPerfMode(true); } catch (e) {}
             try { applyLightBlend(lightBlend); } catch (e) {}
             try { scheduleRebuildBloomDarkenLists && scheduleRebuildBloomDarkenLists(); } catch (e) {}
@@ -3945,6 +4032,30 @@ let _worldSwitched = false;
               }
               if (topMat && sideMat) {
                 bindKitchenTableCoverPlanes(planeInfo, topMat, sideMat);
+                if (!_mainTableTopAreaLight && planeInfo.topPlane) {
+                  planeInfo.topPlane.updateMatrixWorld(true);
+                  const lightBox = new THREE.Box3().setFromObject(
+                    planeInfo.topPlane,
+                  );
+                  const lightCenter = lightBox.getCenter(new THREE.Vector3());
+                  const lightSize = lightBox.getSize(new THREE.Vector3());
+                  _mainTableTopAreaLight = new THREE.RectAreaLight(
+                    0xfff8f0,
+                    0.58,
+                    Math.max(1, lightSize.x * 0.9),
+                    Math.max(1, lightSize.z * 0.76),
+                  );
+                  _mainTableTopAreaLight.position.set(
+                    lightCenter.x,
+                    lightBox.max.y + 4,
+                    lightCenter.z,
+                  );
+                  _mainTableTopAreaLight.rotation.set(-Math.PI / 2, 0, 0);
+                  _mainTableTopAreaLight.name = "mainTableTopAreaLight";
+                  _mainTableTopAreaLight.userData.baseIntensity = 0.58;
+                  scene.add(_mainTableTopAreaLight);
+                  _darkModeOnlyLights.push(_mainTableTopAreaLight);
+                }
                 ensureKitchenCoverPlanesVisible(planeInfo);
                 attachKitchenTableTopLampOverlay(planeInfo.topPlane);
                 updateKitchenLampCoverShader(1 - lightBlend);
@@ -4025,7 +4136,6 @@ let _worldSwitched = false;
               node._offMat.emissiveIntensity = 1.1;
               node.material = node._offMat;
               car.userData.brakeLightMesh = node;
-              node.layers.enable(CAR_LIGHTS_BLOOM_LAYER);
             }
             if (node.name === "lightBar1") {
               node.material = new THREE.MeshStandardMaterial({
@@ -4035,7 +4145,6 @@ let _worldSwitched = false;
                 metalness: 0,
                 roughness: 0.15,
               });
-              node.layers.enable(CAR_LIGHTS_BLOOM_LAYER);
             }
             if (node.name === "frontLights") {
               node.material = new THREE.MeshStandardMaterial({
@@ -4044,8 +4153,13 @@ let _worldSwitched = false;
                 emissiveIntensity: 6.5,
                 metalness: 0,
                 roughness: 0.3,
+                side: THREE.DoubleSide,
+                polygonOffset: true,
+                polygonOffsetFactor: -2,
+                polygonOffsetUnits: -2,
               });
-              node.layers.enable(CAR_LIGHTS_BLOOM_LAYER);
+              node.renderOrder = 3;
+              node.position.z += 0.08;
             }
             if (node.name === "rearLights") {
               node.material = new THREE.MeshStandardMaterial({
@@ -4055,7 +4169,6 @@ let _worldSwitched = false;
                 metalness: 0,
                 roughness: 0.3,
               });
-              node.layers.enable(CAR_LIGHTS_BLOOM_LAYER);
             }
             if (
               node.name === "frontLightCase" ||
@@ -4124,11 +4237,6 @@ let _worldSwitched = false;
               clone.name = "lightBarGroup_" + side + "_" + i;
               clone.position.copy(_lbGroup.position);
               clone.position.x += side * i * _lbSpacing * 1.6;
-              clone.traverse((n) => {
-                if (n.isMesh && n.name === "lightBar1") {
-                  n.layers.enable(CAR_LIGHTS_BLOOM_LAYER);
-                }
-              });
               _lbParent.add(clone);
             }
           }

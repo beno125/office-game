@@ -129,6 +129,72 @@ source = source.replace(
   `      sharpenPass.enabled = false;
       sceneBloomEnabled = false;`,
 );
+source = source.replace(
+  `      function getBloomRenderScale() {
+        return sceneBloomEnabled && perfBloomScale > 0 && perfBloomScale < 1`,
+  `      function getBloomRenderScale() {
+        if (_kitchenWorldActive && sceneBloomEnabled) return 0.42;
+        return sceneBloomEnabled && perfBloomScale > 0 && perfBloomScale < 1`,
+);
+source = source.replace(
+  `        3.0,
+        1.6,
+        0.12,`,
+  `        0.35,
+        0.08,
+        0.72,`,
+);
+source = source.replace(
+  `      carLightsBloomPass.highPassUniforms.smoothWidth.value = 0.4;
+      carLightsBloomPass.threshold = 0.006;`,
+  `      carLightsBloomPass.highPassUniforms.smoothWidth.value = 0.03;
+      carLightsBloomPass.threshold = 0.72;`,
+);
+source = source.replace(
+  `            bloomIntensity: { value: 2.35 },`,
+  `            bloomIntensity: { value: 0.16 },`,
+);
+source = source.replace(
+  `      sharpenPass.enabled = false;
+      sceneBloomEnabled = false;`,
+  `      sharpenPass.enabled = false;
+      sceneBloomEnabled = false;
+      carBloomMixPass.enabled = false;`,
+);
+source = source.replaceAll(
+  `              node.layers.enable(CAR_LIGHTS_BLOOM_LAYER);
+`,
+  ``,
+);
+source = source.replace(
+  `              clone.traverse((n) => {
+                if (n.isMesh && n.name === "lightBar1") {
+                  n.layers.enable(CAR_LIGHTS_BLOOM_LAYER);
+                }
+              });
+`,
+  ``,
+);
+source = source.replace(
+  `                emissiveIntensity: 6.5,
+                metalness: 0,
+                roughness: 0.3,
+              });
+            }
+            if (node.name === "rearLights") {`,
+  `                emissiveIntensity: 6.5,
+                metalness: 0,
+                roughness: 0.3,
+                side: THREE.DoubleSide,
+                polygonOffset: true,
+                polygonOffsetFactor: -2,
+                polygonOffsetUnits: -2,
+              });
+              node.renderOrder = 3;
+              node.position.z += 0.08;
+            }
+            if (node.name === "rearLights") {`,
+);
 
 const kitchenPlaceCamerasMarker = `      function placeCarViewCameras(lookAt, maxDim) {`;
 if (!source.includes(kitchenPlaceCamerasMarker)) {
@@ -184,11 +250,29 @@ source = source.replace(
       let _kitchenTableCoverSideMat = null;`,
 );
 source = source.replace(
+  `      let _kitchenCoverTopMesh = null;`,
+  `      let _kitchenCoverTopMesh = null;
+      let _mainTableTopAreaLight = null;`,
+);
+source = source.replace(
   `        _kitchenTableCoverLampMat = null;
         _kitchenCoverTopMesh = null;`,
   `        _kitchenTableCoverLampMat = null;
         _kitchenTableCoverSideMat = null;
         _kitchenCoverTopMesh = null;`,
+);
+source = source.replace(
+  `        _kitchenCoverTopMesh = null;
+        if (_kitchenTableTopStencilWriter) {`,
+  `        _kitchenCoverTopMesh = null;
+        _mainTableTopAreaLight = null;
+        if (_kitchenTableTopStencilWriter) {`,
+);
+source = source.replace(
+  `      /** Fewer tiles along the long edge = larger tile pattern on the planes. */
+      const KITCHEN_COVER_TILES_X = 8;`,
+  `      /** More repeats keep the ceramic tile pattern at a smaller visual scale. */
+      const KITCHEN_COVER_TILES_X = 10.75;`,
 );
 source = source.replace(
   `      function _kitchenCoverMatLite(map, roughnessMap) {
@@ -201,18 +285,90 @@ source = source.replace(
           side: THREE.DoubleSide,
         });
       }`,
-  `      function _kitchenCoverMatLite(map, roughnessMap) {
+  `      function _kitchenCoverMatLite(
+        map,
+        normalMap,
+        roughnessMap,
+        aoMap,
+        metalnessMap,
+      ) {
         return new THREE.MeshPhysicalMaterial({
           map,
+          normalMap,
           roughnessMap,
-          roughness: 0.12,
-          metalness: 0.18,
+          aoMap,
+          aoMapIntensity: 0.65,
+          metalnessMap,
+          roughness: 0.78,
+          metalness: 1,
           envMapIntensity: 2.8,
           clearcoat: 1,
           clearcoatRoughness: 0.06,
           side: THREE.DoubleSide,
         });
       }`,
+);
+source = source.replace(
+  `        const [map, roughnessMap] = await Promise.all([
+          loadTex("Tiles107_2K-JPG_Color.jpg"),
+          loadTex("Tiles107_2K-JPG_Roughness.jpg"),
+        ]);
+        _configureKitchenCoverTexture(map, true);
+        _configureKitchenCoverTexture(roughnessMap, false);
+        const topMat = _kitchenCoverMatLite(
+          _cloneCoverTexture(map, topRepX, topRepY),
+          _cloneCoverTexture(roughnessMap, topRepX, topRepY),
+        );
+        const sideMat = _kitchenCoverMatLite(
+          _cloneCoverTexture(map, sideRepX, sideRepY),
+          _cloneCoverTexture(roughnessMap, sideRepX, sideRepY),
+        );
+        const baseMat = _kitchenCoverMatLite(
+          _cloneCoverTexture(map, 1, 1),
+          _cloneCoverTexture(roughnessMap, 1, 1),
+        );`,
+  `        const [map, normalMap, roughnessMap, aoMap, metalnessMap] = await Promise.all([
+          loadTex("2K/Poliigon_TilesCeramicWhite_6956_BaseColor.jpg"),
+          loadTex("2K/Poliigon_TilesCeramicWhite_6956_Normal.png"),
+          loadTex("2K/Poliigon_TilesCeramicWhite_6956_Roughness.jpg"),
+          loadTex("2K/Poliigon_TilesCeramicWhite_6956_AmbientOcclusion.jpg"),
+          loadTex("2K/Poliigon_TilesCeramicWhite_6956_Metallic.jpg"),
+        ]);
+        _configureKitchenCoverTexture(map, true);
+        _configureKitchenCoverTexture(normalMap, false);
+        _configureKitchenCoverTexture(roughnessMap, false);
+        _configureKitchenCoverTexture(aoMap, false);
+        _configureKitchenCoverTexture(metalnessMap, false);
+        const topMat = _kitchenCoverMatLite(
+          _cloneCoverTexture(map, topRepX, topRepY),
+          _cloneCoverTexture(normalMap, topRepX, topRepY),
+          _cloneCoverTexture(roughnessMap, topRepX, topRepY),
+          _cloneCoverTexture(aoMap, topRepX, topRepY),
+          _cloneCoverTexture(metalnessMap, topRepX, topRepY),
+        );
+        const sideMat = _kitchenCoverMatLite(
+          _cloneCoverTexture(map, sideRepX, sideRepY),
+          _cloneCoverTexture(normalMap, sideRepX, sideRepY),
+          _cloneCoverTexture(roughnessMap, sideRepX, sideRepY),
+          _cloneCoverTexture(aoMap, sideRepX, sideRepY),
+          _cloneCoverTexture(metalnessMap, sideRepX, sideRepY),
+        );
+        const baseMat = _kitchenCoverMatLite(
+          _cloneCoverTexture(map, 1, 1),
+          _cloneCoverTexture(normalMap, 1, 1),
+          _cloneCoverTexture(roughnessMap, 1, 1),
+          _cloneCoverTexture(aoMap, 1, 1),
+          _cloneCoverTexture(metalnessMap, 1, 1),
+        );`,
+);
+source = source.replace(
+  `          const depthWrite = !(opts && opts.depthWrite === false);
+          mesh.material = mat;`,
+  `          const depthWrite = !(opts && opts.depthWrite === false);
+          if (mesh.geometry.attributes.uv && !mesh.geometry.attributes.uv1) {
+            mesh.geometry.setAttribute("uv1", mesh.geometry.attributes.uv);
+          }
+          mesh.material = mat;`,
 );
 source = source.replace(
   `                _mainLightDownPoints.push({ light: sp, darkIntensity: 60, brightIntensity: 0 });`,
@@ -235,8 +391,56 @@ source = source.replace(
               _kitchenTableCoverSideMat = sideMat;`,
 );
 source = source.replace(
+  `                bindKitchenTableCoverPlanes(planeInfo, topMat, sideMat);`,
+  `                bindKitchenTableCoverPlanes(planeInfo, topMat, sideMat);
+                if (!_mainTableTopAreaLight && planeInfo.topPlane) {
+                  planeInfo.topPlane.updateMatrixWorld(true);
+                  const lightBox = new THREE.Box3().setFromObject(
+                    planeInfo.topPlane,
+                  );
+                  const lightCenter = lightBox.getCenter(new THREE.Vector3());
+                  const lightSize = lightBox.getSize(new THREE.Vector3());
+                  _mainTableTopAreaLight = new THREE.RectAreaLight(
+                    0xfff8f0,
+                    0.58,
+                    Math.max(1, lightSize.x * 0.9),
+                    Math.max(1, lightSize.z * 0.76),
+                  );
+                  _mainTableTopAreaLight.position.set(
+                    lightCenter.x,
+                    lightBox.max.y + 4,
+                    lightCenter.z,
+                  );
+                  _mainTableTopAreaLight.rotation.set(-Math.PI / 2, 0, 0);
+                  _mainTableTopAreaLight.name = "mainTableTopAreaLight";
+                  _mainTableTopAreaLight.userData.baseIntensity = 0.58;
+                  scene.add(_mainTableTopAreaLight);
+                  _darkModeOnlyLights.push(_mainTableTopAreaLight);
+                }`,
+);
+source = source.replace(
   `        const zoom = 0.09;`,
   `        const zoom = 0.18;`,
+);
+source = source.replace(
+  `      const CAR_SCALE_MULTIPLIER = 1.24;`,
+  `      const CAR_SCALE_MULTIPLIER = 1.52;`,
+);
+source = source.replace(
+  `      const car = new THREE.Group();
+      car.rotation.order = "YXZ";
+      scene.add(car);`,
+  `      const car = new THREE.Group();
+      car.rotation.order = "YXZ";
+      scene.add(car);
+      const carKeyLight = new THREE.PointLight(0xc7eaff, 7.5, 16, 1.8);
+      carKeyLight.position.set(-1.2, 3.8, 1.8);
+      carKeyLight.name = "kitchenCarKeyLight";
+      car.add(carKeyLight);
+      const carRimLight = new THREE.PointLight(0xff4fc8, 3.5, 11, 1.8);
+      carRimLight.position.set(1.5, 2.4, -2.2);
+      carRimLight.name = "kitchenCarRimLight";
+      car.add(carRimLight);`,
 );
 source = source.replace(
   `        const camOffsetYOrbit = maxDim * 0.6 * zoom;`,
@@ -244,12 +448,103 @@ source = source.replace(
 );
 source = source.replace(
   `      const _KITCHEN_MAX_PIXEL_RATIO = 1;`,
-  `      const _KITCHEN_MAX_PIXEL_RATIO = 0.82;
+  `      const _KITCHEN_MAX_PIXEL_RATIO = 0.95;
       let _kitchenIdlePhysicsAccumulator = 0;`,
 );
 source = source.replace(
-  `      finalComposer.addPass(carBloomMixPass);`,
-  ``,
+  `      const _darkModeKitchen = {
+        background: 0x05050a,
+        ambient: { color: 0xfff0e4, intensity: 0.14 },
+        hemisphere: { sky: 0xfff4e8, ground: 0xc8b8a8, intensity: 0.1 },
+        dirPink: { color: 0x000000, intensity: 0 },
+        dirBlue: { color: 0x000000, intensity: 0 },
+        dirFillPink: { color: 0x000000, intensity: 0 },
+        dirFillBlue: { color: 0x000000, intensity: 0 },
+        pointPink: { color: 0x000000, intensity: 0 },
+        pointBlue: { color: 0x000000, intensity: 0 },
+        warmKey: { color: 0x000000, intensity: 0 },
+        warmFill: { color: 0x000000, intensity: 0 },
+      };`,
+  `      const _darkModeKitchen = {
+        background: 0x02030b,
+        ambient: { color: 0x18264f, intensity: 0.16 },
+        hemisphere: { sky: 0x245cff, ground: 0x2a073f, intensity: 0.12 },
+        dirPink: { color: 0xff2fa8, intensity: 0.2 },
+        dirBlue: { color: 0x2b9dff, intensity: 0.3 },
+        dirFillPink: { color: 0xb42cff, intensity: 0.12 },
+        dirFillBlue: { color: 0x30e3ff, intensity: 0.18 },
+        pointPink: { color: 0xff1f9d, intensity: 0.24 },
+        pointBlue: { color: 0x246bff, intensity: 0.3 },
+        warmKey: { color: 0x000000, intensity: 0 },
+        warmFill: { color: 0x000000, intensity: 0 },
+      };`,
+);
+source = source.replace(
+  `          _kitchenFloorMat.emissive.setHex(0xe8e4de);
+          _kitchenFloorMat.emissiveIntensity = (1 - b) * 0.12;`,
+  `          _kitchenFloorMat.emissive.setHex(0x16235a);
+          _kitchenFloorMat.emissiveIntensity = (1 - b) * 0.16;`,
+);
+source = source.replace(
+  `      const _kitchenFloorColorDark = new THREE.Color(0xd6d0c8);`,
+  `      const _kitchenFloorColorDark = new THREE.Color(0x171b2f);`,
+);
+source = source.replace(
+  `                  0xfff6ee,`,
+  `                  0xffffff,`,
+);
+source = source.replace(
+  `                  0xfff8f2,`,
+  `                  0xb8d8ff,`,
+);
+source = source.replace(
+  `            try { _legacyDarkLightsScale = 0; applyDarkModePreset(_darkModeKitchen); } catch (e) {}`,
+  `            try { _legacyDarkLightsScale = 0.48; applyDarkModePreset(_darkModeKitchen); } catch (e) {}`,
+);
+source = source.replace(
+  `        baseMat.color.set(0xe6c3bd);`,
+  `        topMat.color.set(0x647bb8);
+        topMat.emissive.setHex(0x0d1d50);
+        topMat.emissiveIntensity = 0.2;
+        sideMat.color.set(0x9aaee0);
+        sideMat.emissive.setHex(0x1a2f70);
+        sideMat.emissiveMap = sideMat.aoMap;
+        sideMat.emissiveIntensity = 0.58;
+        baseMat.color.set(0x302544);
+        baseMat.emissive.setHex(0x160a2d);
+        baseMat.emissiveIntensity = 0.12;`,
+);
+source = source.replace(
+  `                  color: 0xffffff,
+                  emissive: 0xffffff,
+                  emissiveIntensity: 6,`,
+  `                  color: 0xffffff,
+                  emissive: 0xffffff,
+                  emissiveIntensity: 1.25,`,
+);
+source = source.replace(
+  `                  mesh: mesh,
+                  darkIntensity: 6,
+                  brightIntensity: 1,`,
+  `                  mesh: mesh,
+                  darkIntensity: 1.25,
+                  brightIntensity: 1,`,
+);
+source = source.replace(
+  `                  darkIntensity: 22,
+                  brightIntensity: 2.5,`,
+  `                  darkIntensity: 12,
+                  brightIntensity: 2.5,`,
+);
+source = source.replace(
+  `              const _bulbMat = new THREE.MeshBasicMaterial({ color: 0xfffae8 });`,
+  `              const _bulbMat = new THREE.MeshBasicMaterial({ color: 0x9eeaff });`,
+);
+source = source.replace(
+  `                  darkIntensity: 6,
+                  brightIntensity: 14,`,
+  `                  darkIntensity: 3,
+                  brightIntensity: 14,`,
 );
 source = source.replace(
   `        if (renderer.capabilities.isWebGL2) {`,
@@ -269,34 +564,35 @@ source = source.replace(
                 scene.add(sp.target);
                 _mainLightDownPoints.push({ light: sp, darkIntensity: 60, brightIntensity: 0 });
                 if (li % 2 === 1) {`,
-  `                if (li % 2 === 1) {
-                  const sp = new THREE.SpotLight(
-                    0x6633ee,
-                    0,
-                    44,
-                    Math.PI / 6.2,
-                    0.82,
-                    1.5,
-                  );
-                  sp.position.set(
-                    lampCenter.x,
-                    lampBox.min.y - 0.1,
-                    lampCenter.z,
-                  );
-                  sp.target.position.set(
-                    lampCenter.x,
-                    lampBox.min.y - 30,
-                    lampCenter.z,
-                  );
-                  sp.castShadow = false;
-                  sp.name = "lamp" + li + "Spot";
-                  scene.add(sp);
-                  scene.add(sp.target);
-                  _mainLightDownPoints.push({
-                    light: sp,
-                    darkIntensity: 76,
-                    brightIntensity: 0,
-                  });`,
+  `                const lampLightColor = li % 2 === 1 ? 0xff2bbd : 0x22dfff;
+                const sp = new THREE.SpotLight(
+                  lampLightColor,
+                  0,
+                  40,
+                  Math.PI / 7,
+                  0.78,
+                  1.5,
+                );
+                sp.position.set(
+                  lampCenter.x,
+                  lampBox.min.y - 0.1,
+                  lampCenter.z,
+                );
+                sp.target.position.set(
+                  lampCenter.x,
+                  lampBox.min.y - 30,
+                  lampCenter.z,
+                );
+                sp.castShadow = false;
+                sp.name = "lamp" + li + "Spot";
+                scene.add(sp);
+                scene.add(sp.target);
+                _mainLightDownPoints.push({
+                  light: sp,
+                  darkIntensity: 34,
+                  brightIntensity: 0,
+                });
+                if (li % 2 === 1) {`,
 );
 source = source.replace(
   `        if (physicsWorld) {
@@ -308,6 +604,9 @@ source = source.replace(
         }
         if (_kitchenWorldActive) {
           renderer.shadowMap.enabled = false;
+          renderer.toneMappingExposure = 0.86;
+          sceneBloomEnabled = false;
+          carBloomMixPass.enabled = false;
           if (typeof carShadowLight !== "undefined") {
             carShadowLight.castShadow = false;
           }
@@ -465,6 +764,41 @@ source = source.replace(
             surfaceMesh.updateMatrixWorld(true);`,
 );
 source = source.replace(
+  `            tablePlateCenter.set(tCenter.x, tTopY, tCenter.z);`,
+  `            tablePlateCenter.set(tCenter.x, tTopY, tCenter.z);
+            const cyanGamingKey = new THREE.PointLight(
+              0x00d9ff,
+              6,
+              44,
+              1.7,
+            );
+            cyanGamingKey.position.set(
+              tCenter.x - tSize.x * 0.32,
+              tTopY + 5.5,
+              tCenter.z - tSize.z * 0.2,
+            );
+            cyanGamingKey.userData.baseIntensity = 6;
+            cyanGamingKey.name = "kitchenCyanGamingKey";
+            scene.add(cyanGamingKey);
+            _darkModeOnlyLights.push(cyanGamingKey);
+
+            const magentaGamingKey = new THREE.PointLight(
+              0xff1f9d,
+              5.5,
+              42,
+              1.7,
+            );
+            magentaGamingKey.position.set(
+              tCenter.x + tSize.x * 0.3,
+              tTopY + 4.5,
+              tCenter.z + tSize.z * 0.18,
+            );
+            magentaGamingKey.userData.baseIntensity = 5.5;
+            magentaGamingKey.name = "kitchenMagentaGamingKey";
+            scene.add(magentaGamingKey);
+            _darkModeOnlyLights.push(magentaGamingKey);`,
+);
+source = source.replace(
   `          const cbCenter = cbBox.getCenter(new THREE.Vector3());
           const hx = cbSize.x / 2,`,
   `          const cbCenter = cbBox.getCenter(new THREE.Vector3());
@@ -506,6 +840,15 @@ source = source.replace(
   `            targetUp = _airTiltUp
               .set(-sinP * fx, cosP, -sinP * fz)
               .normalize();`,
+);
+source = source.replace(
+  `        _kitchenWorldActive = !!active;
+        applyPerformanceSettings();`,
+  `        _kitchenWorldActive = !!active;
+        applyPerformanceSettings();
+        renderer.toneMappingExposure = active ? 0.86 : 1;
+        sceneBloomEnabled = false;
+        carBloomMixPass.enabled = false;`,
 );
 const kitchenAnimateMarker = `      function animate() {
         requestAnimationFrame(animate);`;
@@ -557,14 +900,25 @@ const requiredOutput = [
   "setKitchenSceneRendering(active)",
   "_kitchenTableCoverSideMat = sideMat",
   "clearcoatRoughness: 0.06",
+  "Poliigon_TilesCeramicWhite_6956_BaseColor.jpg",
+  "KITCHEN_COVER_TILES_X = 10.75",
   'name = "lamp" + li + "TableFill"',
-  "_KITCHEN_MAX_PIXEL_RATIO = 0.82",
+  "_KITCHEN_MAX_PIXEL_RATIO = 0.95",
   "mi += 2",
-  "darkIntensity: 76",
+  "lampLightColor",
   "lightBlendDelta",
   "_kitchenIdlePhysicsAccumulator",
   "_cachedTablePlaySurfaceY",
   "_canonBodyLocalCenter",
+  "background: 0x02030b",
+  "_legacyDarkLightsScale = 0.48",
+  "topMat.color.set(0x647bb8)",
+  "return 0.42",
+  "carBloomMixPass.enabled = false",
+  "kitchenCyanGamingKey",
+  "CAR_SCALE_MULTIPLIER = 1.52",
+  "kitchenCarKeyLight",
+  "mainTableTopAreaLight",
 ];
 for (const expected of requiredOutput) {
   if (!source.includes(expected)) {
