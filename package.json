@@ -7,7 +7,9 @@
     "node": ">=16.0.0"
   },
   "scripts": {
-    "dev": "vite",
+    "dev": "vite --host 127.0.0.1 --port 5186 --strictPort",
+    "dev:kitchen": "vite --host 127.0.0.1 --port 5186 --strictPort --open /kitchen",
+    "dev:meeting-room": "vite --host 127.0.0.1 --port 5186 --strictPort --open /meeting-room",
     "dev:wix": "npm run dev --prefix office-wix-managed",
     "dev:wix-astro": "npm run dev:astro --prefix office-wix-managed",
     "local": "vite build && vite preview --host 127.0.0.1 --port 4173 --strictPort",

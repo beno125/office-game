@@ -2500,6 +2500,7 @@ let _worldSwitched = false;
         _safeRemoveBody(tablePlateBody); tablePlateBody = null;
         _safeRemoveBody(floorPhysBody); floorPhysBody = null;
         if (_peselLightMeshes.length) _peselLightMeshes.length = 0;
+        _misterSpot = null;
         if (_shelfDownLights.length) {
           for (const entry of _shelfDownLights) {
             const dl = entry && entry.light;
@@ -2879,7 +2880,7 @@ let _worldSwitched = false;
         const sidePlane = _findKitchenMesh(kmodel, "mainTableSidePlane", meshByName);
         if (!topPlane && !sidePlane) {
           console.warn(
-            "ul-kitchen13.gltf: mainTableTopPlane / mainTableSidePlane not found",
+            "ul-kitchen19.gltf: mainTableTopPlane / mainTableSidePlane not found",
           );
           return { coverCloneStepX: null, topMat: null, sideMat: null };
         }
@@ -3036,11 +3037,395 @@ let _worldSwitched = false;
         });
       }
 
+      const MISTER_SPOT_SPEED = 3.6;
+      const MISTER_SPOT_SCALE = 9;
+      const MISTER_SPOT_TURN_DURATION = 0.72;
+      const MISTER_SPOT_HOLD_DURATION = 0.14;
+      const MISTER_SPOT_EASE_DIST = 2.8;
+      const ROBOT_RAIL_SCALE_Y = 2.4;
+      const ROBOT_RAIL_SCALE_X = 1.12;
+      const ROBOT_RAIL_OFFSET_Y = 8;
+      let _misterSpot = null;
+
+      function _buildRobotRailPath(rail, kmodel) {
+        let mesh = rail && rail.isMesh ? rail : null;
+        if (!mesh && rail) {
+          rail.traverse((n) => {
+            if (!mesh && n.isMesh) mesh = n;
+          });
+        }
+        const geom = mesh && mesh.geometry;
+        const pos = geom && geom.attributes && geom.attributes.position;
+        if (!pos) return null;
+        rail.updateMatrix();
+        let minX = Infinity;
+        let maxX = -Infinity;
+        let minZ = Infinity;
+        let maxZ = -Infinity;
+        let y = rail.position.y;
+        const v = new THREE.Vector3();
+        for (let i = 0; i < pos.count; i++) {
+          v.fromBufferAttribute(pos, i).applyMatrix4(rail.matrix);
+          if (v.x < minX) minX = v.x;
+          if (v.x > maxX) maxX = v.x;
+          if (v.z < minZ) minZ = v.z;
+          if (v.z > maxZ) maxZ = v.z;
+          y = v.y;
+        }
+        if (!(maxX > minX) || !(maxZ > minZ)) return null;
+        const table =
+          kmodel &&
+          (kmodel.getObjectByName("mainTablePlate") ||
+            kmodel.getObjectByName("mainTableBase"));
+        if (table) {
+          table.updateWorldMatrix(true, false);
+          const box = new THREE.Box3().setFromObject(table);
+          const pad = 2.5;
+          const nMinX = Math.max(minX, box.min.x - pad);
+          const nMaxX = Math.min(maxX, box.max.x + pad);
+          const nMinZ = Math.max(minZ, box.min.z - pad);
+          const nMaxZ = Math.min(maxZ, box.max.z + pad);
+          if (nMaxX > nMinX + 4 && nMaxZ > nMinZ + 4) {
+            minX = nMinX;
+            maxX = nMaxX;
+            minZ = nMinZ;
+            maxZ = nMaxZ;
+          }
+        }
+        const cx = (minX + maxX) * 0.5;
+        const hx = (maxX - minX) * 0.5 * ROBOT_RAIL_SCALE_X;
+        minX = cx - hx;
+        maxX = cx + hx;
+        const zNear = maxZ;
+        const cz = (minZ + maxZ) * 0.5;
+        const hz = (maxZ - minZ) * 0.5 * ROBOT_RAIL_SCALE_Y;
+        minZ = cz - hz;
+        maxZ = Math.min(zNear, cz + hz);
+        minZ += ROBOT_RAIL_OFFSET_Y;
+        maxZ += ROBOT_RAIL_OFFSET_Y;
+        const loop = [
+          new THREE.Vector3(minX, y, minZ),
+          new THREE.Vector3(maxX, y, minZ),
+          new THREE.Vector3(maxX, y, maxZ),
+          new THREE.Vector3(minX, y, maxZ),
+        ];
+        const segs = [];
+        let acc = 0;
+        for (let i = 0; i < 4; i++) {
+          const from = loop[i];
+          const to = loop[(i + 1) % 4];
+          const len = from.distanceTo(to);
+          segs.push({ from, to, len, acc });
+          acc += len;
+        }
+        return { segs, pathLength: acc, y };
+      }
+
+      function _misterSpotClosestDist(path, x, z) {
+        let bestDist = 0;
+        let bestD = Infinity;
+        for (let i = 0; i < path.segs.length; i++) {
+          const seg = path.segs[i];
+          const dx = seg.to.x - seg.from.x;
+          const dz = seg.to.z - seg.from.z;
+          const lenSq = dx * dx + dz * dz;
+          let t = 0;
+          if (lenSq > 1e-8) {
+            t = ((x - seg.from.x) * dx + (z - seg.from.z) * dz) / lenSq;
+            if (t < 0) t = 0;
+            else if (t > 1) t = 1;
+          }
+          const px = seg.from.x + dx * t;
+          const pz = seg.from.z + dz * t;
+          const ddx = px - x;
+          const ddz = pz - z;
+          const d = ddx * ddx + ddz * ddz;
+          if (d < bestD) {
+            bestD = d;
+            bestDist = seg.acc + t * seg.len;
+          }
+        }
+        return bestDist;
+      }
+
+      function _misterSpotSmooth(t) {
+        if (t < 0) t = 0;
+        else if (t > 1) t = 1;
+        return t * t * (3 - 2 * t);
+      }
+
+      function _misterSpotSegYaw(seg) {
+        return Math.atan2(seg.to.x - seg.from.x, seg.to.z - seg.from.z);
+      }
+
+      function _misterSpotAngleDelta(from, to) {
+        let d = to - from;
+        while (d > Math.PI) d -= Math.PI * 2;
+        while (d < -Math.PI) d += Math.PI * 2;
+        return d;
+      }
+
+      function _misterSpotPlaceDrive(m) {
+        const seg = m.segs[m.seg];
+        const len = seg.len;
+        const t = len > 1e-6 ? m.along / len : 0;
+        m.object.position.set(
+          seg.from.x + (seg.to.x - seg.from.x) * t,
+          m.y,
+          seg.from.z + (seg.to.z - seg.from.z) * t,
+        );
+        m.object.rotation.y = _misterSpotSegYaw(seg);
+      }
+
+      function _misterSpotStartDrive(m, segIndex, along) {
+        const segs = m.segs;
+        m.seg = segIndex;
+        m.mode = "drive";
+        const seg = segs[segIndex];
+        const len = seg.len;
+        const ease = Math.min(MISTER_SPOT_EASE_DIST, len * 0.35);
+        if (along < 0) along = 0;
+        if (along > len) along = len;
+        m.along = along;
+        if (ease > 0.12 && along < ease) {
+          m.drivePhase = "in";
+          m.easeLen = ease;
+          m.phaseDur = (2 * ease) / MISTER_SPOT_SPEED;
+          m.phaseT = Math.sqrt(along / ease);
+        } else if (ease > 0.12 && along > len - ease) {
+          m.drivePhase = "out";
+          m.easeFrom = len - ease;
+          m.easeLen = ease;
+          m.phaseDur = (2 * ease) / MISTER_SPOT_SPEED;
+          const u = (along - (len - ease)) / ease;
+          m.phaseT = 1 - Math.sqrt(Math.max(0, 1 - u));
+        } else {
+          m.drivePhase = "cruise";
+          m.phaseT = 0;
+        }
+        _misterSpotPlaceDrive(m);
+      }
+
+      function _misterSpotArriveCorner(m) {
+        const segs = m.segs;
+        const seg = segs[m.seg];
+        const next = segs[(m.seg + 1) % segs.length];
+        m.along = seg.len;
+        m.object.position.set(seg.to.x, m.y, seg.to.z);
+        m.yawFrom = _misterSpotSegYaw(seg);
+        m.yawTo = _misterSpotSegYaw(next);
+        m.yawDelta = _misterSpotAngleDelta(m.yawFrom, m.yawTo);
+        m.object.rotation.y = m.yawFrom;
+        if (Math.abs(m.yawDelta) < 1e-3) {
+          _misterSpotStartDrive(m, (m.seg + 1) % segs.length, 0);
+          return;
+        }
+        m.mode = "hold";
+        m.holdT = 0;
+      }
+
+      function updateMisterSpot(dt) {
+        const m = _misterSpot;
+        if (!m || !m.object || !m.segs || !m.segs.length) return;
+        if (dt < 0) dt = 0;
+        const segs = m.segs;
+        if (m.mode === "hold") {
+          m.holdT += dt;
+          m.object.position.set(segs[m.seg].to.x, m.y, segs[m.seg].to.z);
+          m.object.rotation.y = m.yawFrom;
+          if (m.holdT >= MISTER_SPOT_HOLD_DURATION) {
+            m.mode = "turn";
+            m.turnT = 0;
+          }
+          return;
+        }
+        if (m.mode === "turn") {
+          m.turnT +=
+            MISTER_SPOT_TURN_DURATION > 1e-6
+              ? dt / MISTER_SPOT_TURN_DURATION
+              : 1;
+          const u = _misterSpotSmooth(m.turnT);
+          m.object.position.set(segs[m.seg].to.x, m.y, segs[m.seg].to.z);
+          m.object.rotation.y = m.yawFrom + m.yawDelta * u;
+          if (m.turnT >= 1) {
+            m.object.rotation.y = m.yawTo;
+            _misterSpotStartDrive(m, (m.seg + 1) % segs.length, 0);
+          }
+          return;
+        }
+        const seg = segs[m.seg];
+        const len = seg.len;
+        const ease = Math.min(MISTER_SPOT_EASE_DIST, len * 0.35);
+        if (m.drivePhase === "in") {
+          m.phaseT += m.phaseDur > 1e-6 ? dt / m.phaseDur : 1;
+          const u = m.phaseT < 0 ? 0 : m.phaseT > 1 ? 1 : m.phaseT;
+          m.along = m.easeLen * u * u;
+          if (m.phaseT >= 1) {
+            m.along = m.easeLen;
+            m.drivePhase = "cruise";
+          }
+        } else if (m.drivePhase === "out") {
+          m.phaseT += m.phaseDur > 1e-6 ? dt / m.phaseDur : 1;
+          const u = m.phaseT < 0 ? 0 : m.phaseT > 1 ? 1 : m.phaseT;
+          const k = 1 - (1 - u) * (1 - u);
+          m.along = m.easeFrom + m.easeLen * k;
+          if (m.phaseT >= 1) {
+            _misterSpotArriveCorner(m);
+            return;
+          }
+        } else {
+          m.along += MISTER_SPOT_SPEED * dt;
+          if (ease > 0.12 && m.along >= len - ease) {
+            m.along = len - ease;
+            m.drivePhase = "out";
+            m.easeFrom = len - ease;
+            m.easeLen = ease;
+            m.phaseT = 0;
+            m.phaseDur = (2 * ease) / MISTER_SPOT_SPEED;
+          } else if (m.along >= len) {
+            _misterSpotArriveCorner(m);
+            return;
+          }
+        }
+        _misterSpotPlaceDrive(m);
+      }
+
+      function _applyMisterSpotMaterials(root) {
+        const env = scene.environment;
+        const mattPlastic = (color) => {
+          const mat = new THREE.MeshStandardMaterial({
+            color: color,
+            roughness: 0.88,
+            metalness: 0,
+            envMapIntensity: 0.18,
+          });
+          if (env) mat.envMap = env;
+          return mat;
+        };
+        const stickerColor = new THREE.Color(
+          0.8003778457641602,
+          0.5333334803581238,
+          0.7881258726119995,
+        );
+        const hotRed = new THREE.MeshBasicMaterial({
+          color: 0xff3a00,
+          toneMapped: false,
+        });
+        const whiteLight = new THREE.MeshStandardMaterial({
+          color: 0xffffff,
+          roughness: 0.32,
+          metalness: 0,
+          emissive: 0xffffff,
+          emissiveIntensity: 3.2,
+          envMapIntensity: 0,
+        });
+        const glossyBlack = new THREE.MeshStandardMaterial({
+          color: 0x0b0b0b,
+          roughness: 0.16,
+          metalness: 0.04,
+          envMapIntensity: 1.05,
+        });
+        const rubberPink = new THREE.MeshStandardMaterial({
+          color: 0xff79a8,
+          roughness: 0.96,
+          metalness: 0,
+          envMapIntensity: 0.08,
+        });
+        const screenBlack = new THREE.MeshStandardMaterial({
+          color: 0x121212,
+          roughness: 0.4,
+          metalness: 0.02,
+          envMapIntensity: 0.55,
+        });
+        if (env) {
+          glossyBlack.envMap = env;
+          rubberPink.envMap = env;
+          screenBlack.envMap = env;
+        }
+        const mats = {
+          bodyMainWhite: mattPlastic(0xf3f3f3),
+          Text: mattPlastic(0xf3f3f3),
+          buttonBaseMain: mattPlastic(0xf0c000),
+          stikerPurple: mattPlastic(stickerColor),
+          buttonMain: hotRed,
+          buttonsSmall: whiteLight,
+          eyes: glossyBlack,
+          rubber: rubberPink,
+          screen: screenBlack,
+        };
+        root.traverse((n) => {
+          if (!n.isMesh) return;
+          const mat = mats[n.name];
+          if (mat) n.material = mat;
+          else applySceneEnvironmentToMaterial(n.material);
+        });
+      }
+
+      function loadMisterSpot(kmodel, loadToken) {
+        const mLoader = new GLTFLoader();
+        mLoader.load(
+          "Mister-spot.gltf",
+          (gltf) => {
+            if (!_worldSwitched || loadToken !== _kitchenLoadToken) return;
+            const mister = gltf.scene;
+            mister.name = "MisterSpot";
+            mister.scale.setScalar(MISTER_SPOT_SCALE);
+            applyKitchenMeshPerf(mister);
+            applyTextureAnisotropyToRoot(mister);
+            applyPerformanceShadowPolicy(mister);
+            mister.traverse((n) => {
+              if (!n.isMesh) return;
+              n.frustumCulled = true;
+            });
+            _applyMisterSpotMaterials(mister);
+            const rail = kmodel.getObjectByName("robotRail");
+            if (rail) rail.visible = false;
+            const path = rail ? _buildRobotRailPath(rail, kmodel) : null;
+            kmodel.add(mister);
+            if (path) {
+              const chair = kmodel.getObjectByName("barChairWood");
+              const dist0 = chair
+                ? _misterSpotClosestDist(path, chair.position.x, chair.position.z)
+                : 0;
+              let d = dist0 % path.pathLength;
+              if (d < 0) d += path.pathLength;
+              let segI = 0;
+              let along0 = 0;
+              for (let i = 0; i < path.segs.length; i++) {
+                const s = path.segs[i];
+                if (d > s.acc + s.len && i < path.segs.length - 1) continue;
+                segI = i;
+                along0 = d - s.acc;
+                break;
+              }
+              _misterSpot = {
+                object: mister,
+                segs: path.segs,
+                pathLength: path.pathLength,
+                y: path.y,
+                seg: 0,
+                along: 0,
+                mode: "drive",
+                drivePhase: "cruise",
+              };
+              _misterSpotStartDrive(_misterSpot, segI, along0);
+            } else if (rail) {
+              mister.position.copy(rail.position);
+              _misterSpot = null;
+            }
+          },
+          undefined,
+          (err) => {
+            console.error("Failed to load Mister-spot.gltf:", err);
+          },
+        );
+      }
+
       function loadKitchenWorld() {
         const loadToken = ++_kitchenLoadToken;
         const kLoader = new GLTFLoader();
         kLoader.load(
-          "ul-kitchen13.gltf",
+          "ul-kitchen19.gltf",
           (gltf) => {
             if (!_worldSwitched || loadToken !== _kitchenLoadToken) return;
 
@@ -3062,13 +3447,14 @@ let _worldSwitched = false;
             });
             const surfaceMesh = kitchenPlate || kitchenPlatePhysic;
             if (!surfaceMesh) {
-              console.warn("ul-kitchen13.gltf: no mainTablePlate/mainTablePlatePhysic mesh found");
+              console.warn("ul-kitchen19.gltf: no mainTablePlate/mainTablePlatePhysic mesh found");
               _worldSwitched = false;
               return;
             }
 
             scene.add(kmodel);
             _currentWorldModel = kmodel;
+            loadMisterSpot(kmodel, loadToken);
 
             let mainTableBaseMesh = null;
             let mainNishBackWallPlateMesh = null;
@@ -3099,6 +3485,77 @@ let _worldSwitched = false;
               metalness: 0.0,
               side: THREE.DoubleSide,
             });
+            const _closetDoorsMat = new THREE.MeshStandardMaterial({
+              color: 0xecf8ea,
+              roughness: 1.0,
+              metalness: 0.0,
+            });
+            const _closetDoorRects = [];
+            for (let _ri = 0; _ri < 40; _ri++) {
+              _closetDoorRects.push(new THREE.Vector4(0, -1, 0, -1));
+            }
+            const _closetDoorEdgeMat = _closetDoorsMat.clone();
+            const _closetEdgeGlsl =
+              "uniform vec4 uDoorRects[40];\n" +
+              "float closetEdgeDist(vec3 p){\n" +
+              "  float edge=8.0;\n" +
+              "  for(int i=0;i<40;i++){\n" +
+              "    vec4 r=uDoorRects[i];\n" +
+              "    float inside=step(r.x,p.x)*step(p.x,r.y)*step(r.z,p.y)*step(p.y,r.w)*step(r.x,r.y);\n" +
+              "    float d=min(min(p.x-r.x,r.y-p.x),min(p.y-r.z,r.w-p.y));\n" +
+              "    edge=mix(edge,min(edge,d),inside);\n" +
+              "  }\n" +
+              "  return edge;\n" +
+              "}\n";
+            _closetDoorEdgeMat.onBeforeCompile = (shader) => {
+              shader.uniforms.uDoorRects = { value: _closetDoorRects };
+              shader.vertexShader = shader.vertexShader
+                .replace(
+                  "#include <common>",
+                  "#include <common>\nvarying vec3 vClosetLocal;\n" + _closetEdgeGlsl,
+                )
+                .replace(
+                  "#include <begin_vertex>",
+                  "#include <begin_vertex>\nvClosetLocal=position;\nfloat _bevel=1.0-smoothstep(0.0,0.12,closetEdgeDist(position));\nif(normal.z>0.7) transformed.z-=_bevel*0.008;",
+                );
+              shader.fragmentShader = shader.fragmentShader
+                .replace(
+                  "#include <common>",
+                  "#include <common>\nvarying vec3 vClosetLocal;\n" + _closetEdgeGlsl,
+                )
+                .replace(
+                  "#include <color_fragment>",
+                  "#include <color_fragment>\nfloat _line=1.0-smoothstep(0.0,0.12,closetEdgeDist(vClosetLocal));\ndiffuseColor.rgb*=mix(1.0,0.91,_line);",
+                );
+            };
+            _closetDoorEdgeMat.customProgramCacheKey = () => "closetDoorEdges";
+            const _dishwasherDoorRects = [];
+            for (let _ri = 0; _ri < 40; _ri++) {
+              _dishwasherDoorRects.push(new THREE.Vector4(0, -1, 0, -1));
+            }
+            const _dishwasherDoorEdgeMat = _closetDoorsMat.clone();
+            _dishwasherDoorEdgeMat.onBeforeCompile = (shader) => {
+              shader.uniforms.uDoorRects = { value: _dishwasherDoorRects };
+              shader.vertexShader = shader.vertexShader
+                .replace(
+                  "#include <common>",
+                  "#include <common>\nvarying vec3 vClosetLocal;\n" + _closetEdgeGlsl,
+                )
+                .replace(
+                  "#include <begin_vertex>",
+                  "#include <begin_vertex>\nvClosetLocal=position;\nfloat _bevel=1.0-smoothstep(0.0,0.12,closetEdgeDist(position));\nif(normal.z>0.7) transformed.z-=_bevel*0.008;",
+                );
+              shader.fragmentShader = shader.fragmentShader
+                .replace(
+                  "#include <common>",
+                  "#include <common>\nvarying vec3 vClosetLocal;\n" + _closetEdgeGlsl,
+                )
+                .replace(
+                  "#include <color_fragment>",
+                  "#include <color_fragment>\nfloat _line=1.0-smoothstep(0.0,0.12,closetEdgeDist(vClosetLocal));\ndiffuseColor.rgb*=mix(1.0,0.91,_line);",
+                );
+            };
+            _dishwasherDoorEdgeMat.customProgramCacheKey = () => "dishwasherDoorEdges";
             const _mainNishBackWallMat = new THREE.MeshStandardMaterial({
               color: 0xf2eeea,
               roughness: 1.0,
@@ -3156,6 +3613,9 @@ let _worldSwitched = false;
               "coffeeTankCup",
               "coffeeStrokEdge",
               "waterTapPlastic",
+              "iceCoffeeBody",
+              "iceCoffeeCup",
+              "iceCoffeeHandle",
             ]);
             const _chromeMetalMat = new THREE.MeshStandardMaterial({
               color: 0xffffff,
@@ -3169,6 +3629,170 @@ let _worldSwitched = false;
               "coffeeHandle",
               "coffeeLegs",
             ]);
+            const _matteMetalMat = new THREE.MeshStandardMaterial({
+              color: 0xe8ebef,
+              metalness: 1.0,
+              roughness: 0.58,
+              envMapIntensity: 1.05,
+            });
+            if (scene.environment) _matteMetalMat.envMap = scene.environment;
+            const _matteMetalMeshNames = new Set(["iceCoffeePlate"]);
+            const _clearPlasticMat = new THREE.ShaderMaterial({
+              transparent: true,
+              depthWrite: false,
+              depthTest: true,
+              side: THREE.DoubleSide,
+              toneMapped: true,
+              uniforms: {},
+              vertexShader: `
+                varying vec3 vWorldPos;
+                varying vec3 vWorldNormal;
+                void main() {
+                  vec4 worldPos = modelMatrix * vec4(position, 1.0);
+                  vWorldPos = worldPos.xyz;
+                  vWorldNormal = normalize(mat3(modelMatrix) * normal);
+                  gl_Position = projectionMatrix * viewMatrix * worldPos;
+                }
+              `,
+              fragmentShader: `
+                varying vec3 vWorldPos;
+                varying vec3 vWorldNormal;
+                void main() {
+                  vec3 n = normalize(vWorldNormal);
+                  vec3 view = normalize(cameraPosition - vWorldPos);
+                  float ndv = abs(dot(n, view));
+                  float fres = pow(1.0 - ndv, 2.6);
+                  float spec = pow(ndv, 28.0) * 0.08;
+                  vec3 col = vec3(0.84, 0.94, 1.0) * (0.28 + spec) + vec3(1.0) * fres * 0.5;
+                  float alpha = mix(0.01, 0.16, fres) + spec * 0.05;
+                  gl_FragColor = vec4(col, clamp(alpha, 0.01, 0.22));
+                }
+              `,
+            });
+            _clearPlasticMat.customProgramCacheKey = () => "iceCoffeeGlassFresnel";
+            const _clearPlasticMeshNames = new Set(["iceCoffeeGlass"]);
+            const _iceCoffeeUniforms = {
+              uTime: { value: 0 },
+              uFill: { value: 0.56 },
+            };
+            if (_iceCoffeeTankMat) _iceCoffeeTankMat.dispose();
+            if (_iceCoffeeSurfaceMat) _iceCoffeeSurfaceMat.dispose();
+            const _iceCoffeeFill = 0.56;
+            const _buildIceCoffeeWaterGeometry = (src) => {
+              const pos = src.attributes.position;
+              const index = src.index.array;
+              const out = [];
+              const fill = _iceCoffeeFill;
+              for (let i = 0; i < index.length; i += 3) {
+                const v = [0, 1, 2].map((k) => {
+                  const vi = index[i + k];
+                  return [pos.getX(vi), pos.getY(vi), pos.getZ(vi)];
+                });
+                const poly = [];
+                for (let e = 0; e < 3; e++) {
+                  const a = v[e];
+                  const b = v[(e + 1) % 3];
+                  const aIn = a[1] <= fill;
+                  const bIn = b[1] <= fill;
+                  if (aIn) poly.push(a);
+                  if (aIn !== bIn) {
+                    const t = (fill - a[1]) / (b[1] - a[1]);
+                    poly.push([a[0] + (b[0] - a[0]) * t, fill, a[2] + (b[2] - a[2]) * t]);
+                  }
+                }
+                if (poly.length < 3) continue;
+                out.push(poly[0][0], poly[0][1], poly[0][2]);
+                out.push(poly[1][0], poly[1][1], poly[1][2]);
+                out.push(poly[2][0], poly[2][1], poly[2][2]);
+                if (poly.length === 4) {
+                  out.push(poly[0][0], poly[0][1], poly[0][2]);
+                  out.push(poly[2][0], poly[2][1], poly[2][2]);
+                  out.push(poly[3][0], poly[3][1], poly[3][2]);
+                }
+              }
+              const geo = new THREE.BufferGeometry();
+              geo.setAttribute("position", new THREE.Float32BufferAttribute(out, 3));
+              return geo;
+            };
+            _iceCoffeeTankMat = new THREE.ShaderMaterial({
+              transparent: false,
+              depthWrite: true,
+              depthTest: true,
+              side: THREE.BackSide,
+              toneMapped: false,
+              uniforms: _iceCoffeeUniforms,
+              vertexShader: `
+                varying vec3 vLocal;
+                void main() {
+                  vLocal = position;
+                  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+                }
+              `,
+              fragmentShader: `
+                varying vec3 vLocal;
+                uniform float uFill;
+                void main() {
+                  float h = clamp((vLocal.y + 1.282) / (uFill + 1.282), 0.0, 1.0);
+                  vec2 xz = vLocal.xz / vec2(0.793, 1.648);
+                  float radial = clamp(length(xz), 0.0, 1.0);
+                  float core = exp(-dot(xz, xz) * 2.2) * pow(1.0 - h, 1.2);
+                  vec3 hot = vec3(0.95, 0.0, 0.38);
+                  vec3 low = vec3(0.86, 0.0, 0.32);
+                  vec3 body = vec3(0.78, 0.0, 0.28);
+                  vec3 upper = vec3(0.84, 0.0, 0.34);
+                  vec3 edge = vec3(0.52, 0.0, 0.2);
+                  vec3 col = mix(hot, low, smoothstep(0.0, 0.18, h));
+                  col = mix(col, body, smoothstep(0.12, 0.5, h));
+                  col = mix(col, upper, smoothstep(0.55, 1.0, h));
+                  col = mix(col, edge, smoothstep(0.45, 1.0, radial) * 0.65);
+                  col += hot * core * 0.4;
+                  gl_FragColor = vec4(col, 1.0);
+                }
+              `,
+            });
+            _iceCoffeeSurfaceMat = new THREE.ShaderMaterial({
+              transparent: false,
+              depthWrite: true,
+              depthTest: true,
+              side: THREE.FrontSide,
+              toneMapped: false,
+              polygonOffset: true,
+              polygonOffsetFactor: -2,
+              polygonOffsetUnits: -2,
+              uniforms: _iceCoffeeUniforms,
+              vertexShader: `
+                varying float vWave;
+                varying float vChop;
+                uniform float uTime;
+                void main() {
+                  vec3 pos = position;
+                  vec2 p = uv * 2.0 - 1.0;
+                  float edge = max(abs(p.x), abs(p.y));
+                  float falloff = 1.0 - smoothstep(0.78, 1.0, edge);
+                  float w1 = sin(pos.x * 3.2 + uTime * 2.8);
+                  float w2 = cos(pos.y * 2.1 - uTime * 2.2);
+                  float swirl = sin(length(p) * 6.5 - uTime * 2.5);
+                  float wave = (w1 * w2 * 0.7 + swirl * 0.48) * falloff;
+                  pos.z += wave * 0.20;
+                  vWave = wave;
+                  vChop = swirl * w1 * 0.5 + 0.5;
+                  gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
+                }
+              `,
+              fragmentShader: `
+                varying float vWave;
+                varying float vChop;
+                void main() {
+                  float crest = smoothstep(-0.35, 0.55, vWave);
+                  vec3 deep = vec3(0.42, 0.0, 0.16);
+                  vec3 mid = vec3(0.92, 0.0, 0.34);
+                  vec3 lift = vec3(1.0, 0.0, 0.4);
+                  vec3 col = mix(deep, mid, clamp(vChop, 0.0, 1.0));
+                  col = mix(col, lift, crest * 0.85);
+                  gl_FragColor = vec4(col, 1.0);
+                }
+              `,
+            });
             applySceneEnvironmentToMaterial(waterTapChromeMat);
             const _matteWhiteMeshNames = new Set([
               "tap",
@@ -3186,7 +3810,11 @@ let _worldSwitched = false;
               color: 0xffffff,
               roughness: 1.0,
               metalness: 0.0,
-              side: THREE.DoubleSide,
+              envMapIntensity: 0,
+              side: THREE.FrontSide,
+              polygonOffset: true,
+              polygonOffsetFactor: 1,
+              polygonOffsetUnits: 1,
             });
             const _matteWhiteDoubleSideNames = new Set([
               "fridgeDoorLeft",
@@ -3213,10 +3841,229 @@ let _worldSwitched = false;
               }
               return false;
             };
+            const _stripHorizontalEdgeFaces = (mesh) => {
+              const geo = mesh.geometry;
+              if (!geo || !geo.index || !geo.attributes.position || !geo.attributes.normal) return;
+              const cloned = geo.clone();
+              mesh.updateWorldMatrix(true, false);
+              const world = mesh.matrixWorld;
+              const normalMatrix = new THREE.Matrix3().getNormalMatrix(world);
+              const pos = cloned.attributes.position;
+              const nor = cloned.attributes.normal;
+              const srcIndex = cloned.index.array;
+              const worldPos = new Float32Array(pos.count * 3);
+              const worldNor = new Float32Array(pos.count * 3);
+              const v = new THREE.Vector3();
+              const nrm = new THREE.Vector3();
+              let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity, minZ = Infinity, maxZ = -Infinity;
+              for (let i = 0; i < pos.count; i++) {
+                v.fromBufferAttribute(pos, i).applyMatrix4(world);
+                worldPos[i * 3] = v.x;
+                worldPos[i * 3 + 1] = v.y;
+                worldPos[i * 3 + 2] = v.z;
+                if (v.x < minX) minX = v.x;
+                if (v.x > maxX) maxX = v.x;
+                if (v.y < minY) minY = v.y;
+                if (v.y > maxY) maxY = v.y;
+                if (v.z < minZ) minZ = v.z;
+                if (v.z > maxZ) maxZ = v.z;
+                nrm.fromBufferAttribute(nor, i).applyMatrix3(normalMatrix);
+                worldNor[i * 3] = nrm.x;
+                worldNor[i * 3 + 1] = nrm.y;
+                worldNor[i * 3 + 2] = nrm.z;
+              }
+              const height = maxY - minY;
+              const width = Math.max(maxX - minX, 0.001);
+              const depth = Math.max(maxZ - minZ, 0.001);
+              const longest = Math.max(width, depth);
+              const slab = height < longest * 0.45 && height < 4;
+              const thinPanel = depth < Math.min(width, height) * 0.25 && depth < 2;
+              let frontNz = 0;
+              let frontN = 0;
+              const zCut = maxZ - Math.max(depth * 0.15, 0.02);
+              let outward = 0;
+              let inward = 0;
+              const cx = (minX + maxX) / 2;
+              const cy = (minY + maxY) / 2;
+              const cz = (minZ + maxZ) / 2;
+              for (let i = 0; i < pos.count; i++) {
+                if (worldPos[i * 3 + 2] >= zCut) {
+                  frontNz += worldNor[i * 3 + 2];
+                  frontN++;
+                }
+                const dx = worldPos[i * 3] - cx;
+                const dy = worldPos[i * 3 + 1] - cy;
+                const dz = worldPos[i * 3 + 2] - cz;
+                const dot = dx * worldNor[i * 3] + dy * worldNor[i * 3 + 1] + dz * worldNor[i * 3 + 2];
+                if (dot > 0) outward++;
+                else if (dot < 0) inward++;
+              }
+              const flip = !slab && (thinPanel ? frontN > 0 && frontNz < 0 : inward > outward * 1.5);
+              if (flip) {
+                for (let i = 0; i < srcIndex.length; i += 3) {
+                  const swap = srcIndex[i + 1];
+                  srcIndex[i + 1] = srcIndex[i + 2];
+                  srcIndex[i + 2] = swap;
+                }
+                for (let i = 0; i < nor.count; i++) {
+                  nor.setXYZ(i, -nor.getX(i), -nor.getY(i), -nor.getZ(i));
+                  worldNor[i * 3] *= -1;
+                  worldNor[i * 3 + 1] *= -1;
+                  worldNor[i * 3 + 2] *= -1;
+                }
+                cloned.index.needsUpdate = true;
+                nor.needsUpdate = true;
+              }
+              const margin = slab
+                ? Math.min(0.55, Math.max(0.2, Math.min(width, depth) * 0.08))
+                : Math.max(depth, width);
+              const kept = [];
+              for (let t = 0; t < srcIndex.length; t += 3) {
+                const ia = srcIndex[t];
+                const ib = srcIndex[t + 1];
+                const ic = srcIndex[t + 2];
+                const ySpan =
+                  Math.max(worldPos[ia * 3 + 1], worldPos[ib * 3 + 1], worldPos[ic * 3 + 1]) -
+                  Math.min(worldPos[ia * 3 + 1], worldPos[ib * 3 + 1], worldPos[ic * 3 + 1]);
+                const ny = (worldNor[ia * 3 + 1] + worldNor[ib * 3 + 1] + worldNor[ic * 3 + 1]) / 3;
+                const nx = (worldNor[ia * 3] + worldNor[ib * 3] + worldNor[ic * 3]) / 3;
+                const nz = (worldNor[ia * 3 + 2] + worldNor[ib * 3 + 2] + worldNor[ic * 3 + 2]) / 3;
+                const horizontal =
+                  Math.abs(ny) > 0.7 && Math.abs(ny) >= Math.abs(nx) && Math.abs(ny) >= Math.abs(nz);
+                const xs = [worldPos[ia * 3], worldPos[ib * 3], worldPos[ic * 3]];
+                const zs = [worldPos[ia * 3 + 2], worldPos[ib * 3 + 2], worldPos[ic * 3 + 2]];
+                const onX =
+                  xs.every((val) => val <= minX + margin) || xs.every((val) => val >= maxX - margin);
+                const onZ =
+                  zs.every((val) => val <= minZ + margin) || zs.every((val) => val >= maxZ - margin);
+                if (horizontal && ySpan < 0.5 && (onX || onZ)) continue;
+                kept.push(ia, ib, ic);
+              }
+              if (kept.length >= 3) cloned.setIndex(kept);
+              mesh.geometry = cloned;
+            };
+            const _useFrontSideMaterial = (mesh) => {
+              const sourceMat = Array.isArray(mesh.material) ? mesh.material[0] : mesh.material;
+              if (!sourceMat) return;
+              const mat = sourceMat.clone();
+              mat.side = THREE.FrontSide;
+              mat.needsUpdate = true;
+              mesh.material = mat;
+            };
+            const _dropOverlappingShells = (mesh) => {
+              const geo = mesh.geometry;
+              if (!geo || !geo.index || !geo.attributes.position || !geo.attributes.normal) return;
+              const pos = geo.attributes.position;
+              const nor = geo.attributes.normal;
+              const idx = geo.index.array;
+              const clusters = [];
+              const triCluster = [];
+              for (let t = 0; t < idx.length; t += 3) {
+                const ids = [idx[t], idx[t + 1], idx[t + 2]];
+                const c = [0, 0, 0];
+                const n = [0, 0, 0];
+                const min = [Infinity, Infinity, Infinity];
+                const max = [-Infinity, -Infinity, -Infinity];
+                for (let k = 0; k < 3; k++) {
+                  const i = ids[k];
+                  const p = [pos.getX(i), pos.getY(i), pos.getZ(i)];
+                  for (let a = 0; a < 3; a++) {
+                    c[a] += p[a];
+                    if (p[a] < min[a]) min[a] = p[a];
+                    if (p[a] > max[a]) max[a] = p[a];
+                  }
+                  n[0] += nor.getX(i);
+                  n[1] += nor.getY(i);
+                  n[2] += nor.getZ(i);
+                }
+                c[0] /= 3;
+                c[1] /= 3;
+                c[2] /= 3;
+                const len = Math.hypot(n[0], n[1], n[2]) || 1;
+                n[0] /= len;
+                n[1] /= len;
+                n[2] /= len;
+                const ax = Math.abs(n[0]);
+                const ay = Math.abs(n[1]);
+                const az = Math.abs(n[2]);
+                const planeAxis = ay >= ax && ay >= az ? 1 : az >= ax ? 2 : 0;
+                const sign = n[planeAxis] >= 0 ? 1 : -1;
+                const plane = c[planeAxis];
+                let found = -1;
+                for (let ci = 0; ci < clusters.length; ci++) {
+                  const cl = clusters[ci];
+                  if (
+                    cl.planeAxis === planeAxis &&
+                    cl.sign === sign &&
+                    Math.abs(cl.plane - plane) < 0.003
+                  ) {
+                    found = ci;
+                    break;
+                  }
+                }
+                if (found < 0) {
+                  clusters.push({
+                    planeAxis,
+                    sign,
+                    plane,
+                    min: min.slice(),
+                    max: max.slice(),
+                    tris: 1,
+                  });
+                  triCluster.push(clusters.length - 1);
+                } else {
+                  const cl = clusters[found];
+                  cl.plane = (cl.plane * cl.tris + plane) / (cl.tris + 1);
+                  cl.tris++;
+                  for (let a = 0; a < 3; a++) {
+                    if (min[a] < cl.min[a]) cl.min[a] = min[a];
+                    if (max[a] > cl.max[a]) cl.max[a] = max[a];
+                  }
+                  triCluster.push(found);
+                }
+              }
+              for (const cl of clusters) {
+                const u = (cl.planeAxis + 1) % 3;
+                const v = (cl.planeAxis + 2) % 3;
+                cl.area =
+                  Math.max(0, cl.max[u] - cl.min[u]) * Math.max(0, cl.max[v] - cl.min[v]);
+              }
+              const dropCluster = new Set();
+              for (let i = 0; i < clusters.length; i++) {
+                for (let j = 0; j < clusters.length; j++) {
+                  if (i === j) continue;
+                  const a = clusters[i];
+                  const b = clusters[j];
+                  if (a.planeAxis !== b.planeAxis || a.sign !== b.sign) continue;
+                  const d = Math.abs(a.plane - b.plane);
+                  if (d < 0.003 || d > 0.02) continue;
+                  if (b.area < a.area * 3) continue;
+                  const u = (a.planeAxis + 1) % 3;
+                  const v = (a.planeAxis + 2) % 3;
+                  const pad = 0.08;
+                  if (
+                    a.min[u] >= b.min[u] - pad &&
+                    a.max[u] <= b.max[u] + pad &&
+                    a.min[v] >= b.min[v] - pad &&
+                    a.max[v] <= b.max[v] + pad
+                  ) {
+                    dropCluster.add(i);
+                  }
+                }
+              }
+              if (!dropCluster.size) return;
+              const kept = [];
+              for (let t = 0; t < triCluster.length; t++) {
+                if (dropCluster.has(triCluster[t])) continue;
+                kept.push(idx[t * 3], idx[t * 3 + 1], idx[t * 3 + 2]);
+              }
+              if (kept.length >= 3) geo.setIndex(kept);
+            };
             kmodel.traverse((n) => {
               if (!n.isMesh) return;
               if (_isKitchenTableCoverPlane(n.name)) return;
               if (n.name === "kitchenMainPlate") {
+                _stripHorizontalEdgeFaces(n);
                 if (Array.isArray(n.material)) {
                   n.material = n.material.map(() => _kitchenMainPlateMat);
                 } else {
@@ -3278,6 +4125,59 @@ let _worldSwitched = false;
                 }
                 return;
               }
+              if (_matteMetalMeshNames.has(n.name)) {
+                if (Array.isArray(n.material)) {
+                  n.material = n.material.map(() => _matteMetalMat);
+                } else {
+                  n.material = _matteMetalMat;
+                }
+                return;
+              }
+              if (_clearPlasticMeshNames.has(n.name)) {
+                if (Array.isArray(n.material)) {
+                  n.material = n.material.map(() => _clearPlasticMat);
+                } else {
+                  n.material = _clearPlasticMat;
+                }
+                n.renderOrder = 2;
+                return;
+              }
+              if (n.name === "iceCoffeeTank") {
+                const _tankHide = new THREE.MeshBasicMaterial({
+                  transparent: true,
+                  opacity: 0,
+                  depthWrite: false,
+                  colorWrite: false,
+                });
+                _tankHide.visible = false;
+                n.material = _tankHide;
+                n.castShadow = false;
+                n.receiveShadow = false;
+                const _iceCoffeeWater = new THREE.Mesh(
+                  _buildIceCoffeeWaterGeometry(n.geometry),
+                  _iceCoffeeTankMat,
+                );
+                _iceCoffeeWater.name = "iceCoffeeWater";
+                _iceCoffeeWater.scale.setScalar(0.985);
+                _iceCoffeeWater.renderOrder = 4;
+                _iceCoffeeWater.castShadow = false;
+                _iceCoffeeWater.receiveShadow = false;
+                _iceCoffeeWater.frustumCulled = true;
+                n.add(_iceCoffeeWater);
+                const _iceCoffeeSurface = new THREE.Mesh(
+                  new THREE.PlaneGeometry(1.539, 3.196, 4, 5),
+                  _iceCoffeeSurfaceMat,
+                );
+                _iceCoffeeSurface.name = "iceCoffeeSurface";
+                _iceCoffeeSurface.rotation.x = -Math.PI / 2;
+                _iceCoffeeSurface.position.y = 0.56;
+                _iceCoffeeSurface.renderOrder = 5;
+                _iceCoffeeSurface.castShadow = false;
+                _iceCoffeeSurface.receiveShadow = false;
+                _iceCoffeeSurface.frustumCulled = true;
+                _iceCoffeeWater.add(_iceCoffeeSurface);
+                return;
+              }
               if (n.name === "waterTapBody") {
                 if (Array.isArray(n.material)) {
                   n.material = n.material.map(() => waterTapChromeMat);
@@ -3287,10 +4187,18 @@ let _worldSwitched = false;
                 return;
               }
               if (_matteWhiteDoubleSideNames.has(n.name)) {
+                _stripHorizontalEdgeFaces(n);
                 n.material = _matteWhiteDoubleSideMat;
+                n.renderOrder = 1;
                 return;
               }
               if (_matteWhiteMeshNames.has(n.name)) {
+                if (
+                  n.name === "topPlantBaseLeft" ||
+                  n.name === "topPlantBaseRight"
+                ) {
+                  _stripHorizontalEdgeFaces(n);
+                }
                 _applyMatteWhite(n);
                 return;
               }
@@ -3306,11 +4214,127 @@ let _worldSwitched = false;
                 }
                 return;
               }
+              if (n.name === "closetDoors") {
+                const _doorGeo = n.geometry.clone();
+                const _doorIndex = _doorGeo.index;
+                const _doorArr = _doorIndex.array;
+                for (let _di = 0; _di < _doorArr.length; _di += 3) {
+                  const _swap = _doorArr[_di + 1];
+                  _doorArr[_di + 1] = _doorArr[_di + 2];
+                  _doorArr[_di + 2] = _swap;
+                }
+                _doorIndex.needsUpdate = true;
+                const _doorNor = _doorGeo.attributes.normal;
+                const _doorPos = _doorGeo.attributes.position;
+                const _doorRectsFound = [];
+                for (let _ti0 = 0; _ti0 < _doorArr.length; _ti0 += 3) {
+                  const _a = _doorArr[_ti0];
+                  const _b = _doorArr[_ti0 + 1];
+                  const _c = _doorArr[_ti0 + 2];
+                  const _nz0 = (_doorNor.getZ(_a) + _doorNor.getZ(_b) + _doorNor.getZ(_c)) / 3;
+                  if (_nz0 > -0.7) continue;
+                  const _x0 = Math.min(_doorPos.getX(_a), _doorPos.getX(_b), _doorPos.getX(_c));
+                  const _x1 = Math.max(_doorPos.getX(_a), _doorPos.getX(_b), _doorPos.getX(_c));
+                  const _y0 = Math.min(_doorPos.getY(_a), _doorPos.getY(_b), _doorPos.getY(_c));
+                  const _y1 = Math.max(_doorPos.getY(_a), _doorPos.getY(_b), _doorPos.getY(_c));
+                  if (_y1 - _y0 < 0.5) continue;
+                  let _matched = false;
+                  for (let _ri = 0; _ri < _doorRectsFound.length; _ri++) {
+                    const _r = _doorRectsFound[_ri];
+                    if (
+                      Math.abs(_r[0] - _x0) < 0.08 &&
+                      Math.abs(_r[1] - _x1) < 0.08 &&
+                      Math.abs(_r[2] - _y0) < 0.08 &&
+                      Math.abs(_r[3] - _y1) < 0.08
+                    ) {
+                      _matched = true;
+                      break;
+                    }
+                  }
+                  if (!_matched && _doorRectsFound.length < 40) {
+                    _doorRectsFound.push([_x0, _x1, _y0, _y1]);
+                  }
+                }
+                for (let _ri = 0; _ri < 40; _ri++) {
+                  const _r = _doorRectsFound[_ri];
+                  if (_r) _closetDoorRects[_ri].set(_r[0], _r[1], _r[2], _r[3]);
+                  else _closetDoorRects[_ri].set(0, -1, 0, -1);
+                }
+                for (let _ni = 0; _ni < _doorNor.count; _ni++) {
+                  const _nx = -_doorNor.getX(_ni);
+                  const _ny = -_doorNor.getY(_ni);
+                  const _nz = -_doorNor.getZ(_ni);
+                  if (Math.abs(_ny) > 0.7 || Math.abs(_nx) > 0.7) {
+                    _doorNor.setXYZ(_ni, 0, 0, 1);
+                  } else {
+                    _doorNor.setXYZ(_ni, _nx, _ny, _nz);
+                  }
+                }
+                _doorNor.needsUpdate = true;
+                const _kept = [];
+                for (let _ti = 0; _ti < _doorArr.length; _ti += 3) {
+                  const _ia = _doorArr[_ti];
+                  const _ib = _doorArr[_ti + 1];
+                  const _ic = _doorArr[_ti + 2];
+                  const _ySpan =
+                    Math.max(_doorPos.getY(_ia), _doorPos.getY(_ib), _doorPos.getY(_ic)) -
+                    Math.min(_doorPos.getY(_ia), _doorPos.getY(_ib), _doorPos.getY(_ic));
+                  if (_ySpan < 0.5) continue;
+                  _kept.push(_ia, _ib, _ic);
+                }
+                _doorGeo.setIndex(_kept);
+                n.geometry = _doorGeo;
+                n.material = _closetDoorEdgeMat;
+                return;
+              }
               if (
-                n.name !== "mainGreenWall" &&
-                n.name !== "closetDoors" &&
-                n.name !== "dishwasherDoor"
+                n.name === "tzokelRight" ||
+                n.name === "tzokelLeft" ||
+                n.name === "iceCubePannel"
               ) {
+                _stripHorizontalEdgeFaces(n);
+                if (n.name === "iceCubePannel") {
+                  _dropOverlappingShells(n);
+                  const _iceSrc = Array.isArray(n.material) ? n.material[0] : n.material;
+                  if (_iceSrc) {
+                    const _iceMat = _iceSrc.clone();
+                    _iceMat.polygonOffset = true;
+                    _iceMat.polygonOffsetFactor = -2;
+                    _iceMat.polygonOffsetUnits = -2;
+                    _iceMat.needsUpdate = true;
+                    n.material = _iceMat;
+                  }
+                }
+                return;
+              }
+              if (n.name === "dishwasherDoor") {
+                _stripHorizontalEdgeFaces(n);
+                const _dwGeo = n.geometry;
+                const _dwPos = _dwGeo.attributes.position;
+                const _dwNor = _dwGeo.attributes.normal;
+                const _dwIdx = _dwGeo.index.array;
+                let _dx0 = Infinity;
+                let _dx1 = -Infinity;
+                let _dy0 = Infinity;
+                let _dy1 = -Infinity;
+                let _dwFound = false;
+                for (let _ti = 0; _ti < _dwIdx.length; _ti += 3) {
+                  const _a = _dwIdx[_ti];
+                  const _b = _dwIdx[_ti + 1];
+                  const _c = _dwIdx[_ti + 2];
+                  const _nz = (_dwNor.getZ(_a) + _dwNor.getZ(_b) + _dwNor.getZ(_c)) / 3;
+                  if (_nz < 0.7) continue;
+                  _dwFound = true;
+                  _dx0 = Math.min(_dx0, _dwPos.getX(_a), _dwPos.getX(_b), _dwPos.getX(_c));
+                  _dx1 = Math.max(_dx1, _dwPos.getX(_a), _dwPos.getX(_b), _dwPos.getX(_c));
+                  _dy0 = Math.min(_dy0, _dwPos.getY(_a), _dwPos.getY(_b), _dwPos.getY(_c));
+                  _dy1 = Math.max(_dy1, _dwPos.getY(_a), _dwPos.getY(_b), _dwPos.getY(_c));
+                }
+                if (_dwFound) _dishwasherDoorRects[0].set(_dx0, _dx1, _dy0, _dy1);
+                n.material = _dishwasherDoorEdgeMat;
+                return;
+              }
+              if (n.name !== "mainGreenWall") {
                 return;
               }
               if (Array.isArray(n.material)) {
@@ -3907,7 +4931,7 @@ let _worldSwitched = false;
           },
           undefined,
           (err) => {
-            console.error("Failed to load ul-kitchen13.gltf:", err);
+            console.error("Failed to load ul-kitchen19.gltf:", err);
             _worldSwitched = false;
           },
         );
@@ -4709,12 +5733,15 @@ let _worldSwitched = false;
         }
       }
 
+      let _iceCoffeeTankMat = null;
+      let _iceCoffeeSurfaceMat = null;
       function animate() {
         requestAnimationFrame(animate);
         if (!_tabVisible) return;
         try {
           const rawDt = clock.getDelta();
           const dt = Math.min(rawDt, 0.05);
+          if (_iceCoffeeSurfaceMat) _iceCoffeeSurfaceMat.uniforms.uTime.value += dt;
           const nowSec = performance.now() / 1000;
           const carDt = 1 / 60;
           const maxCarSteps = perfMaxCarSteps;
@@ -5038,6 +6065,7 @@ let _worldSwitched = false;
           } else {
             carBloomMixPass.material.uniforms.bloomIntensity.value = 0;
           }
+          updateMisterSpot(dt);
           updateTableLightReflections();
           finalComposer.render();
         } catch (e) {

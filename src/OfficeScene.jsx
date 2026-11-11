@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { onOfficeSceneEvent } from "./game/officeSceneEvents.js";
+import { SCENE_ROUTES } from "./game/sceneRoutes.js";
+import { useLevelHotkeys } from "./game/useLevelHotkeys.js";
 import { setOfficeSceneMount } from "./office/officeSceneMount.js";
 
 /**
@@ -19,6 +21,7 @@ export default function OfficeScene({
   onReadyRef.current = onModuleReady;
   onTransitionRef.current = onTransitionToKitchen;
   const [phase, setPhase] = useState("loading");
+  useLevelHotkeys(SCENE_ROUTES.office);
 
   useEffect(() => {
     const root = rootRef.current;

@@ -1,11 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import { setKitchenSceneMount } from "../kitchen/kitchenSceneMount.js";
 import { onKitchenSceneEvent } from "./kitchenSceneEvents.js";
+import { SCENE_ROUTES } from "./sceneRoutes.js";
+import { useLevelHotkeys } from "./useLevelHotkeys.js";
 
 export default function KitchenScene() {
   const rootRef = useRef(null);
   const [phase, setPhase] = useState("loading");
   const [sceneReady, setSceneReady] = useState(false);
+  useLevelHotkeys(SCENE_ROUTES.kitchen);
 
   useEffect(() => {
     const root = rootRef.current;
