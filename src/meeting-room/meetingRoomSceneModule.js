@@ -100,16 +100,18 @@ let _model = null;
 let _freeCable = null;
 const clock = new THREE.Clock();
 
+// Dark Mode = gaming arena: near-black room, little even fill, restrained
+// purple / electric-blue rims; the tablePlate keeps its own key light.
 const darkMode = {
-  background: 0x03040c,
-  ambient: { color: 0xe8e2d8, intensity: 0.012 },
-  hemisphere: { sky: 0xd8dce0, ground: 0x9a9084, intensity: 0.045 },
-  dirPink: { color: 0x9b3dff, intensity: 0.1 },
-  dirBlue: { color: 0x3ec8ff, intensity: 0.16 },
-  dirFillPink: { color: 0xb026ff, intensity: 0.08 },
-  dirFillBlue: { color: 0x4d8cff, intensity: 0.06 },
-  pointPink: { color: 0x9b3dff, intensity: 0.06 },
-  pointBlue: { color: 0x3ec8ff, intensity: 0.08 },
+  background: 0x010104,
+  ambient: { color: 0x8a98c8, intensity: 0.012 },
+  hemisphere: { sky: 0x9aa8cc, ground: 0x3a3048, intensity: 0.05 },
+  dirPink: { color: 0x9b3dff, intensity: 0.11 },
+  dirBlue: { color: 0x3ec8ff, intensity: 0.17 },
+  dirFillPink: { color: 0xb026ff, intensity: 0.06 },
+  dirFillBlue: { color: 0x4d8cff, intensity: 0.05 },
+  pointPink: { color: 0x9b3dff, intensity: 0.05 },
+  pointBlue: { color: 0x3ec8ff, intensity: 0.06 },
   warmKey: { color: 0x000000, intensity: 0 },
   warmFill: { color: 0x000000, intensity: 0 },
 };
@@ -141,11 +143,34 @@ const TABLET_SIDE_LIGHT_COLOR = 0x2dff55;
 const MAIN_PANEL_COLOR_DARK = 0xfff6ea;
 const MAIN_PANEL_COLOR_BRIGHT = 0xfff6ea;
 const EXPOSURE_DARK = 0.36;
-const EXPOSURE_BRIGHT = 0.86;
+/**
+ * Dark Mode surfaces: each material's own Bright color, dimmed and cooled.
+ * (Colors are linear in three.js, so a scale here is a true brightness ratio.)
+ */
+const ARENA_DARK_TINT = new THREE.Color(0.86, 0.93, 1.12);
+const ARENA_DARK = {
+  wall: 0.45,
+  ceiling: 0.4,
+  board: 0.4,
+  paintMetal: 0.42,
+  plastic: 0.45,
+  paint: 0.42,
+  floor: 0.45,
+  wood: 0.45,
+  chairNet: 0.5,
+  ceilingGlow: new THREE.Color(0x1ad4ff),
+  paintGlow: new THREE.Color(0x2a5cff),
+};
+const _arenaDarkTmp = new THREE.Color();
+/** Bright color -> its Dark Mode counterpart. */
+function _arenaDarkOf(bright, scale) {
+  return _arenaDarkTmp.copy(bright).multiplyScalar(scale).multiply(ARENA_DARK_TINT);
+}
+const EXPOSURE_BRIGHT = 0.74;
 const LIGHT_FADE_DURATION = 0.2;
 const _legacyDarkLightsScale = 1;
-let lightBlend = 0;
-let lightBlendTarget = 0;
+let lightBlend = 1;
+let lightBlendTarget = 1;
 const _cDark = new THREE.Color();
 const _cBright = new THREE.Color();
 
@@ -233,6 +258,43 @@ carShadowLight.shadow.radius = 12;
 carShadowLight.shadow.blurSamples = 16;
 scene.add(carShadowLight);
 scene.add(carShadowLight.target);
+
+/**
+ * Cars only: how much direct light (table key light, room point/directional
+ * lights) their surfaces take. Below 1 in Dark Mode so the paint keeps its
+ * color instead of blowing out to white under the close table light; exactly
+ * 1 in Bright Mode. Emissive parts, ambient fill and reflections are untouched.
+ */
+const CAR_DIRECT_LIGHT_GAIN_DARK = 0.55;
+const _carDirectLightGain = { value: 1 };
+
+function patchCarMaterialLighting(root) {
+  root.traverse((node) => {
+    if (!node.isMesh || !node.material) return;
+    const mats = Array.isArray(node.material) ? node.material : [node.material];
+    for (const mat of mats) {
+      if (!mat || mat.userData._carGainPatched) continue;
+      if (!mat.isMeshStandardMaterial && !mat.isMeshPhysicalMaterial) continue;
+      mat.userData._carGainPatched = true;
+      const prev = mat.onBeforeCompile;
+      mat.onBeforeCompile = (shader, renderer) => {
+        if (prev) prev(shader, renderer);
+        shader.uniforms.uCarDirectLightGain = _carDirectLightGain;
+        shader.fragmentShader = shader.fragmentShader
+          .replace("void main() {", "uniform float uCarDirectLightGain;\nvoid main() {")
+          .replace(
+            "#include <lights_fragment_end>",
+            "#include <lights_fragment_end>\n" +
+              "reflectedLight.directDiffuse *= uCarDirectLightGain;\n" +
+              "reflectedLight.directSpecular *= uCarDirectLightGain;",
+          );
+      };
+      const prevKey = mat.customProgramCacheKey ? mat.customProgramCacheKey.bind(mat) : null;
+      mat.customProgramCacheKey = () => (prevKey ? prevKey() : "") + "|carDirectLightGain";
+      mat.needsUpdate = true;
+    }
+  });
+}
 
 function blendChannel(darkV, brightV, b) {
   return darkV + (brightV - darkV) * b;
@@ -370,15 +432,16 @@ function applyLightBlend(b) {
   if (_themeMats.tabletSideLight) {
     _themeMats.tabletSideLight.emissiveIntensity = blendChannel(22, 8.5, b);
   }
+  _carDirectLightGain.value = blendChannel(CAR_DIRECT_LIGHT_GAIN_DARK, 1, b);
   if (carKeyLight) {
     _cDark.setHex(0x66e8ff);
     _cBright.setHex(0xfff4e8);
     carKeyLight.color.lerpColors(_cDark, _cBright, b);
-    carKeyLight.intensity = blendChannel(0.85, 1.85, b);
+    carKeyLight.intensity = blendChannel(0.45, 1.85, b);
     _cDark.setHex(0x9b3dff);
     _cBright.setHex(0xffe8d0);
     carRimLight.color.lerpColors(_cDark, _cBright, b);
-    carRimLight.intensity = blendChannel(0.5, 0.7, b);
+    carRimLight.intensity = blendChannel(0.3, 0.7, b);
   }
   for (let i = 0; i < _carLampSpots.length; i++) {
     const entry = _carLampSpots[i];
@@ -390,48 +453,68 @@ function applyLightBlend(b) {
   }
   const creamWall = _themeMats.creamWall;
   if (creamWall && _themeMats.creamWallBright) {
-    creamWall.color.copy(_themeMats.creamWallBright);
-    creamWall.envMapIntensity = blendChannel(0.08, 0.22, b);
+    creamWall.color.lerpColors(_arenaDarkOf(_themeMats.creamWallBright, ARENA_DARK.wall), _themeMats.creamWallBright, b);
+    creamWall.envMapIntensity = blendChannel(0.05, 0.22, b);
   }
   if (_themeMats.glossyBoard && _themeMats.glossyBoardBright) {
-    _themeMats.glossyBoard.color.copy(_themeMats.glossyBoardBright);
+    _themeMats.glossyBoard.color.lerpColors(_arenaDarkOf(_themeMats.glossyBoardBright, ARENA_DARK.board), _themeMats.glossyBoardBright, b);
     _themeMats.glossyBoard.roughness = blendChannel(0.18, 0.1, b);
-    _themeMats.glossyBoard.envMapIntensity = blendChannel(0.22, 1.45, b);
+    _themeMats.glossyBoard.envMapIntensity = blendChannel(0.12, 1.45, b);
     _themeMats.glossyBoard.clearcoat = blendChannel(0.4, 0.72, b);
   }
   if (_themeMats.whitePaintMetal && _themeMats.whitePaintMetalBright) {
-    _themeMats.whitePaintMetal.color.copy(_themeMats.whitePaintMetalBright);
-    _themeMats.whitePaintMetal.envMapIntensity = blendChannel(0.35, 1.15, b);
+    _themeMats.whitePaintMetal.color.lerpColors(
+      _arenaDarkOf(_themeMats.whitePaintMetalBright, ARENA_DARK.paintMetal),
+      _themeMats.whitePaintMetalBright,
+      b,
+    );
+    _themeMats.whitePaintMetal.envMapIntensity = blendChannel(0.2, 1.15, b);
   }
   if (_themeMats.whiteMattPlastic && _themeMats.whiteMattPlasticBright) {
-    _themeMats.whiteMattPlastic.color.copy(_themeMats.whiteMattPlasticBright);
+    _themeMats.whiteMattPlastic.color.lerpColors(
+      _arenaDarkOf(_themeMats.whiteMattPlasticBright, ARENA_DARK.plastic),
+      _themeMats.whiteMattPlasticBright,
+      b,
+    );
+  }
+  if (_themeMats.chairNet && _themeMats.chairNetBright) {
+    _themeMats.chairNet.color.lerpColors(_arenaDarkOf(_themeMats.chairNetBright, ARENA_DARK.chairNet), _themeMats.chairNetBright, b);
   }
   if (_themeMats.creamCeiling && _themeMats.creamCeilingBright) {
-    _themeMats.creamCeiling.color.copy(_themeMats.creamCeilingBright);
+    _themeMats.creamCeiling.color.lerpColors(_arenaDarkOf(_themeMats.creamCeilingBright, ARENA_DARK.ceiling), _themeMats.creamCeilingBright, b);
     if (_themeMats.creamCeilingEmissiveBright) {
-      _themeMats.creamCeiling.emissive.copy(_themeMats.creamCeilingEmissiveBright);
+      // A faint cyan neon cast over the ceiling in the dark.
+      _themeMats.creamCeiling.emissive.lerpColors(
+        ARENA_DARK.ceilingGlow,
+        _themeMats.creamCeilingEmissiveBright,
+        b,
+      );
     }
-    _themeMats.creamCeiling.emissiveIntensity = blendChannel(0.02, 0.18, b);
+    _themeMats.creamCeiling.emissiveIntensity = blendChannel(0.012, 0.18, b);
   }
   if (_themeMats.whiteMattPaint && _themeMats.whiteMattBright) {
-    _themeMats.whiteMattPaint.color.copy(_themeMats.whiteMattBright);
+    _themeMats.whiteMattPaint.color.lerpColors(_arenaDarkOf(_themeMats.whiteMattBright, ARENA_DARK.paint), _themeMats.whiteMattBright, b);
     if (_themeMats.whiteMattEmissiveBright) {
-      _themeMats.whiteMattPaint.emissive.copy(_themeMats.whiteMattEmissiveBright);
+      _themeMats.whiteMattPaint.emissive.lerpColors(
+        ARENA_DARK.paintGlow,
+        _themeMats.whiteMattEmissiveBright,
+        b,
+      );
     }
-    _themeMats.whiteMattPaint.emissiveIntensity = blendChannel(0.04, 0.2, b);
+    _themeMats.whiteMattPaint.emissiveIntensity = blendChannel(0.02, 0.2, b);
   }
   if (_themeMats.whiteVisibleLight && _themeMats.whiteLightEmissiveBright) {
     _themeMats.whiteVisibleLight.emissive.copy(_themeMats.whiteLightEmissiveBright);
     _themeMats.whiteVisibleLight.emissiveIntensity = blendChannel(0.7, 3.3, b);
   }
   if (_themeMats.floor && _themeMats.floorColorBright) {
-    _themeMats.floor.color.copy(_themeMats.floorColorBright);
+    _themeMats.floor.color.lerpColors(_arenaDarkOf(_themeMats.floorColorBright, ARENA_DARK.floor), _themeMats.floorColorBright, b);
     _themeMats.floor.emissive.setHex(0x000000);
     _themeMats.floor.emissiveIntensity = 0;
-    _themeMats.floor.envMapIntensity = blendChannel(0.08, 0.18, b);
+    _themeMats.floor.envMapIntensity = blendChannel(0.07, 0.18, b);
   }
   if (_themeMats.wallWood && _themeMats.wallWoodBright) {
-    _themeMats.wallWood.color.copy(_themeMats.wallWoodBright);
+    _themeMats.wallWood.color.lerpColors(_arenaDarkOf(_themeMats.wallWoodBright, ARENA_DARK.wood), _themeMats.wallWoodBright, b);
   }
   if (_themeMats.tablePlate) {
     if (_themeMats.tableEmissiveBright) {
@@ -1158,6 +1241,7 @@ function applyCableTipImpulse(contact, impulseDir, linMag, yawMag, bounceY, spin
   );
   carPhysBody.velocity.x = _impactKickDir.x * burstLin;
   carPhysBody.velocity.z = _impactKickDir.z * burstLin;
+  _activeCarCtx.lastCableHitT = clock.elapsedTime;
   if (bounceY > 0 && carPhysState !== CAR_PHYS.FALLING) {
     const hop = THREE.MathUtils.clamp(
       bounceY,
@@ -2717,6 +2801,7 @@ function buildArenaCar(carScene, opts = {}) {
         setupTableLightReflections(car);
       }
       setupCarHitSparks();
+      patchCarMaterialLighting(car);
       _activeCarCtx.ready = true;
       if (!isPlayer) return;
       _carFollowCam = false;
@@ -6065,6 +6150,8 @@ function applyMeetingRoomMaterials(root) {
     metalness: 0.06,
     envMapIntensity: 0.28,
   });
+  _themeMats.chairNet = brightGreyNet;
+  _themeMats.chairNetBright = new THREE.Color(0xa8aeb4);
   const greyPlastic = new THREE.MeshStandardMaterial({
     color: 0x6e6e6e,
     roughness: 0.86,
@@ -6393,6 +6480,7 @@ function loadMeetingRoom() {
         enableDoubleSidedFaces(_model);
         makeColumnCameraPassable(_model);
         arrangeChairsAroundTable(_model);
+        setupArenaScreens(_model);
         scene.add(_model);
         captureTableDriveSurface(_model);
         setupFreeCableAssembly(_model);
@@ -6408,6 +6496,7 @@ function loadMeetingRoom() {
         setupTablePlateReflector(_model);
         applyLightBlend(lightBlend);
         loadKitchenCarOnTable();
+        loadMeetingRoomAirPlane();
         _meetingRoomSceneReady = true;
         emitMeetingRoomSceneEvent("ready");
         requestAnimationFrame(() => {
@@ -6836,7 +6925,10 @@ function _resolveCarPair(cA, cB) {
   const pushA = depth * shareA;
   const pushB = depth - pushA;
   const hitSpeed = Math.max(0, -vn);
-  if (impulsed) noteCameraImpact(hitSpeed);
+  if (impulsed) {
+    noteCameraImpact(hitSpeed);
+    noteCarContact(cA, cB, hitSpeed);
+  }
   withCar(cA, () => _applyCarBumpResult(A, impulsed, -nx * pushA, -nz * pushA, hitSpeed));
   withCar(cB, () => _applyCarBumpResult(B, impulsed, nx * pushB, nz * pushB, hitSpeed));
 }
@@ -7383,6 +7475,8 @@ function updateCameraDirector(dt) {
     d.userPause -= dt;
     return;
   }
+  // Hold the opening view (facing the screens) until the countdown is over.
+  if (!_arenaGame.live && !d.active) return;
   const cx = tablePlateCenter.x;
   const cz = tablePlateCenter.z;
   if (d.active) {
@@ -7428,6 +7522,852 @@ function updateCameraDirector(dt) {
   const w1 = Math.exp(options[1].s * 3);
   const pick = Math.random() * (w0 + w1) < w0 ? options[0] : options[1];
   _startCameraOrbit(pick.dir);
+}
+
+// ---------------------------------------------------------------------------
+// Screen content manager (screenLeft / screenRight)
+// Each screen keeps an exact copy of its original material for its normal
+// content, plus one reusable text material (canvas) and one replay material
+// (shared render target). Switching content only swaps mesh.material, so the
+// original screen texture is never touched.
+// ---------------------------------------------------------------------------
+const SCREEN_MESH_NAMES = { left: "screenLeft", right: "screenRight" };
+const SCREEN_CANVAS_W = 1024;
+const SCREEN_CANVAS_H = 576;
+const SCREEN_TEXT_GAIN = 1.35;
+const _screens = { left: null, right: null };
+
+function setupArenaScreens(root) {
+  for (const key of ["left", "right"]) {
+    const mesh = root.getObjectByName(SCREEN_MESH_NAMES[key]);
+    if (!mesh || !mesh.isMesh || !mesh.material) continue;
+    const base = mesh.material;
+    const contentMat = base.clone();
+    if (_reflectiveMats.includes(base)) _reflectiveMats.push(contentMat);
+    const canvas = document.createElement("canvas");
+    canvas.width = SCREEN_CANVAS_W;
+    canvas.height = SCREEN_CANVAS_H;
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.anisotropy = 8;
+    const textMat = new THREE.MeshBasicMaterial({
+      map: tex,
+      toneMapped: false,
+      side: base.side,
+    });
+    textMat.color.setScalar(SCREEN_TEXT_GAIN);
+    const replayMat = new THREE.MeshBasicMaterial({
+      map: null,
+      toneMapped: true,
+      side: base.side,
+    });
+    mesh.material = contentMat;
+    _screens[key] = {
+      key,
+      mesh,
+      base,
+      contentMat,
+      textMat,
+      replayMat,
+      canvas,
+      ctx2d: canvas.getContext("2d"),
+      tex,
+      mode: "content",
+      text: "",
+      color: "#ffffff",
+      textAge: 0,
+    };
+  }
+}
+
+function _drawScreenText(s) {
+  const c = s.ctx2d;
+  const w = SCREEN_CANVAS_W;
+  const h = SCREEN_CANVAS_H;
+  const bg = c.createLinearGradient(0, 0, 0, h);
+  bg.addColorStop(0, "#04050c");
+  bg.addColorStop(1, "#0b0f26");
+  c.fillStyle = bg;
+  c.fillRect(0, 0, w, h);
+  c.strokeStyle = "rgba(120,140,255,0.07)";
+  c.lineWidth = 2;
+  for (let x = 0; x <= w; x += 64) {
+    c.beginPath();
+    c.moveTo(x, 0);
+    c.lineTo(x, h);
+    c.stroke();
+  }
+  for (let y = 0; y <= h; y += 64) {
+    c.beginPath();
+    c.moveTo(0, y);
+    c.lineTo(w, y);
+    c.stroke();
+  }
+  // Pop-in: starts large and settles within ~0.25 s.
+  const k = Math.min(1, s.textAge / 0.25);
+  const ease = 1 - Math.pow(1 - k, 3);
+  const scale = 1.35 - 0.35 * ease;
+  c.save();
+  c.globalAlpha = Math.min(1, 0.25 + ease);
+  c.translate(w / 2, h / 2 + 8);
+  c.scale(scale, scale);
+  c.textAlign = "center";
+  c.textBaseline = "middle";
+  c.font = '900 250px "Arial Black", Impact, "Helvetica Neue", sans-serif';
+  c.shadowColor = s.color;
+  c.shadowBlur = 70;
+  c.fillStyle = s.color;
+  c.fillText(s.text, 0, 0);
+  c.shadowBlur = 0;
+  c.lineWidth = 6;
+  c.strokeStyle = "rgba(255,255,255,0.85)";
+  c.strokeText(s.text, 0, 0);
+  c.restore();
+  s.tex.needsUpdate = true;
+}
+
+function showScreenText(key, text, color) {
+  const s = _screens[key];
+  if (!s) return;
+  s.mode = "text";
+  s.text = text;
+  s.color = color;
+  s.textAge = 0;
+  _drawScreenText(s);
+  s.mesh.material = s.textMat;
+}
+
+function showScreenReplay(key, texture) {
+  const s = _screens[key];
+  if (!s) return;
+  s.mode = "replay";
+  s.replayMat.map = texture;
+  s.replayMat.needsUpdate = true;
+  s.mesh.material = s.replayMat;
+}
+
+function restoreScreenContent(key) {
+  const s = _screens[key];
+  if (!s) return;
+  s.mode = "content";
+  s.mesh.material = s.contentMat;
+}
+
+function updateArenaScreens(dt) {
+  for (const key of ["left", "right"]) {
+    const s = _screens[key];
+    if (!s) continue;
+    // Original content keeps following the light theme exactly as before.
+    s.contentMat.emissiveIntensity = s.base.emissiveIntensity;
+    if (s.mode === "text" && s.textAge < 0.3) {
+      s.textAge += dt;
+      _drawScreenText(s);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Game start sequence: Bright → READY → SET → fade to Dark → GO! → live
+// ---------------------------------------------------------------------------
+const ARENA_INTRO_HOLD = 1.1;
+// READY -> gameplay ≈ 2.4 s.
+const ARENA_READY_TIME = 0.6;
+const ARENA_SET_TIME = 0.6;
+const ARENA_DUSK_TIME = 0.45;
+const ARENA_GO_TIME = 0.75;
+const ARENA_COLOR_READY = "#ff3b3b";
+const ARENA_COLOR_SET = "#ffc43a";
+const ARENA_COLOR_GO = "#3dff6e";
+
+/** Keys the player car sees until GO! (nothing pressed). */
+const _frozenPlayerKeys = {
+  forward: false,
+  reverse: false,
+  left: false,
+  right: false,
+  brake: false,
+};
+keys = _frozenPlayerKeys;
+
+const _arenaGame = { phase: "waiting", t: 0, live: false };
+
+function _arenaSetPhase(phase) {
+  _arenaGame.phase = phase;
+  _arenaGame.t = 0;
+}
+
+function updateArenaGame(dt) {
+  const g = _arenaGame;
+  if (g.live) return;
+  g.t += dt;
+  if (g.phase !== "dusk" && g.phase !== "go") {
+    // Hold Bright Mode until the fade.
+    lightBlendTarget = 1;
+  }
+  switch (g.phase) {
+    case "waiting": {
+      const allReady =
+        _meetingRoomSceneReady &&
+        arenaCars.length === 1 + ARENA_AI_CARS.length &&
+        arenaCars.every((c) => c.ready);
+      if (allReady) _arenaSetPhase("intro");
+      break;
+    }
+    case "intro":
+      if (g.t > 0.2) warmUpArenaReplay();
+      if (g.t >= ARENA_INTRO_HOLD) {
+        showScreenText("left", "READY", ARENA_COLOR_READY);
+        _arenaSetPhase("ready");
+      }
+      break;
+    case "ready":
+      if (g.t >= ARENA_READY_TIME) {
+        restoreScreenContent("left");
+        showScreenText("right", "SET", ARENA_COLOR_SET);
+        _arenaSetPhase("set");
+      }
+      break;
+    case "set":
+      if (g.t >= ARENA_SET_TIME) _arenaSetPhase("dusk");
+      break;
+    case "dusk": {
+      // Drive the existing light blend (1 = Bright, 0 = Dark) with an eased curve.
+      const u = Math.min(1, g.t / ARENA_DUSK_TIME);
+      const e = u * u * (3 - 2 * u);
+      lightBlend = 1 - e;
+      lightBlendTarget = lightBlend;
+      applyLightBlend(lightBlend);
+      if (u >= 1) {
+        showScreenText("left", "GO!", ARENA_COLOR_GO);
+        showScreenText("right", "GO!", ARENA_COLOR_GO);
+        _arenaSetPhase("go");
+      }
+      break;
+    }
+    case "go":
+      if (g.t >= ARENA_GO_TIME) {
+        restoreScreenContent("left");
+        restoreScreenContent("right");
+        // Hand control to the player and the AI.
+        if (_activeCarCtx === _playerCarCtx) keys = playerKeys;
+        _playerCarCtx.keys = playerKeys;
+        _arenaSetPhase("live");
+        g.live = true;
+      }
+      break;
+    default:
+      break;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Slow-motion replay of a car pushed off the tablePlate
+// ---------------------------------------------------------------------------
+const REPLAY_REC_HZ = 30;
+const REPLAY_REC_SECONDS = 6;
+const REPLAY_REC_N = REPLAY_REC_HZ * REPLAY_REC_SECONDS;
+const REPLAY_PUSH_MIN_SPEED = 0.3;
+/** A fall counts as a push-off if it starts this soon after the last car contact. */
+const REPLAY_PUSH_WINDOW = 1.6;
+const REPLAY_LEAD_IN = 0.5;
+const REPLAY_TAIL = 1.0;
+const REPLAY_SPEED = 0.35;
+const REPLAY_RT_W = 640;
+const REPLAY_RT_H = 360;
+
+const _rec = {
+  t: new Float64Array(REPLAY_REC_N),
+  pose: null,
+  head: 0,
+  count: 0,
+  acc: 0,
+  cars: 0,
+};
+const _replay = {
+  pending: null,
+  active: false,
+  screen: null,
+  nextScreen: Math.random() < 0.5 ? "left" : "right",
+  t0: 0,
+  t1: 0,
+  playhead: 0,
+  victim: 0,
+  rt: null,
+  camera: null,
+  proxies: null,
+  liveDrawables: null,
+  hudScene: null,
+  hudCamera: null,
+  hudMat: null,
+  look: new THREE.Vector3(),
+  mid: new THREE.Vector3(),
+  warmed: false,
+};
+const _repPos = new THREE.Vector3();
+const _repQuatA = new THREE.Quaternion();
+const _repQuatB = new THREE.Quaternion();
+
+/** Called by the car-pair resolver: remember who last pushed whom (bookkeeping only). */
+function noteCarContact(cA, cB, closingSpeed) {
+  if (closingSpeed < REPLAY_PUSH_MIN_SPEED) return;
+  const now = clock.elapsedTime;
+  cA.lastBumpBy = cB;
+  cA.lastBumpT = now;
+  cB.lastBumpBy = cA;
+  cB.lastBumpT = now;
+}
+
+function _recordArenaPoses(dt) {
+  const n = arenaCars.length;
+  if (!_rec.pose || _rec.cars !== n) {
+    _rec.pose = new Float32Array(REPLAY_REC_N * n * 7);
+    _rec.cars = n;
+    _rec.head = 0;
+    _rec.count = 0;
+  }
+  _rec.acc += dt;
+  if (_rec.acc < 1 / REPLAY_REC_HZ) return;
+  _rec.acc %= 1 / REPLAY_REC_HZ;
+  const slot = _rec.head;
+  _rec.t[slot] = clock.elapsedTime;
+  for (let i = 0; i < n; i++) {
+    const c = arenaCars[i].car;
+    const o = (slot * n + i) * 7;
+    _rec.pose[o] = c.position.x;
+    _rec.pose[o + 1] = c.position.y;
+    _rec.pose[o + 2] = c.position.z;
+    _rec.pose[o + 3] = c.quaternion.x;
+    _rec.pose[o + 4] = c.quaternion.y;
+    _rec.pose[o + 5] = c.quaternion.z;
+    _rec.pose[o + 6] = c.quaternion.w;
+  }
+  _rec.head = (slot + 1) % REPLAY_REC_N;
+  _rec.count = Math.min(REPLAY_REC_N, _rec.count + 1);
+}
+
+function _recSlot(k) {
+  // k = 0 is the oldest sample still in the buffer.
+  return (_rec.head - _rec.count + k + REPLAY_REC_N) % REPLAY_REC_N;
+}
+
+function _recOldestTime() {
+  return _rec.count ? _rec.t[_recSlot(0)] : Infinity;
+}
+
+/** Interpolated recorded pose of car i at time `time` (clamped to the buffer). */
+function _sampleRecordedPose(i, time, outPos, outQuat) {
+  const n = _rec.cars;
+  if (!_rec.count) return false;
+  let a = 0;
+  let b = 0;
+  for (let k = 0; k < _rec.count; k++) {
+    const s = _recSlot(k);
+    if (_rec.t[s] <= time) a = s;
+    if (_rec.t[s] >= time) {
+      b = s;
+      break;
+    }
+    b = s;
+  }
+  const ta = _rec.t[a];
+  const tb = _rec.t[b];
+  const f = tb > ta ? THREE.MathUtils.clamp((time - ta) / (tb - ta), 0, 1) : 0;
+  const oa = (a * n + i) * 7;
+  const ob = (b * n + i) * 7;
+  const P = _rec.pose;
+  outPos.set(
+    P[oa] + (P[ob] - P[oa]) * f,
+    P[oa + 1] + (P[ob + 1] - P[oa + 1]) * f,
+    P[oa + 2] + (P[ob + 2] - P[oa + 2]) * f,
+  );
+  _repQuatA.set(P[oa + 3], P[oa + 4], P[oa + 5], P[oa + 6]);
+  _repQuatB.set(P[ob + 3], P[ob + 4], P[ob + 5], P[ob + 6]);
+  outQuat.slerpQuaternions(_repQuatA, _repQuatB, f);
+  return true;
+}
+
+function _ensureReplayResources() {
+  const r = _replay;
+  if (r.proxies) return true;
+  if (!arenaCars.every((c) => c.ready)) return false;
+  r.rt = new THREE.WebGLRenderTarget(REPLAY_RT_W, REPLAY_RT_H, {
+    type: THREE.HalfFloatType,
+    depthBuffer: true,
+  });
+  r.camera = new THREE.PerspectiveCamera(42, REPLAY_RT_W / REPLAY_RT_H, 0.03, 60);
+  // Stand-in copies of the cars for the replay: shared geometry/materials,
+  // no lights / sparks / exhaust (so the scene's light count never changes).
+  r.proxies = arenaCars.map((c) => {
+    const p = c.car.clone(true);
+    const drop = [];
+    p.traverse((o) => {
+      if (o === p) return;
+      if (o.isLight || o.isPoints || o.isSprite || o.name === "carHitSpark") drop.push(o);
+    });
+    for (const o of drop) o.removeFromParent();
+    p.visible = false;
+    p.matrixAutoUpdate = true;
+    scene.add(p);
+    return p;
+  });
+  // Everything drawable on the live cars, hidden only while the replay frame renders.
+  r.liveDrawables = arenaCars.map((c) => {
+    const list = [];
+    c.car.traverse((o) => {
+      if (o.isMesh || o.isPoints || o.isSprite || o.isLine) list.push(o);
+    });
+    return list;
+  });
+  // HUD drawn into the replay frame: REPLAY tag, slow-motion label, letterbox.
+  const hudCanvas = document.createElement("canvas");
+  hudCanvas.width = REPLAY_RT_W;
+  hudCanvas.height = REPLAY_RT_H;
+  const hc = hudCanvas.getContext("2d");
+  hc.clearRect(0, 0, REPLAY_RT_W, REPLAY_RT_H);
+  hc.fillStyle = "rgba(0,0,0,0.85)";
+  hc.fillRect(0, 0, REPLAY_RT_W, 26);
+  hc.fillRect(0, REPLAY_RT_H - 26, REPLAY_RT_W, 26);
+  hc.fillStyle = "#ff2a2a";
+  hc.beginPath();
+  hc.arc(30, 46, 8, 0, Math.PI * 2);
+  hc.fill();
+  hc.font = '900 22px "Arial Black", Impact, sans-serif';
+  hc.textBaseline = "middle";
+  hc.fillStyle = "#ffffff";
+  hc.fillText("REPLAY", 46, 47);
+  hc.font = '700 16px "Helvetica Neue", Arial, sans-serif';
+  hc.textAlign = "right";
+  hc.fillStyle = "rgba(255,255,255,0.9)";
+  hc.fillText(`SLOW MOTION  ×${REPLAY_SPEED}`, REPLAY_RT_W - 18, REPLAY_RT_H - 13);
+  const hudTex = new THREE.CanvasTexture(hudCanvas);
+  hudTex.colorSpace = THREE.SRGBColorSpace;
+  r.hudMat = new THREE.MeshBasicMaterial({
+    map: hudTex,
+    transparent: true,
+    depthTest: false,
+    depthWrite: false,
+    toneMapped: false,
+  });
+  r.hudScene = new THREE.Scene();
+  r.hudScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), r.hudMat));
+  r.hudCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+  return true;
+}
+
+function _renderReplayFrame(time) {
+  const r = _replay;
+  const n = arenaCars.length;
+  const saved = [];
+  for (let i = 0; i < n; i++) {
+    for (const o of r.liveDrawables[i]) {
+      saved.push(o.visible);
+      o.visible = false;
+    }
+    const proxy = r.proxies[i];
+    if (_sampleRecordedPose(i, time, proxy.position, proxy.quaternion)) proxy.visible = true;
+  }
+  const reflWas = tableReflector ? tableReflector.visible : false;
+  if (tableReflector) tableReflector.visible = false;
+  const prevTarget = renderer.getRenderTarget();
+  const prevAutoClear = renderer.autoClear;
+  renderer.setRenderTarget(r.rt);
+  renderer.autoClear = true;
+  renderer.clear();
+  renderer.render(scene, r.camera);
+  // HUD stays readable through the screen's tone mapping at any exposure.
+  r.hudMat.color.setScalar(1.25 / Math.max(0.2, renderer.toneMappingExposure));
+  renderer.autoClear = false;
+  renderer.render(r.hudScene, r.hudCamera);
+  renderer.setRenderTarget(prevTarget);
+  renderer.autoClear = prevAutoClear;
+  if (tableReflector) tableReflector.visible = reflWas;
+  let k = 0;
+  for (let i = 0; i < n; i++) {
+    for (const o of r.liveDrawables[i]) o.visible = saved[k++];
+    r.proxies[i].visible = false;
+  }
+}
+
+/** Compiles the replay render path once during the intro so the first replay has no hitch. */
+function warmUpArenaReplay() {
+  const r = _replay;
+  if (r.warmed || !_ensureReplayResources()) return;
+  r.warmed = true;
+  _recordArenaPoses(1);
+  r.camera.position.set(tablePlateCenter.x + 1.5, tableSurfaceY + 0.8, tablePlateCenter.z);
+  r.camera.lookAt(tablePlateCenter.x, tableSurfaceY, tablePlateCenter.z);
+  _renderReplayFrame(clock.elapsedTime);
+}
+
+function _detectPushOffFalls() {
+  _syncActiveCarCtx();
+  const now = clock.elapsedTime;
+  for (let i = 0; i < arenaCars.length; i++) {
+    const c = arenaCars[i];
+    const st = c.carPhysState;
+    const started = st === CAR_PHYS.FALLING && c._prevPhysState !== CAR_PHYS.FALLING;
+    c._prevPhysState = st;
+    if (!started || !_arenaGame.live || _replay.active || _replay.pending) continue;
+    if (!(c.lastBumpT > -Infinity) || now - c.lastBumpT > REPLAY_PUSH_WINDOW) continue;
+    // A cable strike after the last car contact means the cable caused it.
+    if (c.lastCableHitT >= c.lastBumpT) continue;
+    _replay.pending = {
+      victim: i,
+      t0: c.lastBumpT - REPLAY_LEAD_IN,
+      fallT: now,
+      t1: now + REPLAY_TAIL,
+    };
+  }
+}
+
+function _startReplay(p) {
+  const r = _replay;
+  if (!_ensureReplayResources()) return;
+  r.victim = p.victim;
+  r.t0 = Math.max(p.t0, _recOldestTime());
+  r.t1 = p.t1;
+  r.playhead = r.t0;
+  // Frame the push and the fall from the side, slightly above the table.
+  const impact = new THREE.Vector3();
+  const fall = new THREE.Vector3();
+  _sampleRecordedPose(r.victim, r.t0 + REPLAY_LEAD_IN, impact, _repQuatA);
+  _sampleRecordedPose(r.victim, p.fallT, fall, _repQuatA);
+  let dx = fall.x - impact.x;
+  let dz = fall.z - impact.z;
+  const dl = Math.hypot(dx, dz);
+  if (dl < 1e-3) {
+    dx = fall.x - tablePlateCenter.x;
+    dz = fall.z - tablePlateCenter.z;
+  }
+  const l = Math.hypot(dx, dz) || 1;
+  dx /= l;
+  dz /= l;
+  let sx = -dz;
+  let sz = dx;
+  // Put the camera on the side facing the table centre (over the table).
+  if (sx * (tablePlateCenter.x - fall.x) + sz * (tablePlateCenter.z - fall.z) < 0) {
+    sx = -sx;
+    sz = -sz;
+  }
+  r.mid.copy(impact).lerp(fall, 0.5);
+  r.camera.position.set(
+    r.mid.x + sx * 1.35 - dx * 0.35,
+    tableSurfaceY + 0.62,
+    r.mid.z + sz * 1.35 - dz * 0.35,
+  );
+  r.look.copy(r.mid);
+  r.camera.lookAt(r.look);
+  r.screen = r.nextScreen;
+  r.nextScreen = r.screen === "left" ? "right" : "left";
+  r.active = true;
+  showScreenReplay(r.screen, r.rt.texture);
+}
+
+function updateArenaReplay(dt) {
+  if (!_arenaGame.live) return;
+  _recordArenaPoses(dt);
+  _detectPushOffFalls();
+  const r = _replay;
+  if (!r.active && r.pending && clock.elapsedTime >= r.pending.t1 + 0.05) {
+    const p = r.pending;
+    r.pending = null;
+    _startReplay(p);
+  }
+  if (!r.active) return;
+  r.playhead += dt * REPLAY_SPEED;
+  if (r.playhead >= r.t1) {
+    r.active = false;
+    restoreScreenContent(r.screen);
+    return;
+  }
+  // Follow the pushed car (incl. its fall) with a gently lagging aim.
+  _sampleRecordedPose(r.victim, r.playhead, _repPos, _repQuatA);
+  _repPos.lerp(r.mid, 0.35);
+  r.look.lerp(_repPos, Math.min(1, dt * 6));
+  r.camera.lookAt(r.look);
+  _renderReplayFrame(r.playhead);
+}
+
+// ---------------------------------------------------------------------------
+// Paper airplane (ported from the office scene)
+// Same model, material and flight logic as officeSceneModule.js. Every
+// distance is scaled by k = this table / the office table, so the flight keeps
+// its proportions, timing and banking; only the loop is fitted to this room.
+// ---------------------------------------------------------------------------
+/** Half-length of the office tablePlate the original flight was tuned for. */
+const OFFICE_TABLE_HALF_X = 21.71;
+/** Office plane cruised 11.1 units above its table top. */
+const OFFICE_PLANE_CRUISE_ABOVE_TABLE = 11.11;
+/** Loop size relative to the table (office used 1.5 × 0.6; 1.2 keeps clear of the orbit camera). */
+const PLANE_LOOP_SCALE_X = 1.2;
+const PLANE_LOOP_SCALE_Z = 0.6;
+/** Model size relative to the office proportion (1 = same share of the table). */
+const PLANE_MODEL_SCALE = 0.6;
+
+let airPlaneModel = null;
+/**
+ * Lit paper material. The plane shares the room's own matte-white material
+ * (same lights, Bright/Dark theme response and captured room reflection as the
+ * other white objects); this fallback is only used if that is not available.
+ */
+const airPlaneFallbackMaterial = new THREE.MeshStandardMaterial({
+  color: 0xf3f3f3,
+  roughness: 0.88,
+  metalness: 0,
+  side: THREE.DoubleSide,
+  envMap: _meetingRoomEnv,
+  envMapIntensity: 0.28,
+});
+function _airPlaneMaterial() {
+  return _themeMats.whiteMattPlastic || airPlaneFallbackMaterial;
+}
+const airPlaneFlight = {
+  k: 1,
+  speed: 10.0,
+  t: 0,
+  baseY: 0,
+  yOffset: 0,
+  yTarget: 2.0,
+  yTimer: 0,
+  yDuration: 3,
+  segments: [],
+  totalLen: 0,
+  bankAngle: 0,
+  pathBuilt: false,
+};
+
+function loadMeetingRoomAirPlane() {
+  const loader = new GLTFLoader();
+  loader.setResourcePath(_OFFICE_BASE);
+  loader.load(
+    officeAsset("airPlane2.gltf"),
+    (gltf) => {
+      const rawScene = gltf.scene;
+      const paper = _airPlaneMaterial();
+      if (paper === airPlaneFallbackMaterial && !_reflectiveMats.includes(paper)) {
+        _reflectiveMats.push(paper);
+      }
+      rawScene.traverse((node) => {
+        if (!node.isMesh) return;
+        if (Array.isArray(node.material)) {
+          for (let i = 0; i < node.material.length; i++) node.material[i] = paper;
+        } else {
+          node.material = paper;
+        }
+        node.castShadow = true;
+        node.receiveShadow = true;
+      });
+      const box = new THREE.Box3().setFromObject(rawScene);
+      const meshCenter = box.getCenter(new THREE.Vector3());
+      airPlaneModel = new THREE.Group();
+      airPlaneModel.name = "meetingRoomAirPlane";
+      rawScene.position.sub(meshCenter);
+      airPlaneModel.add(rawScene);
+      scene.add(airPlaneModel);
+      airPlaneFlight.pathBuilt = false;
+    },
+    undefined,
+    (err) => console.warn("[MeetingRoom] airPlane2.gltf failed to load:", err),
+  );
+}
+
+function buildAirPlanePath() {
+  const fl = airPlaneFlight;
+  if (fl.pathBuilt || !Number.isFinite(tablePlateHalfX) || tablePlateHalfX > 100) return;
+  fl.pathBuilt = true;
+  const k = tablePlateHalfX / OFFICE_TABLE_HALF_X;
+  fl.k = k;
+  airPlaneModel.scale.setScalar(k * PLANE_MODEL_SCALE);
+  fl.speed = 10.0 * k;
+  fl.yTarget = 2.0 * k;
+  fl.baseY = tableSurfaceY + OFFICE_PLANE_CRUISE_ABOVE_TABLE * k;
+  const tc = tablePlateCenter;
+  const halfX = tablePlateHalfX;
+  const halfZ = tablePlateHalfZ;
+  const corners = [
+    [tc.x - halfX * PLANE_LOOP_SCALE_X, tc.z - halfZ * PLANE_LOOP_SCALE_Z],
+    [tc.x + halfX * PLANE_LOOP_SCALE_X, tc.z - halfZ * PLANE_LOOP_SCALE_Z],
+    [tc.x + halfX * PLANE_LOOP_SCALE_X, tc.z + halfZ * PLANE_LOOP_SCALE_Z],
+    [tc.x - halfX * PLANE_LOOP_SCALE_X, tc.z + halfZ * PLANE_LOOP_SCALE_Z],
+  ];
+  const R = 8.0 * k;
+  const segs = [];
+  const n = corners.length;
+  const edgeDirs = [];
+  for (let i = 0; i < n; i++) {
+    const curr = corners[i];
+    const next = corners[(i + 1) % n];
+    const dx = next[0] - curr[0];
+    const dz = next[1] - curr[1];
+    const len = Math.sqrt(dx * dx + dz * dz);
+    edgeDirs.push({ ux: dx / len, uz: dz / len, len });
+  }
+  for (let i = 0; i < n; i++) {
+    const ed = edgeDirs[i];
+    const straightLen = ed.len - 2 * R;
+    const curr = corners[i];
+    segs.push({
+      type: "straight",
+      sx: curr[0] + ed.ux * R,
+      sz: curr[1] + ed.uz * R,
+      ex: corners[(i + 1) % n][0] - ed.ux * R,
+      ez: corners[(i + 1) % n][1] - ed.uz * R,
+      dx: ed.ux,
+      dz: ed.uz,
+      len: Math.max(straightLen, 0),
+    });
+    const edNext = edgeDirs[(i + 1) % n];
+    const cornerPt = corners[(i + 1) % n];
+    const arcStart = [cornerPt[0] - ed.ux * R, cornerPt[1] - ed.uz * R];
+    const arcEnd = [cornerPt[0] + edNext.ux * R, cornerPt[1] + edNext.uz * R];
+    const inNx = -ed.uz;
+    const inNz = ed.ux;
+    const cross = ed.ux * edNext.uz - ed.uz * edNext.ux;
+    const sign = cross > 0 ? 1 : -1;
+    const cx = arcStart[0] + inNx * R * sign;
+    const cz = arcStart[1] + inNz * R * sign;
+    const startAngle = Math.atan2(arcStart[1] - cz, arcStart[0] - cx);
+    const endAngle = Math.atan2(arcEnd[1] - cz, arcEnd[0] - cx);
+    let sweep = endAngle - startAngle;
+    while (sweep > Math.PI) sweep -= 2 * Math.PI;
+    while (sweep < -Math.PI) sweep += 2 * Math.PI;
+    segs.push({
+      type: "arc",
+      cx,
+      cz,
+      r: R,
+      startAngle,
+      sweep,
+      len: Math.abs(sweep) * R,
+      turnSign: sign,
+    });
+  }
+  fl.segments = segs;
+  fl.totalLen = 0;
+  for (const s of segs) fl.totalLen += s.len;
+}
+
+/** Office flight update, unchanged except that distances are multiplied by k. */
+function updateMeetingRoomAirPlane(dt) {
+  if (!airPlaneModel) return;
+  if (!airPlaneFlight.pathBuilt) buildAirPlanePath();
+  const fl = airPlaneFlight;
+  if (!(fl.totalLen > 0)) return;
+  const k = fl.k;
+  const ySpd =
+    fl.climbPitch !== undefined
+      ? Math.abs(fl.yOffset - (fl._prevYOffset || fl.yOffset)) / Math.max(dt, 0.001)
+      : 0;
+  fl._prevYOffset = fl.yOffset;
+  if (fl.speedVar === undefined) {
+    fl.speedVar = 0;
+    fl.speedTarget = 0;
+    fl.speedTimer = 0;
+  }
+  fl.speedTimer += dt;
+  if (fl.speedTimer > 2 + Math.random() * 3) {
+    fl.speedTarget = (Math.random() - 0.5) * 3 * k;
+    fl.speedTimer = 0;
+  }
+  fl.speedVar += (fl.speedTarget - fl.speedVar) * dt * 1.5;
+  const curSpeed = fl.speed + fl.speedVar;
+  const hSpd = Math.sqrt(Math.max(curSpeed * curSpeed - ySpd * ySpd, k * k));
+  fl.t += hSpd * dt;
+  if (fl.t >= fl.totalLen) fl.t -= fl.totalLen;
+  if (fl.t < 0) fl.t += fl.totalLen;
+
+  let rem = fl.t;
+  let seg = fl.segments[0];
+  let segIdx = 0;
+  for (let i = 0; i < fl.segments.length; i++) {
+    if (rem <= fl.segments[i].len) {
+      seg = fl.segments[i];
+      segIdx = i;
+      break;
+    }
+    rem -= fl.segments[i].len;
+  }
+
+  fl.yTimer += dt;
+  if (fl.yTimer >= fl.yDuration) {
+    fl.yTarget = (0.5 + Math.random() * 3) * k;
+    fl.yDuration = 1.5 + Math.random() * 2.5;
+    fl.yTimer = 0;
+    fl.yStart = fl.yOffset;
+  }
+  if (fl.yStart === undefined) fl.yStart = fl.yOffset;
+  const prevY = fl.yOffset;
+  if (seg.type === "straight") {
+    const yProgress = Math.min(fl.yTimer / fl.yDuration, 1);
+    const yEase =
+      yProgress < 0.5
+        ? 4 * yProgress * yProgress * yProgress
+        : 1 - Math.pow(-2 * yProgress + 2, 3) / 2;
+    fl.yOffset = fl.yStart + (fl.yTarget - fl.yStart) * yEase;
+  }
+  const yVel = (fl.yOffset - prevY) / Math.max(dt, 0.001);
+
+  let px;
+  let pz;
+  let dirX;
+  let dirZ;
+  let turnAmount;
+  const TURN_PITCH = (40 * Math.PI) / 180;
+  const TURN_BANK = 0.2;
+  const BLEND_ZONE = 3.0 * k;
+  if (seg.type === "straight") {
+    const frac = rem / seg.len;
+    // Drift phase runs on office-scale distance so its rhythm is unchanged.
+    const tu = fl.t / k;
+    const drift = (Math.sin(tu * 0.7) * 0.4 + Math.sin(tu * 1.3) * 0.2) * k;
+    const driftFade = Math.sin(frac * Math.PI);
+    const perpX = -seg.dz;
+    const perpZ = seg.dx;
+    px = seg.sx + (seg.ex - seg.sx) * frac + perpX * drift * driftFade;
+    pz = seg.sz + (seg.ez - seg.sz) * frac + perpZ * drift * driftFade;
+    dirX = seg.dx;
+    dirZ = seg.dz;
+    const distFromEnd = seg.len - rem;
+    const distFromStart = rem;
+    const nextArc = fl.segments[(segIdx + 1) % fl.segments.length];
+    const prevArc = fl.segments[(segIdx - 1 + fl.segments.length) % fl.segments.length];
+    if (distFromEnd < BLEND_ZONE && nextArc.type === "arc") {
+      const t = 1 - distFromEnd / BLEND_ZONE;
+      const e = t * t * (3 - 2 * t);
+      const sign = nextArc.turnSign || (nextArc.sweep > 0 ? -1 : 1);
+      turnAmount = e * 0.3 * sign;
+    } else if (distFromStart < BLEND_ZONE && prevArc.type === "arc") {
+      const t = 1 - distFromStart / BLEND_ZONE;
+      const e = t * t * (3 - 2 * t);
+      const sign = prevArc.turnSign || (prevArc.sweep > 0 ? -1 : 1);
+      turnAmount = e * 0.3 * sign;
+    } else {
+      turnAmount = 0;
+    }
+  } else {
+    const frac = rem / seg.len;
+    const angle = seg.startAngle + seg.sweep * frac;
+    px = seg.cx + Math.cos(angle) * seg.r;
+    pz = seg.cz + Math.sin(angle) * seg.r;
+    const tangentSign = seg.sweep > 0 ? 1 : -1;
+    dirX = -Math.sin(angle) * tangentSign;
+    dirZ = Math.cos(angle) * tangentSign;
+    const sign = seg.turnSign || (seg.sweep > 0 ? -1 : 1);
+    const peak = 0.3 + 0.7 * Math.sin(frac * Math.PI);
+    turnAmount = peak * sign;
+  }
+
+  const heading = Math.atan2(dirX, dirZ) + Math.PI / 2;
+  if (fl.climbPitch === undefined) fl.climbPitch = 0;
+  const climbTarget = -Math.atan2(yVel, fl.speed) * 0.8;
+  fl.climbPitch += (climbTarget - fl.climbPitch) * dt * 2.0;
+
+  const py = Math.max(fl.baseY + fl.yOffset, fl.baseY);
+  airPlaneModel.position.set(px, py, pz);
+  airPlaneModel.rotation.set(0, 0, 0);
+  airPlaneModel.rotateY(heading);
+  airPlaneModel.rotateX(turnAmount * -TURN_PITCH);
+  airPlaneModel.rotateZ(turnAmount * TURN_BANK + fl.climbPitch);
 }
 
 // ---------------------------------------------------------------------------
@@ -7557,7 +8497,8 @@ function animate() {
   }
   const carDt = 1 / 60;
   let carTimeLeft = dt;
-  updateArenaAi(dt);
+  updateArenaGame(dt);
+  if (_arenaGame.live) updateArenaAi(dt);
   for (let s = 0; s < 3 && carTimeLeft > 0; s++) {
     const step = Math.min(carDt, carTimeLeft);
     for (let i = 0; i < arenaCars.length; i++) {
@@ -7575,11 +8516,14 @@ function animate() {
   updateCarShadowLight();
   updateArenaCable(dt);
   updateArenaCarEffects(dt);
+  updateMeetingRoomAirPlane(dt);
   if (_fireSensorLightMat) {
     const pulse =
       0.16 + 0.84 * (0.5 + 0.5 * Math.sin(clock.elapsedTime * 1.65));
     _fireSensorLightMat.color.setRGB(0.04 * pulse, pulse, 0.12 * pulse);
   }
+  updateArenaScreens(dt);
+  updateArenaReplay(dt);
   controls.update();
   applyCameraShake(dt);
   renderer.render(scene, camera);
