@@ -89,51 +89,6 @@ const _pmrem = new THREE.PMREMGenerator(renderer);
 const _meetingRoomEnv = _pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
 _pmrem.dispose();
 
-const AXES_SIZE = 1.6;
-const axesGroup = new THREE.Group();
-axesGroup.name = "MeetingRoomAxes";
-const axesHelper = new THREE.AxesHelper(AXES_SIZE);
-axesHelper.renderOrder = 9998;
-axesGroup.add(axesHelper);
-
-function makeAxisLabel(text, hexColor) {
-  const c = document.createElement("canvas");
-  c.width = 64;
-  c.height = 64;
-  const ctx = c.getContext("2d");
-  ctx.clearRect(0, 0, 64, 64);
-  ctx.font = "bold 52px sans-serif";
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  ctx.lineWidth = 8;
-  ctx.strokeStyle = "#000000";
-  ctx.strokeText(text, 32, 32);
-  ctx.fillStyle = "#" + ("000000" + hexColor.toString(16)).slice(-6);
-  ctx.fillText(text, 32, 32);
-  const tex = new THREE.CanvasTexture(c);
-  tex.needsUpdate = true;
-  const mat = new THREE.SpriteMaterial({
-    map: tex,
-    depthTest: false,
-    transparent: true,
-  });
-  const sprite = new THREE.Sprite(mat);
-  sprite.scale.set(0.32, 0.32, 1);
-  sprite.renderOrder = 9999;
-  return sprite;
-}
-
-const axisLabelX = makeAxisLabel("X", 0xff0000);
-axisLabelX.position.set(AXES_SIZE, 0, 0);
-axesGroup.add(axisLabelX);
-const axisLabelY = makeAxisLabel("Y", 0x00ff00);
-axisLabelY.position.set(0, AXES_SIZE, 0);
-axesGroup.add(axisLabelY);
-const axisLabelZ = makeAxisLabel("Z", 0x0000ff);
-axisLabelZ.position.set(0, 0, AXES_SIZE);
-axesGroup.add(axisLabelZ);
-scene.add(axesGroup);
-
 const controls = new OrbitControls(camera, canvas);
 controls.enableDamping = true;
 controls.dampingFactor = 0.08;
@@ -236,6 +191,31 @@ darkPurpleFill.position.set(3.4, 2.8, -2.4);
 scene.add(darkPurpleFill);
 
 let carShadowPlane = null;
+/**
+ * One shared light that throws a car's electrical shock onto the room (walls,
+ * floor, tablePlate, reflections). Always in the scene at intensity 0 so the
+ * light count — and every material's shader — never changes; it follows
+ * whichever car has the strongest active shock (see updateShockRoomLight).
+ */
+// Reaches the room walls with distance falloff (nearby surfaces get the most).
+// Lifted well above the car so the electrified car itself receives about the
+// same light as before — only the surroundings get brighter.
+const SHOCK_ROOM_PEAK = 6.5;
+const SHOCK_ROOM_BASE_DIST = 7;
+const SHOCK_ROOM_FLASH_DIST = 10;
+const SHOCK_ROOM_DECAY = 1.3;
+const SHOCK_ROOM_LIFT = 1.6;
+const SHOCK_ROOM_COLOR_LOW = new THREE.Color(0x2a7dff);
+const SHOCK_ROOM_COLOR_HIGH = new THREE.Color(0xd9f3ff);
+const shockRoomLight = new THREE.PointLight(
+  SHOCK_ROOM_COLOR_LOW,
+  0,
+  SHOCK_ROOM_BASE_DIST,
+  SHOCK_ROOM_DECAY,
+);
+shockRoomLight.name = "carShockRoomLight";
+shockRoomLight.castShadow = false;
+scene.add(shockRoomLight);
 const carShadowLight = new THREE.DirectionalLight(0xffffff, 0.05);
 carShadowLight.name = "meetingRoomCarShadowLight";
 carShadowLight.position.set(3, 20, 2);
@@ -477,7 +457,6 @@ const CAR_SCALE_MULTIPLIER = 0.48;
 const CAR_PHYS = {
   DRIVING: "DRIVING",
   IMPACT: "IMPACT",
-  BUMP: "BUMP",
   FALLING: "FALLING",
   LANDED: "LANDED",
   RESPAWNING: "RESPAWNING",
@@ -497,12 +476,17 @@ const CABLE_HIT_ANG_BURST_TIME = 0.2;
 const CABLE_HIT_ANG_DAMP_TIME = 1.12;
 const CAR_HIT_SPARK_DURATION = 3;
 const CAR_HIT_SPARK_FADE = 0.85;
+/** Car shock look: arcs hug the body (shorter, less jagged, thinner) and glow less. Timing unchanged. */
+const CAR_SPARK_REACH = 0.34;
+const CAR_SPARK_JAG = 0.06;
+const CAR_SPARK_WIDTH = 5.6;
+const CAR_SPARK_SURFACE_PUSH = 1.03;
+const CAR_SPARK_BRIGHTNESS = 0.72;
+const CAR_SPARK_GLOW = 0.6;
+const CAR_SPARK_LIGHT = 0.55;
 const PHYS_GROUP_TABLE = 1;
 const PHYS_GROUP_FLOOR = 2;
 const PHYS_GROUP_CAR = 4;
-const CAR_BUMP_RESTITUTION = 0.58;
-const CAR_BUMP_SEPARATE = 0.012;
-const ARENA_AI_COLORS = [0x1ec8ff, 0xffc43a];
 const CAR_FLOOR_RESPAWN_SEC = 2;
 const PHYS_FIXED_DT = 1 / 60;
 const PHYS_GRAVITY_Y = -16;
@@ -538,7 +522,7 @@ const AIR_IN_STAGGER = {
   airIn2: { open: 0.11, close: 0.03 },
   airIn3: { open: 0.06, close: 0.1 },
 };
-const car = new THREE.Group();
+let car = new THREE.Group();
 car.name = "KitchenCar";
 car.rotation.order = "YXZ";
 scene.add(car);
@@ -551,7 +535,7 @@ carRimLight.position.set(1.5, 2.4, -2.2);
 carRimLight.name = "meetingRoomCarRimLight";
 car.add(carRimLight);
 const _carLampSpots = [];
-const carState = {
+let carState = {
   speed: 0,
   angle: 0,
   steerAngle: 0,
@@ -565,13 +549,14 @@ const carState = {
   turnRate: 18,
   _brakeTime: 0,
 };
-const keys = {
+const playerKeys = {
   forward: false,
   reverse: false,
   left: false,
   right: false,
   brake: false,
 };
+let keys = playerKeys;
 let halfW = 0.6;
 let halfL = 1.0;
 let storedCarScale = 0.5;
@@ -580,7 +565,12 @@ let tableSurfaceY = 0;
 let tablePlateHalfX = Infinity;
 let tablePlateHalfZ = Infinity;
 const tablePlateCenter = new THREE.Vector3();
-const tableSpawn = new THREE.Vector3();
+let tableSpawn = new THREE.Vector3();
+let carSpawnAngle = 0;
+/** Collision push carried by a driving car on top of its own driving (decays). */
+let carBumpVelX = 0;
+let carBumpVelZ = 0;
+let carBumpYaw = 0;
 let physicsWorld = null;
 let tablePlateBody = null;
 let floorPhysBody = null;
@@ -598,7 +588,7 @@ let carImpactLin0 = 0;
 let carImpactYaw0 = 0;
 let carImpactSpinShare = 0.5;
 let _carHitSpark = null;
-const _impactKickDir = new THREE.Vector3();
+let _impactKickDir = new THREE.Vector3();
 const _carSparkA = new THREE.Vector3();
 const _carSparkB = new THREE.Vector3();
 let _cableHitLatched = false;
@@ -606,11 +596,11 @@ let _cableHitCool = 0;
 let _cableTipPrevValid = false;
 let floorTopY = 0;
 let _physAcc = 0;
-const carPhysLocalCenter = new THREE.Vector3();
-const carPhysHalf = new THREE.Vector3();
+let carPhysLocalCenter = new THREE.Vector3();
+let carPhysHalf = new THREE.Vector3();
 const _physOffset = new THREE.Vector3();
 const _cableTipWorld = new THREE.Vector3();
-const _cableTipPrev = new THREE.Vector3();
+let _cableTipPrev = new THREE.Vector3();
 const _cableTipVel = new THREE.Vector3();
 const _hitClosest = new THREE.Vector3();
 const _hitAway = new THREE.Vector3();
@@ -628,13 +618,6 @@ let wheelRR = null;
 let airInParts = [];
 let _carFollowCam = true;
 let _carReady = false;
-const arenaCars = [];
-const _bumpDelta = new THREE.Vector3();
-const _bumpVelA = new THREE.Vector3();
-const _bumpVelB = new THREE.Vector3();
-const _bumpN = new THREE.Vector3();
-let _playerCarVisual = null;
-let _playerCarInst = null;
 const _quatWheelSteer = new THREE.Quaternion();
 const _quatWheelRoll = new THREE.Quaternion();
 const _quatY = new THREE.Quaternion();
@@ -661,11 +644,11 @@ function isControlKey(code) {
 
 function onKeyDown(e) {
   if (isControlKey(e.code)) e.preventDefault();
-  if (e.code === "KeyW" || e.code === "ArrowUp") keys.forward = true;
-  if (e.code === "KeyS" || e.code === "ArrowDown") keys.reverse = true;
-  if (e.code === "KeyA" || e.code === "ArrowLeft") keys.left = true;
-  if (e.code === "KeyD" || e.code === "ArrowRight") keys.right = true;
-  if (e.code === "Space") keys.brake = true;
+  if (e.code === "KeyW" || e.code === "ArrowUp") playerKeys.forward = true;
+  if (e.code === "KeyS" || e.code === "ArrowDown") playerKeys.reverse = true;
+  if (e.code === "KeyA" || e.code === "ArrowLeft") playerKeys.left = true;
+  if (e.code === "KeyD" || e.code === "ArrowRight") playerKeys.right = true;
+  if (e.code === "Space") playerKeys.brake = true;
   if (e.code === "KeyO") {
     e.preventDefault();
     lightBlendTarget = 0;
@@ -678,6 +661,7 @@ function onKeyDown(e) {
     e.preventDefault();
     _carFollowCam = true;
     controls.enabled = true;
+    cancelCameraDirector();
     if (_carReady) {
       _carLook.copy(car.position);
       _carLook.y += 0.28 * Math.max(0.2, storedCarScale);
@@ -690,17 +674,18 @@ function onKeyDown(e) {
     e.preventDefault();
     _carFollowCam = false;
     controls.enabled = true;
+    cancelCameraDirector();
     if (_model) frameMeetingRoomInterior(_model);
   }
 }
 
 function onKeyUp(e) {
   if (isControlKey(e.code)) e.preventDefault();
-  if (e.code === "KeyW" || e.code === "ArrowUp") keys.forward = false;
-  if (e.code === "KeyS" || e.code === "ArrowDown") keys.reverse = false;
-  if (e.code === "KeyA" || e.code === "ArrowLeft") keys.left = false;
-  if (e.code === "KeyD" || e.code === "ArrowRight") keys.right = false;
-  if (e.code === "Space") keys.brake = false;
+  if (e.code === "KeyW" || e.code === "ArrowUp") playerKeys.forward = false;
+  if (e.code === "KeyS" || e.code === "ArrowDown") playerKeys.reverse = false;
+  if (e.code === "KeyA" || e.code === "ArrowLeft") playerKeys.left = false;
+  if (e.code === "KeyD" || e.code === "ArrowRight") playerKeys.right = false;
+  if (e.code === "Space") playerKeys.brake = false;
 }
 
 window.addEventListener("keydown", onKeyDown, true);
@@ -826,14 +811,6 @@ function setupDrivePhysics(root) {
       new CANNON.ContactMaterial(_carPhysMaterial, _floorPhysMaterial, {
         friction: 0.62,
         restitution: 0.16,
-        contactEquationStiffness: 1e7,
-        contactEquationRelaxation: 3,
-      }),
-    );
-    physicsWorld.addContactMaterial(
-      new CANNON.ContactMaterial(_carPhysMaterial, _carPhysMaterial, {
-        friction: 0.12,
-        restitution: CAR_BUMP_RESTITUTION,
         contactEquationStiffness: 1e7,
         contactEquationRelaxation: 3,
       }),
@@ -994,8 +971,9 @@ function physicsBodiesTouching(a, b) {
 function makeCarDynamicFromDrive() {
   if (!carPhysBody) return;
   syncCarBodyFromMesh();
-  const vx = Math.sin(carState.angle) * carState.speed;
-  const vz = Math.cos(carState.angle) * carState.speed;
+  const vx = Math.sin(carState.angle) * carState.speed + carBumpVelX;
+  const vz = Math.cos(carState.angle) * carState.speed + carBumpVelZ;
+  clearCarBump();
   carPhysBody.type = CANNON.Body.DYNAMIC;
   carPhysBody.mass = 1.8;
   carPhysBody.updateMassProperties();
@@ -1330,10 +1308,11 @@ function respawnCarOnTable() {
   _cableHitLatched = false;
   carState.speed = 0;
   carState.steerAngle = 0;
-  carState.angle = 0;
+  carState.angle = carSpawnAngle;
   carState._brakeTime = 0;
+  clearCarBump();
   car.position.copy(tableSpawn);
-  car.quaternion.identity();
+  car.quaternion.setFromAxisAngle(_flatUp, carSpawnAngle);
   if (carPhysBody) {
     carPhysBody.velocity.set(0, 0, 0);
     carPhysBody.angularVelocity.set(0, 0, 0);
@@ -1354,25 +1333,54 @@ function respawnCarOnTable() {
   carPhysState = CAR_PHYS.DRIVING;
 }
 
+function _carUsesPhysicsWorld() {
+  return (
+    !!carPhysBody &&
+    (carPhysState === CAR_PHYS.FALLING ||
+      carPhysState === CAR_PHYS.LANDED ||
+      carPhysState === CAR_PHYS.IMPACT)
+  );
+}
+
+/**
+ * Steps the shared physics world once for all cars (it used to be stepped from
+ * the single car). Each car's IMPACT coast hooks still run around every fixed
+ * step, exactly as before, and the post-step state logic runs per car.
+ */
 function stepCarPhysics(dt) {
-  if (!physicsWorld || !carPhysBody) return;
-  if (
-    carPhysState !== CAR_PHYS.FALLING &&
-    carPhysState !== CAR_PHYS.LANDED &&
-    carPhysState !== CAR_PHYS.IMPACT
-  ) {
+  if (!physicsWorld) return;
+  const active = [];
+  for (let i = 0; i < arenaCars.length; i++) {
+    const c = arenaCars[i];
+    if (!c.ready) continue;
+    if (withCar(c, _carUsesPhysicsWorld)) active.push(c);
+  }
+  if (!active.length) {
     _physAcc = 0;
     return;
   }
-  if (carPhysState === CAR_PHYS.IMPACT) applyImpactCoastDamping();
+  const preStep = () => {
+    if (carPhysState === CAR_PHYS.IMPACT) applyImpactCoastDamping();
+  };
+  const postStep = () => {
+    if (carPhysState === CAR_PHYS.IMPACT) applyImpactYawHeading(PHYS_FIXED_DT);
+  };
+  for (let i = 0; i < active.length; i++) withCar(active[i], preStep);
   _physAcc += dt;
   _physAcc = Math.min(_physAcc, 0.08);
   while (_physAcc >= PHYS_FIXED_DT) {
-    if (carPhysState === CAR_PHYS.IMPACT) applyImpactCoastDamping();
+    for (let i = 0; i < active.length; i++) withCar(active[i], preStep);
     physicsWorld.step(PHYS_FIXED_DT);
-    if (carPhysState === CAR_PHYS.IMPACT) applyImpactYawHeading(PHYS_FIXED_DT);
+    for (let i = 0; i < active.length; i++) withCar(active[i], postStep);
     _physAcc -= PHYS_FIXED_DT;
   }
+  for (let i = 0; i < active.length; i++) {
+    withCar(active[i], () => stepCarPhysicsPost(dt));
+  }
+}
+
+function stepCarPhysicsPost(dt) {
+  if (!carPhysBody) return;
   if (carPhysState === CAR_PHYS.IMPACT) {
     applyImpactYawHeading(0);
     carImpactAge += dt;
@@ -1501,6 +1509,7 @@ function updateCar(dt) {
       car.position.x += forwardX * carState.speed * dt;
       car.position.z += forwardZ * carState.speed * dt;
     }
+    integrateCarBump(dt);
     car.position.y = tableSurfaceY + carBottomOffsetY;
     _quatY.setFromAxisAngle(_flatUp, carState.angle);
     car.quaternion.copy(_quatY);
@@ -1620,10 +1629,208 @@ let exhaustEffects = [];
 let exhaustActive = false;
 let exhaustStartTime = 0;
 let _carWasStopped = true;
-const _exhFlickerTimers = [0, 0];
-const _exhFlickerTargets = [1, 1];
-const _exhFlickerValues = [1, 1];
-const _exhFlickerNextChange = [0, 0];
+let _exhFlickerTimers = [0, 0];
+let _exhFlickerTargets = [1, 1];
+let _exhFlickerValues = [1, 1];
+let _exhFlickerNextChange = [0, 0];
+
+// ---------------------------------------------------------------------------
+// Arena car contexts.
+// Every car (player + AI) is a real instance of the same car: it owns a full
+// copy of the per-car state below, and the existing drive / physics / fall /
+// cable-hit functions run on whichever car is loaded into the module globals.
+// withCar(ctx, fn) swaps a car in, runs fn, and swaps the previous car back.
+// The player's car is the default loaded car, so all player-only code
+// (camera, keyboard, spot lights, table glows) is unaffected.
+// ---------------------------------------------------------------------------
+function _makeDefaultCarState() {
+  return {
+    speed: 0,
+    angle: 0,
+    steerAngle: 0,
+    wheelAngle: 0,
+    maxSpeed: 4.2,
+    accel: 22,
+    brakeDecel: 92,
+    brakeDecelReverseKey: 620,
+    friction: 0.92,
+    steerSpeed: 5.2,
+    turnRate: 18,
+    _brakeTime: 0,
+  };
+}
+
+function _saveCarCtx(c) {
+  c.car = car;
+  c.carState = carState;
+  c.keys = keys;
+  c.halfW = halfW;
+  c.halfL = halfL;
+  c.storedCarScale = storedCarScale;
+  c.carBottomOffsetY = carBottomOffsetY;
+  c.tableSpawn = tableSpawn;
+  c.carSpawnAngle = carSpawnAngle;
+  c.carBumpVelX = carBumpVelX;
+  c.carBumpVelZ = carBumpVelZ;
+  c.carBumpYaw = carBumpYaw;
+  c.carPhysBody = carPhysBody;
+  c.carPhysState = carPhysState;
+  c.carFloorTimer = carFloorTimer;
+  c.carLandedAtMs = carLandedAtMs;
+  c.carSpawnGrace = carSpawnGrace;
+  c.carImpactSettle = carImpactSettle;
+  c.carImpactAge = carImpactAge;
+  c.carImpactLin0 = carImpactLin0;
+  c.carImpactYaw0 = carImpactYaw0;
+  c.carImpactSpinShare = carImpactSpinShare;
+  c._carHitSpark = _carHitSpark;
+  c._impactKickDir = _impactKickDir;
+  c._cableHitLatched = _cableHitLatched;
+  c._cableHitCool = _cableHitCool;
+  c._cableTipPrevValid = _cableTipPrevValid;
+  c._cableTipPrev = _cableTipPrev;
+  c.carPhysLocalCenter = carPhysLocalCenter;
+  c.carPhysHalf = carPhysHalf;
+  c.wheelFL = wheelFL;
+  c.wheelFR = wheelFR;
+  c.wheelRL = wheelRL;
+  c.wheelRR = wheelRR;
+  c.airInParts = airInParts;
+  c.exhaustEffects = exhaustEffects;
+  c.exhaustActive = exhaustActive;
+  c.exhaustStartTime = exhaustStartTime;
+  c._carWasStopped = _carWasStopped;
+  c._exhFlickerTimers = _exhFlickerTimers;
+  c._exhFlickerTargets = _exhFlickerTargets;
+  c._exhFlickerValues = _exhFlickerValues;
+  c._exhFlickerNextChange = _exhFlickerNextChange;
+}
+
+function _loadCarCtx(c) {
+  car = c.car;
+  carState = c.carState;
+  keys = c.keys;
+  halfW = c.halfW;
+  halfL = c.halfL;
+  storedCarScale = c.storedCarScale;
+  carBottomOffsetY = c.carBottomOffsetY;
+  tableSpawn = c.tableSpawn;
+  carSpawnAngle = c.carSpawnAngle;
+  carBumpVelX = c.carBumpVelX;
+  carBumpVelZ = c.carBumpVelZ;
+  carBumpYaw = c.carBumpYaw;
+  carPhysBody = c.carPhysBody;
+  carPhysState = c.carPhysState;
+  carFloorTimer = c.carFloorTimer;
+  carLandedAtMs = c.carLandedAtMs;
+  carSpawnGrace = c.carSpawnGrace;
+  carImpactSettle = c.carImpactSettle;
+  carImpactAge = c.carImpactAge;
+  carImpactLin0 = c.carImpactLin0;
+  carImpactYaw0 = c.carImpactYaw0;
+  carImpactSpinShare = c.carImpactSpinShare;
+  _carHitSpark = c._carHitSpark;
+  _impactKickDir = c._impactKickDir;
+  _cableHitLatched = c._cableHitLatched;
+  _cableHitCool = c._cableHitCool;
+  _cableTipPrevValid = c._cableTipPrevValid;
+  _cableTipPrev = c._cableTipPrev;
+  carPhysLocalCenter = c.carPhysLocalCenter;
+  carPhysHalf = c.carPhysHalf;
+  wheelFL = c.wheelFL;
+  wheelFR = c.wheelFR;
+  wheelRL = c.wheelRL;
+  wheelRR = c.wheelRR;
+  airInParts = c.airInParts;
+  exhaustEffects = c.exhaustEffects;
+  exhaustActive = c.exhaustActive;
+  exhaustStartTime = c.exhaustStartTime;
+  _carWasStopped = c._carWasStopped;
+  _exhFlickerTimers = c._exhFlickerTimers;
+  _exhFlickerTargets = c._exhFlickerTargets;
+  _exhFlickerValues = c._exhFlickerValues;
+  _exhFlickerNextChange = c._exhFlickerNextChange;
+}
+
+function _newCarCtx(group, keyState) {
+  return {
+    car: group,
+    carState: _makeDefaultCarState(),
+    keys: keyState,
+    halfW: 0.6,
+    halfL: 1.0,
+    storedCarScale: 0.5,
+    carBottomOffsetY: 0,
+    tableSpawn: new THREE.Vector3(),
+    carSpawnAngle: 0,
+    carBumpVelX: 0,
+    carBumpVelZ: 0,
+    carBumpYaw: 0,
+    carPhysBody: null,
+    carPhysState: CAR_PHYS.DRIVING,
+    carFloorTimer: 0,
+    carLandedAtMs: 0,
+    carSpawnGrace: 0,
+    carImpactSettle: 0,
+    carImpactAge: 0,
+    carImpactLin0: 0,
+    carImpactYaw0: 0,
+    carImpactSpinShare: 0.5,
+    _carHitSpark: null,
+    _impactKickDir: new THREE.Vector3(),
+    _cableHitLatched: false,
+    _cableHitCool: 0,
+    _cableTipPrevValid: false,
+    _cableTipPrev: new THREE.Vector3(),
+    carPhysLocalCenter: new THREE.Vector3(),
+    carPhysHalf: new THREE.Vector3(),
+    wheelFL: null,
+    wheelFR: null,
+    wheelRL: null,
+    wheelRR: null,
+    airInParts: [],
+    exhaustEffects: [],
+    exhaustActive: false,
+    exhaustStartTime: 0,
+    _carWasStopped: true,
+    _exhFlickerTimers: [0, 0],
+    _exhFlickerTargets: [1, 1],
+    _exhFlickerValues: [1, 1],
+    _exhFlickerNextChange: [0, 0],
+    ready: false,
+    isPlayer: false,
+    ai: null,
+  };
+}
+
+const _playerCarCtx = {};
+_saveCarCtx(_playerCarCtx);
+_playerCarCtx.ready = false;
+_playerCarCtx.isPlayer = true;
+_playerCarCtx.ai = null;
+let _activeCarCtx = _playerCarCtx;
+/** All arena cars, player first. AI cars are appended once loaded. */
+const arenaCars = [_playerCarCtx];
+
+function withCar(ctx, fn) {
+  if (!ctx || ctx === _activeCarCtx) return fn();
+  const prev = _activeCarCtx;
+  _saveCarCtx(prev);
+  _loadCarCtx(ctx);
+  _activeCarCtx = ctx;
+  try {
+    return fn();
+  } finally {
+    _saveCarCtx(ctx);
+    _loadCarCtx(prev);
+    _activeCarCtx = prev;
+  }
+}
+
+/** Make the ctx objects' scalar fields current for the loaded car. */
+function _syncActiveCarCtx() {
+  _saveCarCtx(_activeCarCtx);
+}
 
 function createSmallFireEffect() {
   const count = FLAME_EFFECT_PARTICLE_COUNT;
@@ -2211,7 +2418,31 @@ function loadKitchenCarOnTable() {
   loader.load(
     officeAsset("car-game14.gltf"),
     (carGltf) => {
-      const carScene = carGltf.scene;
+      const pristineCarScene = carGltf.scene;
+      // Clone before the player build mutates materials / hierarchy so every
+      // AI car starts from the exact same source model.
+      const aiCarScenes = ARENA_AI_CARS.map(() => pristineCarScene.clone(true));
+      _playerCarCtx.isPlayer = true;
+      const spawns = computeArenaSpawns();
+      buildArenaCar(pristineCarScene, {
+        player: true,
+        spawnOffsetX: spawns.player.x,
+        spawnOffsetZ: spawns.player.z,
+        spawnAngle: spawns.player.angle,
+      });
+      spawnArenaAiCars(aiCarScenes, spawns.ai);
+    },
+    undefined,
+    (err) => console.error("[MeetingRoom] Car GLTF load failed.", err),
+  );
+}
+
+/**
+ * Builds one car instance from a car GLTF scene into the currently loaded car
+ * context. The player and the AI cars all go through this same function.
+ */
+function buildArenaCar(carScene, opts = {}) {
+      const isPlayer = !!opts.player;
       const carAirInChromeMat = new THREE.MeshPhysicalMaterial({
         color: 0xc8ccd0,
         metalness: 0.9,
@@ -2232,6 +2463,8 @@ function loadKitchenCarOnTable() {
         envMapIntensity: 1.0,
       });
       applySceneEnvironmentToMaterial(carAirInRedPaintMat);
+      if (opts.paintColor != null) carAirInRedPaintMat.color.setHex(opts.paintColor);
+      const bodyPaintCache = new Map();
       carScene.visible = true;
       carScene.traverse((node) => {
         if (isCarPhysicsPart(node.name)) {
@@ -2245,6 +2478,22 @@ function loadKitchenCarOnTable() {
         for (const mat of mats) {
           if (!mat || (!mat.isMeshStandardMaterial && !mat.isMeshPhysicalMaterial)) continue;
           if (mat.metalness > 0.7) mat.metalness = 0.22;
+        }
+        if (opts.paintColor != null) {
+          // AI cars: same body material, own color (materials are shared by clone()).
+          const recolor = (mat) => {
+            if (!mat || !/^carBody/i.test(mat.name || "")) return mat;
+            let painted = bodyPaintCache.get(mat);
+            if (!painted) {
+              painted = mat.clone();
+              painted.color.setHex(opts.paintColor);
+              bodyPaintCache.set(mat, painted);
+            }
+            return painted;
+          };
+          node.material = Array.isArray(node.material)
+            ? node.material.map(recolor)
+            : recolor(node.material);
         }
         if (node.name === "mainRearBrakeLights") {
           node._brakeMat = new THREE.MeshStandardMaterial({
@@ -2426,14 +2675,14 @@ function loadKitchenCarOnTable() {
         CAR_SCALE_MULTIPLIER;
       car.scale.set(carScale, carScale, carScale);
       storedCarScale = carScale;
-      fitCarShadowCamera();
+      if (isPlayer) fitCarShadowCamera();
       for (const ef of exhaustEffects) {
         ef.points.scale.setScalar(kitchenMatchedFlameVisualScale());
         ef.points.material.uniforms.uSize.value = kitchenMatchedFlameSize();
       }
       carState.maxSpeed = Math.max(1.8, Math.min(4.8, tableMinSize * 0.85));
-      const spawnX = tablePlateCenter.x;
-      const spawnZ = tablePlateCenter.z;
+      const spawnX = tablePlateCenter.x + (opts.spawnOffsetX || 0);
+      const spawnZ = tablePlateCenter.z + (opts.spawnOffsetZ || 0);
       car.position.set(spawnX, tableSurfaceY, spawnZ);
       car.quaternion.identity();
       carState.angle = 0;
@@ -2456,9 +2705,20 @@ function loadKitchenCarOnTable() {
       car.position.copy(tableSpawn);
       car.updateMatrixWorld(true);
       setupCarPhysicsBody();
-      attachCarHeadTailSpotLights(car);
-      setupTableLightReflections(car);
+      carSpawnAngle = opts.spawnAngle || 0;
+      if (carSpawnAngle) {
+        carState.angle = carSpawnAngle;
+        car.quaternion.setFromAxisAngle(_flatUp, carSpawnAngle);
+        car.updateMatrixWorld(true);
+        syncCarBodyFromMesh();
+      }
+      if (isPlayer) {
+        attachCarHeadTailSpotLights(car);
+        setupTableLightReflections(car);
+      }
       setupCarHitSparks();
+      _activeCarCtx.ready = true;
+      if (!isPlayer) return;
       _carFollowCam = false;
       controls.enabled = true;
       controls.minDistance = 0.4;
@@ -2466,10 +2726,6 @@ function loadKitchenCarOnTable() {
       if (_model) frameMeetingRoomInterior(_model);
       _carReady = true;
       applyLightBlend(lightBlend);
-    },
-    undefined,
-    (err) => console.error("[MeetingRoom] Car GLTF load failed.", err),
-  );
 }
 
 function resize() {
@@ -2488,16 +2744,6 @@ const _mountForResize = getMeetingRoomSceneMount();
 if (_mountForResize && _mountForResize !== document.body) {
   const _meetingRoomResizeObserver = new ResizeObserver(() => resize());
   _meetingRoomResizeObserver.observe(_mountForResize);
-}
-
-function placeAxesOnTable(root) {
-  const table = root.getObjectByName("tablePlate");
-  if (!table) return;
-  table.updateWorldMatrix(true, true);
-  const box = new THREE.Box3().setFromObject(table);
-  if (box.isEmpty()) return;
-  const center = box.getCenter(new THREE.Vector3());
-  axesGroup.position.set(center.x, box.max.y + 0.02, center.z);
 }
 
 function firstSourceColor(root, names) {
@@ -2909,6 +3155,125 @@ function enableDoubleSidedFaces(root) {
   });
 }
 
+/**
+ * One of the camera's 90° orbit stops sits inside `concreteColumn`. Drawn
+ * double-sided, its inner walls then fill the screen. The column is a closed,
+ * outward-wound solid, so drawing only its front faces looks identical from
+ * outside while letting the camera see straight through when it is inside.
+ * Its own copy of the (shared) material keeps every map and colour; shadows
+ * stay double-sided as before.
+ */
+function makeColumnCameraPassable(root) {
+  const column = root.getObjectByName("concreteColumn");
+  if (!column) return;
+  column.traverse((node) => {
+    if (!node.isMesh) return;
+    const toFront = (mat) => {
+      if (!mat) return mat;
+      const own = mat.clone();
+      own.side = THREE.FrontSide;
+      own.shadowSide = THREE.DoubleSide;
+      own.needsUpdate = true;
+      // Keep receiving the captured room reflection like the original.
+      if (_reflectiveMats.includes(mat)) _reflectiveMats.push(own);
+      return own;
+    };
+    node.material = Array.isArray(node.material)
+      ? node.material.map(toFront)
+      : toFront(node.material);
+  });
+}
+
+// --- chairs around the tablePlate ------------------------------------------
+const CHAIR_PARTS = ["chairSeat", "chairFrame", "chairAxis", "chairWheels"];
+const CHAIRS_PER_SIDE = 3;
+const CHAIR_YAW_JITTER = THREE.MathUtils.degToRad(5);
+
+/**
+ * Replaces the single modelled chair with 12 instanced chairs, 3 per table
+ * side. Each part (seat / frame / axis / wheels) becomes one InstancedMesh that
+ * reuses the original geometry and material, so all 12 chairs cost 4 draw
+ * calls. Every chair is the original chair moved rigidly: its parts keep the
+ * exact layout they have around the original chair's wheel-base centre.
+ */
+function arrangeChairsAroundTable(root) {
+  const table = root.getObjectByName("tablePlate");
+  const parts = CHAIR_PARTS.map((name) => root.getObjectByName(name));
+  if (!table || parts.some((m) => !m || !m.isMesh)) return;
+  root.updateMatrixWorld(true);
+  const tableBox = new THREE.Box3().setFromObject(table);
+  const center = tableBox.getCenter(new THREE.Vector3());
+  const hx = (tableBox.max.x - tableBox.min.x) * 0.5;
+  const hz = (tableBox.max.z - tableBox.min.z) * 0.5;
+  // Chair pivot = centre of the wheel base (its footprint on the floor).
+  const pivot = new THREE.Box3()
+    .setFromObject(parts[3])
+    .getCenter(new THREE.Vector3());
+  // Which table side the reference chair sits at, and how far past that edge.
+  const gapX = Math.abs(pivot.x - center.x) - hx;
+  const gapZ = Math.abs(pivot.z - center.z) - hz;
+  let n0x = 0;
+  let n0z = 0;
+  let edgeGap;
+  if (gapZ >= gapX) {
+    n0z = Math.sign(pivot.z - center.z) || 1;
+    edgeGap = gapZ;
+  } else {
+    n0x = Math.sign(pivot.x - center.x) || 1;
+    edgeGap = gapX;
+  }
+  // World -> reference-chair frame (pivot at origin, its side's normal on +Z).
+  const toChair = new THREE.Matrix4()
+    .makeRotationY(-Math.atan2(n0x, n0z))
+    .multiply(new THREE.Matrix4().makeTranslation(-pivot.x, 0, -pivot.z));
+  const frames = [];
+  const sides = [
+    [0, 1],
+    [1, 0],
+    [0, -1],
+    [-1, 0],
+  ];
+  const _r = new THREE.Matrix4();
+  for (const [nx, nz] of sides) {
+    const half = nx !== 0 ? hx : hz;
+    const sideLen = (nx !== 0 ? hz : hx) * 2;
+    const tx = -nz;
+    const tz = nx;
+    const facing = Math.atan2(nx, nz);
+    for (let k = 0; k < CHAIRS_PER_SIDE; k++) {
+      // Even spacing, symmetric about the side's midpoint (-L/3, 0, +L/3).
+      const along = (k - (CHAIRS_PER_SIDE - 1) / 2) * (sideLen / CHAIRS_PER_SIDE);
+      const x = center.x + nx * (half + edgeGap) + tx * along;
+      const z = center.z + nz * (half + edgeGap) + tz * along;
+      const yaw = facing + (Math.random() * 2 - 1) * CHAIR_YAW_JITTER;
+      frames.push(
+        new THREE.Matrix4()
+          .makeTranslation(x, 0, z)
+          .multiply(_r.makeRotationY(yaw))
+          .multiply(toChair),
+      );
+    }
+  }
+  const rootInv = root.matrixWorld.clone().invert();
+  const m = new THREE.Matrix4();
+  for (const part of parts) {
+    const inst = new THREE.InstancedMesh(part.geometry, part.material, frames.length);
+    inst.name = part.name + "Instances";
+    inst.castShadow = part.castShadow;
+    inst.receiveShadow = part.receiveShadow;
+    inst.renderOrder = part.renderOrder;
+    for (let i = 0; i < frames.length; i++) {
+      m.multiplyMatrices(frames[i], part.matrixWorld).premultiply(rootInv);
+      inst.setMatrixAt(i, m);
+    }
+    inst.instanceMatrix.needsUpdate = true;
+    inst.computeBoundingBox();
+    inst.computeBoundingSphere();
+    root.add(inst);
+    part.removeFromParent();
+  }
+}
+
 function attachMainPanelLights(root) {
   for (const name of ["mainLightLeft", "mainLightRight"]) {
     const mesh = root.getObjectByName(name);
@@ -3230,8 +3595,7 @@ function setupTablePlateReflector(root) {
   tableReflectorBlur = createTableReflectorBlur(renderTarget);
   reflector.material.uniforms.tDiffuse.value = tableReflectorBlur.texture;
   const tableBase = root.getObjectByName("tableBaseBox");
-  const restoreReflectorHelpers = (axesWas) => {
-    axesGroup.visible = axesWas;
+  const restoreReflectorHelpers = () => {
     table.visible = true;
     if (tableBase) tableBase.visible = true;
     for (let i = 0; i < tableLightGlows.length; i++) {
@@ -3252,8 +3616,6 @@ function setupTablePlateReflector(root) {
     carShadowLight.castShadow = true;
   };
   reflector.onBeforeRender = function (renderer, scene, camera) {
-    const axesWas = axesGroup.visible;
-    axesGroup.visible = false;
     table.visible = false;
     if (tableBase) tableBase.visible = false;
     for (let i = 0; i < tableLightGlows.length; i++) {
@@ -3279,7 +3641,7 @@ function setupTablePlateReflector(root) {
     _reflNormal.set(0, 0, 1).applyMatrix4(_reflRotation);
     _reflView.subVectors(_reflWorldPos, _reflCamWorldPos);
     if (_reflView.dot(_reflNormal) > 0) {
-      restoreReflectorHelpers(axesWas);
+      restoreReflectorHelpers();
       return;
     }
 
@@ -3338,7 +3700,7 @@ function setupTablePlateReflector(root) {
     renderer.shadowMap.autoUpdate = currentShadowAutoUpdate;
     renderer.setRenderTarget(currentRenderTarget);
     reflector.visible = true;
-    restoreReflectorHelpers(axesWas);
+    restoreReflectorHelpers();
   };
   scene.add(reflector);
   tableReflector = reflector;
@@ -4033,6 +4395,7 @@ function _sparkSyncResolution() {
   const w = renderer.domElement.width;
   const h = renderer.domElement.height;
   const sparks = [_freeCable && _freeCable.spark, _carHitSpark];
+  for (let i = 0; i < arenaCars.length; i++) sparks.push(arenaCars[i]._carHitSpark);
   for (let i = 0; i < sparks.length; i++) {
     const spark = sparks[i];
     if (!spark || !spark.boltMat) continue;
@@ -4503,10 +4866,10 @@ function setupCarHitSparks() {
     localBox,
     localCenter,
     localSize,
-    radius: extent * 0.58,
-    jagMax: extent * 0.09,
+    radius: extent * CAR_SPARK_REACH,
+    jagMax: extent * CAR_SPARK_JAG,
     minLen: extent * 0.035,
-    width: 7.2,
+    width: CAR_SPARK_WIDTH,
     intensity: 0,
     flash: 0,
     flashT: 0,
@@ -4561,6 +4924,7 @@ function stopCarHitSparks() {
 function updateCarHitSparks(dt) {
   const spark = _carHitSpark;
   if (!spark || !spark.active) return;
+  spark.roomDrive = 0;
   if (dt > 0) spark.age += dt;
   spark.group.userData.carSparkAge = spark.age;
   spark.group.userData.carSparkActive = spark.active;
@@ -4623,8 +4987,8 @@ function updateCarHitSparks(dt) {
       const s = spark.seed + i * 47;
       _carSparkPointOnBox(box, s, _carSparkA);
       _carSparkPointOnBox(box, s + 9, _carSparkB);
-      _carSparkA.sub(center).multiplyScalar(1.12).add(center);
-      _carSparkB.sub(center).multiplyScalar(1.1).add(center);
+      _carSparkA.sub(center).multiplyScalar(CAR_SPARK_SURFACE_PUSH).add(center);
+      _carSparkB.sub(center).multiplyScalar(CAR_SPARK_SURFACE_PUSH).add(center);
       L.ox = _carSparkA.x;
       L.oy = _carSparkA.y;
       L.oz = _carSparkA.z;
@@ -4652,24 +5016,34 @@ function updateCarHitSparks(dt) {
     }
   }
   const crackle = 0.7 + 0.3 * _sparkHash(spark.flickSeed);
-  spark.boltMat.uniforms.uIntensity.value = live;
-  spark.boltMat.uniforms.uFlash.value = spark.flash * crackle;
+  spark.boltMat.uniforms.uIntensity.value = live * CAR_SPARK_BRIGHTNESS;
+  spark.boltMat.uniforms.uFlash.value = spark.flash * crackle * CAR_SPARK_BRIGHTNESS;
   spark.boltMat.uniforms.uWidth.value = spark.width * (0.9 + 0.28 * crackle);
   spark.boltMat.uniforms.uOpacity.value = Math.min(
     1,
     fade * (0.55 + live * 0.6 + spark.flash * 0.25),
   );
   spark.boltMat.uniforms.uGlow.value =
-    fade * (0.55 + live * 0.5 + spark.flash * 0.4);
+    fade * (0.55 + live * 0.5 + spark.flash * 0.4) * CAR_SPARK_GLOW;
   const worldScale = Math.max(0.02, car.scale.x);
   spark.light.intensity =
     fade *
     (live * 0.32 + spark.flash * 0.65) *
     crackle *
-    (1.15 - lightBlend * 0.35);
+    (1.15 - lightBlend * 0.35) *
+    CAR_SPARK_LIGHT;
   spark.light.distance = Math.max(0.45, spark.radius * worldScale * 16);
+  // Same envelope / flicker as the arcs: feeds the shared room shock light.
+  spark.roomDrive = fade * (live * 0.3 + spark.flash * 1.0) * crackle;
+  spark.roomFlash = spark.flash * crackle;
   spark.quadCount = 0;
-  const minY = tableSurfaceY + 0.003;
+  // Arcs may not dip through the surface the car is on: the tablePlate while
+  // the car is on it, the floor once it has gone over the edge (so the whole
+  // effect falls with the car instead of being flattened at table height).
+  const onTable =
+    (carPhysState === CAR_PHYS.DRIVING || carPhysState === CAR_PHYS.IMPACT) &&
+    !isCarOffTablePlate();
+  const minY = (onTable ? tableSurfaceY : floorTopY) + 0.003;
   const maxGen = live > 0.72 ? 2 : 1;
   for (let i = 0; i < spark.leaders.length; i++) {
     const L = spark.leaders[i];
@@ -5343,7 +5717,7 @@ function updateFreeCableAssembly(dt) {
       poseCableHead(cable, liveTip, pts, alert);
     }
   }
-  if (dt > 0) updateCableCarImpact(dt);
+  if (dt > 0) updateCableCarImpactAll(dt);
   updateFreeCableSparks(cable, dt, alert);
 }
 
@@ -5497,7 +5871,6 @@ function captureRoomReflections(root) {
   });
   const cubeCam = new THREE.CubeCamera(0.12, 40, cubeRT);
   cubeCam.position.copy(pos);
-  axesGroup.visible = false;
   if (tableReflector) tableReflector.visible = false;
   const sparkGroup = _freeCable && _freeCable.spark && _freeCable.spark.group;
   const carSparkGroup = _carHitSpark && _carHitSpark.group;
@@ -5508,7 +5881,6 @@ function captureRoomReflections(root) {
   if (sparkGroup) sparkGroup.visible = true;
   if (carSparkGroup) carSparkGroup.visible = carSparkWas;
   if (tableReflector) tableReflector.visible = true;
-  axesGroup.visible = true;
   const pmrem = new THREE.PMREMGenerator(renderer);
   const probe = pmrem.fromCubemap(cubeRT.texture).texture;
   pmrem.dispose();
@@ -5913,12 +6285,22 @@ function frameMeetingRoomInterior(root) {
   camera.near = 0.05;
   camera.far = 80;
   camera.updateProjectionMatrix();
-  camera.position.set(target.x + 3.8, target.y + 0.9, target.z);
-  controls.target.copy(target);
+  // Arena view (matches the reference framing): orbit radius 3.8 around the
+  // tablePlate centre, camera a little higher, aimed above the table centre so
+  // the table sits in the lower part of the frame with the back wall in view.
+  camera.position.set(
+    target.x + ARENA_CAM_RADIUS,
+    target.y + ARENA_CAM_HEIGHT,
+    target.z,
+  );
+  controls.target.set(target.x, target.y + ARENA_CAM_AIM_LIFT, target.z);
   controls.minDistance = 0.4;
   controls.maxDistance = 12;
   controls.update();
 }
+const ARENA_CAM_RADIUS = 3.8;
+const ARENA_CAM_HEIGHT = 1.0;
+const ARENA_CAM_AIM_LIFT = 0.55;
 
 function loadMeetingRoom() {
   const screenMap = new THREE.TextureLoader().load(
@@ -6009,6 +6391,8 @@ function loadMeetingRoom() {
         applyBanjoFigPlantMaterial(_model, plantMaps);
         applyPlantGroundTexture(_model, plantGroundMap);
         enableDoubleSidedFaces(_model);
+        makeColumnCameraPassable(_model);
+        arrangeChairsAroundTable(_model);
         scene.add(_model);
         captureTableDriveSurface(_model);
         setupFreeCableAssembly(_model);
@@ -6021,7 +6405,6 @@ function loadMeetingRoom() {
         repeatWallPatternAlongZ(_model, "wallFrontPattern", "wallFront");
         repeatWallLeftPatternAlongNegZ(_model);
         frameMeetingRoomInterior(_model);
-        placeAxesOnTable(_model);
         setupTablePlateReflector(_model);
         applyLightBlend(lightBlend);
         loadKitchenCarOnTable();
@@ -6049,6 +6432,1116 @@ function loadMeetingRoom() {
   );
 }
 
+// ---------------------------------------------------------------------------
+// 3-car battle arena: AI opponents, car-to-car bumps, multi-car cable targeting
+// ---------------------------------------------------------------------------
+/** side: -1 = far-left corner, +1 = far-right corner, as seen from the start camera. */
+const ARENA_AI_CARS = [
+  { name: "ArenaCarCyan", color: 0x1ec8ff, side: -1 },
+  { name: "ArenaCarGold", color: 0xffc43a, side: 1 },
+];
+/** Start layout as fractions of the table's extent along the camera's view axes. */
+const ARENA_SPAWN_PLAYER_DEPTH = 0.62;
+const ARENA_SPAWN_CORNER_DEPTH = 0.72;
+const ARENA_SPAWN_CORNER_WIDTH = 0.72;
+const ARENA_SPAWN_EDGE_CLEAR = 0.16;
+const CAR_MASS = 1.8;
+const CAR_BUMP_RESTITUTION = 0.58;
+const CAR_BUMP_FRICTION = 0.12;
+const CAR_BUMP_SLOP = 0.0015;
+/** Closing speed above which a hit restarts a (cable-)sliding car's impact timer. */
+const CAR_BUMP_RESET_SPEED = 0.6;
+/** How fast a driving car's collision push (sideways slide / spin) dies out, 1/s. */
+const CAR_BUMP_SLIDE_DECAY = 2.8;
+const CAR_BUMP_SPIN_DECAY = 3.2;
+/**
+ * Directional resistance of the car being pushed, as an effective-mass factor:
+ * pushed along its own length (from behind / head-on) it resists hard, pushed
+ * from the side it gives way easily. Angles in between blend smoothly (cos²).
+ */
+const CAR_PUSH_RESIST_ALONG = 2.4;
+const CAR_PUSH_RESIST_SIDE = 0.65;
+
+/**
+ * Start positions from the camera's actual view: the player at the front edge
+ * nearest the viewer (facing into the table), the AI cars in the far-left and
+ * far-right corners (facing the table centre). Offsets are from the table centre.
+ */
+function computeArenaSpawns() {
+  let fx = controls.target.x - camera.position.x;
+  let fz = controls.target.z - camera.position.z;
+  const fl = Math.hypot(fx, fz);
+  if (fl > 1e-5) {
+    fx /= fl;
+    fz /= fl;
+  } else {
+    fx = -1;
+    fz = 0;
+  }
+  // Screen-right on the table plane = forward x up.
+  const rx = -fz;
+  const rz = fx;
+  const hx = tablePlateHalfX;
+  const hz = tablePlateHalfZ;
+  const depth = Math.abs(fx) * hx + Math.abs(fz) * hz;
+  const width = Math.abs(rx) * hx + Math.abs(rz) * hz;
+  const clear = ARENA_SPAWN_EDGE_CLEAR * Math.min(hx, hz);
+  const fit = (ox, oz) => {
+    const lx = Math.max(0.01, hx - clear);
+    const lz = Math.max(0.01, hz - clear);
+    const k = Math.min(1, lx / Math.max(1e-6, Math.abs(ox)), lz / Math.max(1e-6, Math.abs(oz)));
+    return { x: ox * k, z: oz * k };
+  };
+  const pd = ARENA_SPAWN_PLAYER_DEPTH * depth;
+  const player = fit(-fx * pd, -fz * pd);
+  player.angle = Math.atan2(fx, fz);
+  const cd = ARENA_SPAWN_CORNER_DEPTH * depth;
+  const cw = ARENA_SPAWN_CORNER_WIDTH * width;
+  const ai = ARENA_AI_CARS.map((cfg) => {
+    const pos = fit(fx * cd + rx * cw * cfg.side, fz * cd + rz * cw * cfg.side);
+    pos.angle = Math.atan2(-pos.x, -pos.z);
+    return pos;
+  });
+  return { player, ai };
+}
+
+function spawnArenaAiCars(carScenes, spawns) {
+  for (let i = 0; i < ARENA_AI_CARS.length; i++) {
+    const cfg = ARENA_AI_CARS[i];
+    const group = new THREE.Group();
+    group.name = cfg.name;
+    group.rotation.order = "YXZ";
+    scene.add(group);
+    const ctx = _newCarCtx(group, {
+      forward: false,
+      reverse: false,
+      left: false,
+      right: false,
+      brake: false,
+    });
+    ctx.ai = createArenaAiBrain();
+    const sp = spawns[i];
+    withCar(ctx, () =>
+      buildArenaCar(carScenes[i], {
+        player: false,
+        paintColor: cfg.color,
+        spawnOffsetX: sp.x,
+        spawnOffsetZ: sp.z,
+        spawnAngle: sp.angle,
+      }),
+    );
+    if (ctx.ready) arenaCars.push(ctx);
+  }
+}
+
+// --- car-to-car collisions ---------------------------------------------------
+
+function _carCanBump() {
+  return (
+    !!carPhysBody &&
+    (carPhysState === CAR_PHYS.DRIVING || carPhysState === CAR_PHYS.IMPACT)
+  );
+}
+
+/** Planar (XZ) kinematics of the loaded car as an oriented box. */
+function _readCarKinematics(out) {
+  const a = carState.angle;
+  out.x = carPhysBody.position.x;
+  out.z = carPhysBody.position.z;
+  out.a = a;
+  out.hx = carPhysHalf.x;
+  out.hz = carPhysHalf.z;
+  out.ux = Math.cos(a);
+  out.uz = -Math.sin(a);
+  out.fx = Math.sin(a);
+  out.fz = Math.cos(a);
+  out.driving = carPhysState === CAR_PHYS.DRIVING;
+  if (out.driving) {
+    out.vx = out.fx * carState.speed + carBumpVelX;
+    out.vz = out.fz * carState.speed + carBumpVelZ;
+    out.w = carBumpYaw;
+  } else {
+    out.vx = carPhysBody.velocity.x;
+    out.vz = carPhysBody.velocity.z;
+    out.w = carPhysBody.angularVelocity.y;
+  }
+  const w2 = out.hx * 2;
+  const l2 = out.hz * 2;
+  out.inertia = (CAR_MASS * (w2 * w2 + l2 * l2)) / 12;
+  out.resAlong = 1;
+  out.resSide = 1;
+  return out;
+}
+
+/** Collision push on a driving car: rides on top of its own driving, then decays. */
+function integrateCarBump(dt) {
+  if (carBumpVelX === 0 && carBumpVelZ === 0 && carBumpYaw === 0) return;
+  car.position.x += carBumpVelX * dt;
+  car.position.z += carBumpVelZ * dt;
+  carState.angle += carBumpYaw * dt;
+  const kv = Math.exp(-CAR_BUMP_SLIDE_DECAY * dt);
+  const kw = Math.exp(-CAR_BUMP_SPIN_DECAY * dt);
+  carBumpVelX *= kv;
+  carBumpVelZ *= kv;
+  carBumpYaw *= kw;
+  if (Math.hypot(carBumpVelX, carBumpVelZ) < 0.01) {
+    carBumpVelX = 0;
+    carBumpVelZ = 0;
+  }
+  if (Math.abs(carBumpYaw) < 0.02) carBumpYaw = 0;
+}
+
+function clearCarBump() {
+  carBumpVelX = 0;
+  carBumpVelZ = 0;
+  carBumpYaw = 0;
+}
+
+/** Inverse effective mass of car K along direction (dx, dz), with directional resistance. */
+function _carInvMassAlong(K, dx, dz) {
+  const a = K.fx * dx + K.fz * dz;
+  const l = K.ux * dx + K.uz * dz;
+  return ((a * a) / K.resAlong + (l * l) / K.resSide) / CAR_MASS;
+}
+
+/** Velocity change of car K for planar impulse (jx, jz): anisotropic mass tensor. */
+function _carApplyImpulse(K, jx, jz, sign) {
+  const a = (K.fx * jx + K.fz * jz) / K.resAlong;
+  const l = (K.ux * jx + K.uz * jz) / K.resSide;
+  K.vx += (sign * (K.fx * a + K.ux * l)) / CAR_MASS;
+  K.vz += (sign * (K.fz * a + K.uz * l)) / CAR_MASS;
+}
+
+function _obbRadius(K, nx, nz) {
+  return (
+    K.hx * Math.abs(K.ux * nx + K.uz * nz) + K.hz * Math.abs(K.fx * nx + K.fz * nz)
+  );
+}
+
+function _addCornersInside(P, Q, acc) {
+  for (let su = -1; su <= 1; su += 2) {
+    for (let sf = -1; sf <= 1; sf += 2) {
+      const cx = P.x + P.ux * P.hx * su + P.fx * P.hz * sf;
+      const cz = P.z + P.uz * P.hx * su + P.fz * P.hz * sf;
+      const rx = cx - Q.x;
+      const rz = cz - Q.z;
+      const lu = rx * Q.ux + rz * Q.uz;
+      const lf = rx * Q.fx + rz * Q.fz;
+      if (Math.abs(lu) <= Q.hx + 1e-4 && Math.abs(lf) <= Q.hz + 1e-4) {
+        acc.x += cx;
+        acc.z += cz;
+        acc.n += 1;
+      }
+    }
+  }
+}
+
+/** SAT overlap of two car boxes; normal points from A to B. */
+function _carBoxOverlap(A, B, res) {
+  const dx = B.x - A.x;
+  const dz = B.z - A.z;
+  let best = Infinity;
+  let bnx = 0;
+  let bnz = 0;
+  const axes = [A.ux, A.uz, A.fx, A.fz, B.ux, B.uz, B.fx, B.fz];
+  for (let i = 0; i < 8; i += 2) {
+    const nx = axes[i];
+    const nz = axes[i + 1];
+    const d = dx * nx + dz * nz;
+    const o = _obbRadius(A, nx, nz) + _obbRadius(B, nx, nz) - Math.abs(d);
+    if (o <= 0) return false;
+    if (o < best) {
+      best = o;
+      const sg = d < 0 ? -1 : 1;
+      bnx = nx * sg;
+      bnz = nz * sg;
+    }
+  }
+  res.nx = bnx;
+  res.nz = bnz;
+  res.depth = best;
+  const acc = { x: 0, z: 0, n: 0 };
+  _addCornersInside(B, A, acc);
+  _addCornersInside(A, B, acc);
+  if (acc.n > 0) {
+    res.px = acc.x / acc.n;
+    res.pz = acc.z / acc.n;
+  } else {
+    res.px = (A.x + B.x) * 0.5;
+    res.pz = (A.z + B.z) * 0.5;
+  }
+  return true;
+}
+
+/**
+ * Puts the loaded car into the existing IMPACT slide state with the given
+ * post-collision velocity — the same coast/decay/settle path a cable hit uses,
+ * so a pushed car slides, can fall off the table, and recovers to driving.
+ */
+function beginCarBump(vx, vz, yawRate, hitSpeed) {
+  if (!carPhysBody) return;
+  if (carPhysState === CAR_PHYS.IMPACT && !(hitSpeed > CAR_BUMP_RESET_SPEED)) {
+    // Light, continued contact while already sliding: update the slide but keep
+    // its age, so the existing settle / recover-to-driving timing still runs.
+    const spinShare = THREE.MathUtils.clamp(carImpactSpinShare, 0, 1);
+    const linBurst = CABLE_HIT_BURST_TIME * (0.88 + (1 - spinShare) * 0.28);
+    const linDamp = CABLE_HIT_DAMP_TIME * (0.78 + (1 - spinShare) * 0.36);
+    const decay = Math.max(0.08, impactDecay(carImpactAge, linBurst, linDamp, 2));
+    const spdNow = Math.hypot(vx, vz);
+    if (spdNow > 1e-5) _impactKickDir.set(vx / spdNow, 0, vz / spdNow);
+    carImpactLin0 = spdNow / decay;
+    carPhysBody.velocity.x = vx;
+    carPhysBody.velocity.z = vz;
+    return;
+  }
+  if (carPhysState === CAR_PHYS.DRIVING) {
+    makeCarDynamicFromDrive();
+    carPhysState = CAR_PHYS.IMPACT;
+    carPhysBody.linearDamping = 0;
+    carPhysBody.angularDamping = 0;
+    carPhysBody.linearFactor.set(1, 1, 1);
+    carPhysBody.angularFactor.set(0, 1, 0);
+    carPhysBody.collisionFilterMask = PHYS_GROUP_FLOOR;
+    carPhysBody.velocity.y = 0;
+  } else if (carPhysState !== CAR_PHYS.IMPACT) {
+    return;
+  }
+  const spd = Math.hypot(vx, vz);
+  if (spd > 1e-5) _impactKickDir.set(vx / spd, 0, vz / spd);
+  carImpactLin0 = spd;
+  carImpactYaw0 = THREE.MathUtils.clamp(yawRate, -CABLE_HIT_YAW_CAP, CABLE_HIT_YAW_CAP);
+  carImpactSpinShare = 0.5;
+  carImpactAge = 0;
+  carImpactSettle = 0;
+  carPhysBody.force.set(0, 0, 0);
+  carPhysBody.torque.set(0, 0, 0);
+  carPhysBody.velocity.x = vx;
+  carPhysBody.velocity.z = vz;
+  carPhysBody.angularVelocity.set(0, carImpactYaw0, 0);
+  carPhysBody.wakeUp();
+}
+
+function _applyCarBumpResult(K, impulsed, dx, dz, hitSpeed) {
+  if (carPhysState === CAR_PHYS.DRIVING) {
+    // Stay in normal driving so keyboard / AI input keeps working through the
+    // hit: the along-heading part goes into speed, the rest is a decaying push.
+    car.position.x += dx;
+    car.position.z += dz;
+    if (impulsed) {
+      const along = K.vx * K.fx + K.vz * K.fz;
+      const cap = carState.maxSpeed * 1.25;
+      carState.speed = THREE.MathUtils.clamp(along, -cap, cap);
+      carBumpVelX = K.vx - K.fx * along;
+      carBumpVelZ = K.vz - K.fz * along;
+      carBumpYaw = THREE.MathUtils.clamp(K.w, -CABLE_HIT_YAW_CAP, CABLE_HIT_YAW_CAP);
+    }
+    syncCarBodyFromMesh();
+  } else if (carPhysState === CAR_PHYS.IMPACT) {
+    carPhysBody.position.x += dx;
+    carPhysBody.position.z += dz;
+    if (impulsed) beginCarBump(K.vx, K.vz, K.w, hitSpeed);
+    applyImpactYawHeading(0);
+  }
+}
+
+const _kinA = {};
+const _kinB = {};
+const _bumpRes = {};
+
+/**
+ * Directional resistance for the car being pushed. The striker is whichever car
+ * closes faster along the contact normal; the blend between "A pushes B" and
+ * "B pushes A" is smooth so near-equal head-on hits stay symmetric.
+ */
+function _setPushResistance(A, B, nx, nz) {
+  const sA = A.vx * nx + A.vz * nz;
+  const sB = -(B.vx * nx + B.vz * nz);
+  const diff = (sA - sB) / (Math.abs(sA) + Math.abs(sB) + 0.05);
+  const bPushed = _cableSmoothstep(-0.35, 0.35, diff);
+  const weights = [
+    [B, bPushed],
+    [A, 1 - bPushed],
+  ];
+  for (let i = 0; i < 2; i++) {
+    const K = weights[i][0];
+    const w = weights[i][1];
+    K.resAlong = THREE.MathUtils.lerp(1, CAR_PUSH_RESIST_ALONG, w);
+    K.resSide = THREE.MathUtils.lerp(1, CAR_PUSH_RESIST_SIDE, w);
+  }
+}
+
+/**
+ * Bumper-car impulse between two cars, applied at the contact point (so
+ * off-centre hits also spin the car). Each car's mass is direction-dependent:
+ * the pushed car resists being shoved along its length and gives way sideways,
+ * smoothly by the angle between the hit and its heading (see _carInvMassAlong).
+ */
+function _resolveCarPair(cA, cB) {
+  const A = withCar(cA, () => (_carCanBump() ? _readCarKinematics(_kinA) : null));
+  if (!A) return;
+  const B = withCar(cB, () => (_carCanBump() ? _readCarKinematics(_kinB) : null));
+  if (!B) return;
+  if (!_carBoxOverlap(A, B, _bumpRes)) return;
+  const nx = _bumpRes.nx;
+  const nz = _bumpRes.nz;
+  _setPushResistance(A, B, nx, nz);
+  const rAx = _bumpRes.px - A.x;
+  const rAz = _bumpRes.pz - A.z;
+  const rBx = _bumpRes.px - B.x;
+  const rBz = _bumpRes.pz - B.z;
+  const vAx = A.vx + A.w * rAz;
+  const vAz = A.vz - A.w * rAx;
+  const vBx = B.vx + B.w * rBz;
+  const vBz = B.vz - B.w * rBx;
+  const rvx = vBx - vAx;
+  const rvz = vBz - vAz;
+  const vn = rvx * nx + rvz * nz;
+  const wAn = _carInvMassAlong(A, nx, nz);
+  const wBn = _carInvMassAlong(B, nx, nz);
+  let impulsed = false;
+  if (vn < 0) {
+    const cAn = rAz * nx - rAx * nz;
+    const cBn = rBz * nx - rBx * nz;
+    const denom = wAn + wBn + (cAn * cAn) / A.inertia + (cBn * cBn) / B.inertia;
+    const j = (-(1 + CAR_BUMP_RESTITUTION) * vn) / denom;
+    let jx = nx * j;
+    let jz = nz * j;
+    let tx = rvx - vn * nx;
+    let tz = rvz - vn * nz;
+    const tl = Math.hypot(tx, tz);
+    if (tl > 1e-5) {
+      tx /= tl;
+      tz /= tl;
+      const vt = rvx * tx + rvz * tz;
+      const cAt = rAz * tx - rAx * tz;
+      const cBt = rBz * tx - rBx * tz;
+      const dt =
+        _carInvMassAlong(A, tx, tz) +
+        _carInvMassAlong(B, tx, tz) +
+        (cAt * cAt) / A.inertia +
+        (cBt * cBt) / B.inertia;
+      const jt = THREE.MathUtils.clamp(-vt / dt, -CAR_BUMP_FRICTION * j, CAR_BUMP_FRICTION * j);
+      jx += tx * jt;
+      jz += tz * jt;
+    }
+    _carApplyImpulse(A, jx, jz, -1);
+    A.w -= (rAz * jx - rAx * jz) / A.inertia;
+    _carApplyImpulse(B, jx, jz, 1);
+    B.w += (rBz * jx - rBx * jz) / B.inertia;
+    impulsed = true;
+  }
+  // Separate fully, split by how easily each car moves along the normal.
+  const depth = Math.max(0, _bumpRes.depth - CAR_BUMP_SLOP);
+  const shareA = wAn / Math.max(1e-6, wAn + wBn);
+  const pushA = depth * shareA;
+  const pushB = depth - pushA;
+  const hitSpeed = Math.max(0, -vn);
+  if (impulsed) noteCameraImpact(hitSpeed);
+  withCar(cA, () => _applyCarBumpResult(A, impulsed, -nx * pushA, -nz * pushA, hitSpeed));
+  withCar(cB, () => _applyCarBumpResult(B, impulsed, nx * pushB, nz * pushB, hitSpeed));
+}
+
+function resolveArenaCarCollisions() {
+  for (let pass = 0; pass < 2; pass++) {
+    for (let i = 0; i < arenaCars.length; i++) {
+      if (!arenaCars[i].ready) continue;
+      for (let j = i + 1; j < arenaCars.length; j++) {
+        if (!arenaCars[j].ready) continue;
+        _resolveCarPair(arenaCars[i], arenaCars[j]);
+      }
+    }
+  }
+}
+
+// --- AI drivers ----------------------------------------------------------------
+
+function createArenaAiBrain() {
+  return {
+    mode: "hunt",
+    modeT: 0.8 + Math.random() * 1.4,
+    target: null,
+    wanderX: 0,
+    wanderZ: 0,
+    feintDir: 1,
+    noisePhase: Math.random() * Math.PI * 2,
+    noiseFreq: 0.55 + Math.random() * 0.9,
+    noiseAmp: 0.1 + Math.random() * 0.18,
+    aggression: 0.75 + Math.random() * 0.5,
+    stuckT: 0,
+    reverseT: 0,
+    reverseSteer: 1,
+    brakeT: 0,
+    lastState: CAR_PHYS.DRIVING,
+  };
+}
+
+function _arenaCarOnTable(c) {
+  if (!c.ready || !c.carPhysBody) return false;
+  if (c.carPhysState !== CAR_PHYS.DRIVING && c.carPhysState !== CAR_PHYS.IMPACT) {
+    return false;
+  }
+  const p = c.car.position;
+  return (
+    Math.abs(p.x - tablePlateCenter.x) <= tablePlateHalfX &&
+    Math.abs(p.z - tablePlateCenter.z) <= tablePlateHalfZ
+  );
+}
+
+function _arenaCarVelocity(c, out) {
+  if (c.carPhysState === CAR_PHYS.DRIVING) {
+    out.x = Math.sin(c.carState.angle) * c.carState.speed;
+    out.z = Math.cos(c.carState.angle) * c.carState.speed;
+  } else if (c.carPhysBody) {
+    out.x = c.carPhysBody.velocity.x;
+    out.z = c.carPhysBody.velocity.z;
+  } else {
+    out.x = 0;
+    out.z = 0;
+  }
+  return out;
+}
+
+function _aiPickTarget(self) {
+  const me = self.car.position;
+  const reach = Math.max(0.2, Math.min(tablePlateHalfX, tablePlateHalfZ));
+  let best = null;
+  let bestScore = -Infinity;
+  for (let i = 0; i < arenaCars.length; i++) {
+    const c = arenaCars[i];
+    if (c === self || !_arenaCarOnTable(c)) continue;
+    const p = c.car.position;
+    const edge = Math.max(
+      Math.abs(p.x - tablePlateCenter.x) / tablePlateHalfX,
+      Math.abs(p.z - tablePlateCenter.z) / tablePlateHalfZ,
+    );
+    const d = Math.hypot(p.x - me.x, p.z - me.z) / reach;
+    const score =
+      edge * 1.1 + 0.8 / (0.6 + d) + Math.random() * 0.7 + (c.isPlayer ? 0.3 : 0);
+    if (score > bestScore) {
+      bestScore = score;
+      best = c;
+    }
+  }
+  return best;
+}
+
+function _aiPickWanderPoint(b) {
+  b.wanderX = tablePlateCenter.x + (Math.random() * 2 - 1) * tablePlateHalfX * 0.55;
+  b.wanderZ = tablePlateCenter.z + (Math.random() * 2 - 1) * tablePlateHalfZ * 0.55;
+}
+
+function _wrapAngle(a) {
+  a = (a + Math.PI) % (Math.PI * 2);
+  if (a < 0) a += Math.PI * 2;
+  return a - Math.PI;
+}
+
+const _aiTargetVel = { x: 0, z: 0 };
+
+/** Runs inside withCar(self): sets this AI car's own key state, then updateCar drives it. */
+function _arenaAiThink(self, dt) {
+  const k = keys;
+  const b = self.ai;
+  k.forward = false;
+  k.reverse = false;
+  k.left = false;
+  k.right = false;
+  k.brake = false;
+  if (!carPhysBody || carPhysState !== CAR_PHYS.DRIVING) {
+    b.lastState = carPhysState;
+    b.stuckT = 0;
+    return;
+  }
+  if (b.lastState === CAR_PHYS.IMPACT) {
+    // Just recovered from a hit: sometimes back off, sometimes pick a new victim.
+    if (Math.random() < 0.5) {
+      b.mode = "hunt";
+      b.target = null;
+      b.modeT = 1.4 + Math.random() * 2;
+    }
+    if (Math.random() < 0.35) {
+      b.reverseT = 0.22 + Math.random() * 0.35;
+      b.reverseSteer = Math.random() < 0.5 ? -1 : 1;
+    }
+  }
+  b.lastState = carPhysState;
+
+  const px = car.position.x;
+  const pz = car.position.z;
+  const a = carState.angle;
+  const fx = Math.sin(a);
+  const fz = Math.cos(a);
+  const spd = carState.speed;
+  const cx = tablePlateCenter.x;
+  const cz = tablePlateCenter.z;
+  const hxT = tablePlateHalfX;
+  const hzT = tablePlateHalfZ;
+  const carLen = Math.max(0.05, halfL * storedCarScale * 2);
+
+  b.modeT -= dt;
+  if (b.modeT <= 0) {
+    const r = Math.random();
+    if (r < 0.72) {
+      b.mode = "hunt";
+      b.target = _aiPickTarget(self);
+      b.modeT = 1.6 + Math.random() * 3.2;
+    } else if (r < 0.9) {
+      b.mode = "wander";
+      _aiPickWanderPoint(b);
+      b.modeT = 0.9 + Math.random() * 1.8;
+    } else {
+      b.mode = "feint";
+      b.feintDir = Math.random() < 0.5 ? -1 : 1;
+      b.modeT = 0.35 + Math.random() * 0.5;
+    }
+  }
+  if (b.mode === "hunt" && (!b.target || !_arenaCarOnTable(b.target))) {
+    b.target = _aiPickTarget(self);
+    if (!b.target) {
+      b.mode = "wander";
+      _aiPickWanderPoint(b);
+    }
+  }
+
+  if (b.reverseT > 0) {
+    b.reverseT -= dt;
+    k.reverse = true;
+    if (b.reverseSteer < 0) k.left = true;
+    else k.right = true;
+    return;
+  }
+
+  let tx = cx;
+  let tz = cz;
+  let charge = false;
+  if (b.mode === "hunt" && b.target) {
+    const tp = b.target.car.position;
+    _arenaCarVelocity(b.target, _aiTargetVel);
+    const tnx = (tp.x - cx) / hxT;
+    const tnz = (tp.z - cz) / hzT;
+    // Push the victim toward its nearest edge, blended with the radial direction.
+    let ex = 0;
+    let ez = 0;
+    if ((1 - Math.abs(tnx)) * hxT < (1 - Math.abs(tnz)) * hzT) ex = Math.sign(tnx) || 1;
+    else ez = Math.sign(tnz) || 1;
+    let rx = tp.x - cx;
+    let rz = tp.z - cz;
+    const rl = Math.hypot(rx, rz);
+    if (rl > 1e-4) {
+      rx /= rl;
+      rz /= rl;
+    }
+    let pdx = ex * 0.7 + rx * 0.3;
+    let pdz = ez * 0.7 + rz * 0.3;
+    const pl = Math.hypot(pdx, pdz) || 1;
+    pdx /= pl;
+    pdz /= pl;
+    const toX = tp.x - px;
+    const toZ = tp.z - pz;
+    const dist = Math.hypot(toX, toZ);
+    const align = dist > 1e-4 ? (toX * pdx + toZ * pdz) / dist : 1;
+    if (align > 0.45 - b.aggression * 0.25 || dist < carLen * 1.8) {
+      const lead = Math.min(0.5, dist / (Math.abs(spd) + 1.2));
+      tx = tp.x + _aiTargetVel.x * lead;
+      tz = tp.z + _aiTargetVel.z * lead;
+      charge = true;
+    } else {
+      // Circle round to the centre side of the victim first.
+      const back = carLen * 2.2;
+      tx = tp.x - pdx * back;
+      tz = tp.z - pdz * back;
+    }
+  } else if (b.mode === "wander") {
+    tx = b.wanderX;
+    tz = b.wanderZ;
+    if (Math.hypot(tx - px, tz - pz) < carLen * 1.2) b.modeT = 0;
+  }
+  tx = THREE.MathUtils.clamp(tx, cx - hxT * 0.92, cx + hxT * 0.92);
+  tz = THREE.MathUtils.clamp(tz, cz - hzT * 0.92, cz + hzT * 0.92);
+
+  // Edge safety: look ahead along the current heading.
+  const moveSign = spd < -0.05 ? -1 : 1;
+  const lookDist = carLen * 0.7 + Math.abs(spd) * 0.32;
+  const lnx = (px + fx * lookDist * moveSign - cx) / hxT;
+  const lnz = (pz + fz * lookDist * moveSign - cz) / hzT;
+  const lookEdge = Math.max(Math.abs(lnx), Math.abs(lnz));
+  const nnx = (px - cx) / hxT;
+  const nnz = (pz - cz) / hzT;
+  const edge = Math.max(Math.abs(nnx), Math.abs(nnz));
+  let danger = false;
+  if (lookEdge > 0.8) {
+    danger = true;
+    charge = false;
+    tx = cx;
+    tz = cz;
+    const noseOut = fx * nnx + fz * nnz;
+    if (edge > 0.84 && noseOut > 0.25) {
+      b.reverseT = 0.3 + Math.random() * 0.35;
+      b.reverseSteer = Math.random() < 0.5 ? -1 : 1;
+      k.reverse = true;
+      return;
+    }
+    if (spd > carState.maxSpeed * 0.5) k.brake = true;
+  }
+
+  if (b.mode === "feint" && !danger) {
+    if (b.feintDir < 0) k.left = true;
+    else k.right = true;
+    k.forward = true;
+  } else {
+    const want = Math.atan2(tx - px, tz - pz);
+    let diff = _wrapAngle(want - a);
+    diff +=
+      Math.sin(clock.elapsedTime * b.noiseFreq * Math.PI * 2 + b.noisePhase) *
+      b.noiseAmp *
+      (charge ? 0.35 : 1);
+    if (diff > 0.06) k.left = true;
+    else if (diff < -0.06) k.right = true;
+    if (!k.brake) k.forward = true;
+    if (Math.abs(diff) > 2.3 && Math.abs(spd) < 0.6 && !danger && Math.random() < 0.04) {
+      b.reverseT = 0.3 + Math.random() * 0.3;
+      b.reverseSteer = diff > 0 ? 1 : -1;
+    }
+  }
+
+  if (k.forward && Math.abs(spd) < 0.12) b.stuckT += dt;
+  else b.stuckT = Math.max(0, b.stuckT - dt);
+  if (b.stuckT > 0.7) {
+    b.reverseT = 0.4 + Math.random() * 0.5;
+    b.reverseSteer = Math.random() < 0.5 ? -1 : 1;
+    b.stuckT = 0;
+  }
+  if (!charge && !danger && b.brakeT <= 0 && Math.random() < dt * 0.15) {
+    b.brakeT = 0.12 + Math.random() * 0.2;
+  }
+  if (b.brakeT > 0) {
+    b.brakeT -= dt;
+    k.brake = true;
+    k.forward = false;
+  }
+}
+
+function updateArenaAi(dt) {
+  _syncActiveCarCtx();
+  for (let i = 0; i < arenaCars.length; i++) {
+    const c = arenaCars[i];
+    if (!c.ready || !c.ai) continue;
+    withCar(c, () => _arenaAiThink(c, dt));
+  }
+}
+
+// --- multi-car cable targeting ---------------------------------------------------
+
+/** Cars inside the cable's activation radius, in the order they entered it. */
+const _cableEntryOrder = [];
+let _cableTargetCar = null;
+const _cableAimProbe = new THREE.Vector3();
+
+function _carCableDistance(cable) {
+  closestPointOnCarObb(cable.smoothTip, _cableAimProbe);
+  return Math.min(
+    Math.hypot(_cableAimProbe.x - cable.anchorWorld.x, _cableAimProbe.z - cable.anchorWorld.z),
+    Math.hypot(_cableAimProbe.x - cable.smoothTip.x, _cableAimProbe.z - cable.smoothTip.z),
+  );
+}
+
+function selectCableTargetCar() {
+  const cable = _freeCable;
+  if (!cable || !cable.ready) return null;
+  _syncActiveCarCtx();
+  let nearest = null;
+  let nearestDist = Infinity;
+  const inside = [];
+  for (let i = 0; i < arenaCars.length; i++) {
+    const c = arenaCars[i];
+    // Never target a car that has fallen off (or is falling / respawning).
+    if (!_arenaCarOnTable(c)) continue;
+    const d = withCar(c, () => _carCableDistance(cable));
+    if (d < nearestDist) {
+      nearestDist = d;
+      nearest = c;
+    }
+    if (d < FREE_CABLE_ATTACK_OUTER) inside.push({ c, d });
+  }
+  for (let i = _cableEntryOrder.length - 1; i >= 0; i--) {
+    if (!inside.some((e) => e.c === _cableEntryOrder[i])) _cableEntryOrder.splice(i, 1);
+  }
+  inside.sort((p, q) => p.d - q.d);
+  for (let i = 0; i < inside.length; i++) {
+    if (!_cableEntryOrder.includes(inside[i].c)) _cableEntryOrder.push(inside[i].c);
+  }
+  let target =
+    _cableTargetCar && _cableEntryOrder.includes(_cableTargetCar)
+      ? _cableTargetCar
+      : _cableEntryOrder[0] || null;
+  // Nobody in range: aim stays on the nearest car so the cable relaxes to idle
+  // exactly like the single-car version did when its car was out of range.
+  if (!target) target = nearest;
+  if (target !== _cableTargetCar) {
+    cable.contactHeld = false;
+    _cableTargetCar = target;
+  }
+  return target;
+}
+
+function updateArenaCable(dt) {
+  const target = selectCableTargetCar();
+  if (target) {
+    withCar(target, () => updateFreeCableAssembly(dt));
+    return;
+  }
+  const wasReady = _carReady;
+  _carReady = false;
+  try {
+    updateFreeCableAssembly(dt);
+  } finally {
+    _carReady = wasReady;
+  }
+}
+
+/** Cable tip contact is checked against every car (each keeps its own hit latch). */
+function updateCableCarImpactAll(dt) {
+  for (let i = 0; i < arenaCars.length; i++) {
+    const c = arenaCars[i];
+    if (!c.ready) continue;
+    withCar(c, () => updateCableCarImpact(dt));
+  }
+}
+
+function updateArenaCarEffects(dt) {
+  for (let i = 0; i < arenaCars.length; i++) {
+    const c = arenaCars[i];
+    if (!c.ready) continue;
+    withCar(c, () => {
+      updateExhaustEffects(dt);
+      updateCarHitSparks(dt);
+    });
+  }
+  updateShockRoomLight(dt);
+}
+
+/** Moves the shared room light to the strongest active car shock and pulses it with the arcs. */
+function updateShockRoomLight(dt) {
+  _syncActiveCarCtx();
+  let best = null;
+  let bestCar = null;
+  for (let i = 0; i < arenaCars.length; i++) {
+    const c = arenaCars[i];
+    const sp = c._carHitSpark;
+    if (!c.ready || !sp || !sp.active || !(sp.roomDrive > 0)) continue;
+    if (!best || sp.roomDrive > best.roomDrive) {
+      best = sp;
+      bestCar = c.car;
+    }
+  }
+  let target = 0;
+  if (best) {
+    const themeMul = 1.15 - lightBlend * 0.35;
+    target = best.roomDrive * SHOCK_ROOM_PEAK * themeMul;
+    const flash = THREE.MathUtils.clamp(best.roomFlash || 0, 0, 1);
+    shockRoomLight.color.copy(SHOCK_ROOM_COLOR_LOW).lerp(SHOCK_ROOM_COLOR_HIGH, flash);
+    shockRoomLight.distance = THREE.MathUtils.lerp(
+      SHOCK_ROOM_BASE_DIST,
+      SHOCK_ROOM_FLASH_DIST,
+      flash,
+    );
+    shockRoomLight.position.set(
+      bestCar.position.x,
+      bestCar.position.y + SHOCK_ROOM_LIFT,
+      bestCar.position.z,
+    );
+  }
+  // Rises instantly with a flash, dies off quickly but smoothly between flashes / at the end.
+  const prev = shockRoomLight.intensity;
+  const fall = dt > 0 ? prev * Math.exp(-dt * 16) : prev;
+  shockRoomLight.intensity = target >= fall ? target : fall;
+  if (shockRoomLight.intensity < 0.01) shockRoomLight.intensity = 0;
+}
+
+// ---------------------------------------------------------------------------
+// Dynamic arena camera: 90° orbit steps around the tablePlate centre
+// ---------------------------------------------------------------------------
+const CAM_ORBIT_STEP = Math.PI / 2;
+const CAM_ORBIT_DURATION = 0.85;
+const CAM_ORBIT_WAIT_MIN = 6;
+const CAM_ORBIT_WAIT_MAX = 12;
+/** Seconds the director stays out of the way after the user drags / zooms. */
+const CAM_ORBIT_USER_PAUSE = 6;
+/** Random spread added to each candidate view's score (keeps it unpredictable). */
+const CAM_ORBIT_SCORE_NOISE = 0.22;
+
+const _camDirector = {
+  active: false,
+  t: 0,
+  from: 0,
+  to: 0,
+  radius: 0,
+  height: 0,
+  centerY: 0,
+  wait: CAM_ORBIT_WAIT_MIN + Math.random() * (CAM_ORBIT_WAIT_MAX - CAM_ORBIT_WAIT_MIN),
+  userPause: 0,
+  cameFrom: null,
+  postponed: 0,
+};
+
+controls.addEventListener("start", () => {
+  _camDirector.active = false;
+  _camDirector.userPause = CAM_ORBIT_USER_PAUSE;
+});
+
+function cancelCameraDirector() {
+  _camDirector.active = false;
+  _camDirector.cameFrom = null;
+  _camDirector.wait =
+    CAM_ORBIT_WAIT_MIN + Math.random() * (CAM_ORBIT_WAIT_MAX - CAM_ORBIT_WAIT_MIN);
+}
+
+function _camEaseInOut(t) {
+  return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+}
+
+/**
+ * How well the player's car can be seen from a camera at azimuth `theta`
+ * (same orbit radius / height). Higher is better. Considers whether the player
+ * is on the far side of the table, hidden behind another car from that angle,
+ * and whether the player and the nearest opponent are spread across the view.
+ */
+function _scoreArenaView(theta, radius) {
+  _syncActiveCarCtx();
+  const p = _playerCarCtx;
+  if (!_arenaCarOnTable(p)) return 0.5;
+  const cx = tablePlateCenter.x;
+  const cz = tablePlateCenter.z;
+  const camX = cx + Math.sin(theta) * radius;
+  const camZ = cz + Math.cos(theta) * radius;
+  const fx = -Math.sin(theta);
+  const fz = -Math.cos(theta);
+  const rx = -fz;
+  const rz = fx;
+  const pp = p.car.position;
+  const ext = Math.abs(fx) * tablePlateHalfX + Math.abs(fz) * tablePlateHalfZ;
+  const depth = ((pp.x - cx) * fx + (pp.z - cz) * fz) / Math.max(1e-4, ext);
+  let score = 1;
+  score -= Math.max(0, depth - 0.15) * 0.9;
+  score -= Math.max(0, -depth - 0.85) * 0.5;
+  const occR = Math.max(0.05, p.halfW * p.storedCarScale * 2.4);
+  const wx = pp.x - camX;
+  const wz = pp.z - camZ;
+  const w2 = wx * wx + wz * wz;
+  let nearest = null;
+  let nearestD = Infinity;
+  for (let i = 0; i < arenaCars.length; i++) {
+    const o = arenaCars[i];
+    if (o === p || !_arenaCarOnTable(o)) continue;
+    const op = o.car.position;
+    const vx = op.x - camX;
+    const vz = op.z - camZ;
+    const along = w2 > 1e-8 ? (vx * wx + vz * wz) / w2 : 0;
+    if (along > 0 && along < 1) {
+      const perp = Math.hypot(vx - wx * along, vz - wz * along);
+      if (perp < occR) score -= 0.45 * (1 - perp / occR);
+    }
+    const d = Math.hypot(op.x - pp.x, op.z - pp.z);
+    if (d < nearestD) {
+      nearestD = d;
+      nearest = o;
+    }
+  }
+  if (nearest && nearestD > 1e-4) {
+    const lat =
+      Math.abs((nearest.car.position.x - pp.x) * rx + (nearest.car.position.z - pp.z) * rz) /
+      nearestD;
+    score += 0.15 * lat;
+  }
+  return score;
+}
+
+function _startCameraOrbit(direction) {
+  const d = _camDirector;
+  if (d.active) return; // never overlap rotations
+  const cx = tablePlateCenter.x;
+  const cz = tablePlateCenter.z;
+  const ox = camera.position.x - cx;
+  const oz = camera.position.z - cz;
+  d.radius = Math.hypot(ox, oz);
+  d.centerY = controls.target.y;
+  d.height = camera.position.y - d.centerY;
+  d.from = Math.atan2(ox, oz);
+  d.to = d.from + direction * CAM_ORBIT_STEP;
+  d.t = 0;
+  d.active = true;
+  d.cameFrom = d.from;
+}
+
+function updateCameraDirector(dt) {
+  const d = _camDirector;
+  if (_carFollowCam || !_carReady || !Number.isFinite(tablePlateHalfX)) {
+    d.active = false;
+    return;
+  }
+  if (d.userPause > 0) {
+    d.userPause -= dt;
+    return;
+  }
+  const cx = tablePlateCenter.x;
+  const cz = tablePlateCenter.z;
+  if (d.active) {
+    d.t = Math.min(1, d.t + dt / CAM_ORBIT_DURATION);
+    const theta = THREE.MathUtils.lerp(d.from, d.to, _camEaseInOut(d.t));
+    camera.position.set(
+      cx + Math.sin(theta) * d.radius,
+      d.centerY + d.height,
+      cz + Math.cos(theta) * d.radius,
+    );
+    controls.target.set(cx, d.centerY, cz);
+    if (d.t >= 1) {
+      d.active = false;
+      d.wait = CAM_ORBIT_WAIT_MIN + Math.random() * (CAM_ORBIT_WAIT_MAX - CAM_ORBIT_WAIT_MIN);
+    }
+    return;
+  }
+  const ox = camera.position.x - cx;
+  const oz = camera.position.z - cz;
+  const radius = Math.hypot(ox, oz);
+  if (radius < 1e-3) return;
+  const now = Math.atan2(ox, oz);
+  // A poor view of the player makes the next rotation come sooner.
+  const current = _scoreArenaView(now, radius);
+  const urgency = 1 + 2 * THREE.MathUtils.clamp(0.75 - current, 0, 1);
+  d.wait -= dt * urgency;
+  if (d.wait > 0) return;
+  const options = [1, -1].map((dir) => {
+    const theta = now + dir * CAM_ORBIT_STEP;
+    let s = _scoreArenaView(theta, radius) + (Math.random() * 2 - 1) * CAM_ORBIT_SCORE_NOISE;
+    if (d.cameFrom != null && Math.abs(_wrapAngle(theta - d.cameFrom)) < 0.1) s -= 0.1;
+    return { dir, s };
+  });
+  const best = Math.max(options[0].s, options[1].s);
+  if (best < current - 0.35 && d.postponed < 1) {
+    // Both 90° views would hide the player: hold this view a little longer.
+    d.postponed += 1;
+    d.wait = 2 + Math.random() * 2;
+    return;
+  }
+  d.postponed = 0;
+  const w0 = Math.exp(options[0].s * 3);
+  const w1 = Math.exp(options[1].s * 3);
+  const pick = Math.random() * (w0 + w1) < w0 ? options[0] : options[1];
+  _startCameraOrbit(pick.dir);
+}
+
+// ---------------------------------------------------------------------------
+// Collision camera shake (render-only offset; never touches the orbit)
+// ---------------------------------------------------------------------------
+/** Closing speeds below this are resting contact / scraping: no shake. */
+const SHAKE_MIN_IMPACT = 0.18;
+/** Closing speed (m/s) that adds a full trauma kick. */
+const SHAKE_FULL_IMPACT = 4.5;
+const SHAKE_TRAUMA_MAX = 0.85;
+const SHAKE_DECAY = 2.6;
+/** Wobble speed multiplier (higher = faster shake). */
+const SHAKE_FREQ = 1.7;
+/** Immediate jolt on impact: share of max offset, and how fast it dies (1/s). */
+const SHAKE_PUNCH = 0.7;
+const SHAKE_PUNCH_DECAY = 26;
+const SHAKE_MAX_POS = 0.03;
+const SHAKE_MAX_YAW = THREE.MathUtils.degToRad(0.45);
+const SHAKE_MAX_PITCH = THREE.MathUtils.degToRad(0.45);
+const SHAKE_MAX_ROLL = THREE.MathUtils.degToRad(0.8);
+
+const _camShake = {
+  trauma: 0,
+  punch: 0,
+  punchSide: 1,
+  punchRoll: 1,
+  frameImpact: 0,
+  time: 0,
+  applied: false,
+  savedPos: new THREE.Vector3(),
+  savedQuat: new THREE.Quaternion(),
+  // Random phases so every session's shake pattern differs.
+  phase: Array.from({ length: 10 }, () => Math.random() * Math.PI * 2),
+};
+const _shakeRight = new THREE.Vector3();
+const _shakeUp = new THREE.Vector3();
+const _shakeEuler = new THREE.Euler(0, 0, 0, "YXZ");
+const _shakeQuat = new THREE.Quaternion();
+
+/** Called by the car-pair resolver with each contact's pre-impact closing speed. */
+function noteCameraImpact(closingSpeed) {
+  if (closingSpeed > _camShake.frameImpact) _camShake.frameImpact = closingSpeed;
+}
+
+/** Smooth, organic noise in [-1, 1]: two incommensurate sines per channel. */
+function _shakeNoise(i, t) {
+  const p = _camShake.phase;
+  return (
+    0.62 * Math.sin(t * SHAKE_FREQ * (11.3 + i * 1.7) + p[i]) +
+    0.38 * Math.sin(t * SHAKE_FREQ * (17.9 + i * 2.3) + p[(i + 5) % 10])
+  );
+}
+
+function applyCameraShake(dt) {
+  const s = _camShake;
+  // One kick per frame from the strongest impact (several resolver passes /
+  // sub-steps and simultaneous collisions can't stack up), saturating add so
+  // close-together hits blend instead of compounding.
+  if (s.frameImpact > SHAKE_MIN_IMPACT) {
+    const kick = THREE.MathUtils.clamp(
+      (s.frameImpact - SHAKE_MIN_IMPACT) / (SHAKE_FULL_IMPACT - SHAKE_MIN_IMPACT),
+      0,
+      1,
+    );
+    s.trauma = Math.min(SHAKE_TRAUMA_MAX, s.trauma + kick * (1 - s.trauma));
+    // Sharp onset: a one-off jolt sized like the shake itself (kick²).
+    const jolt = Math.min(SHAKE_TRAUMA_MAX, kick) ** 2;
+    if (jolt > s.punch) {
+      s.punch = jolt;
+      s.punchSide = Math.random() < 0.5 ? -1 : 1;
+      s.punchRoll = Math.random() < 0.5 ? -1 : 1;
+    }
+  }
+  s.frameImpact = 0;
+  if (s.trauma <= 0 && s.punch <= 0) return;
+  s.trauma = Math.max(0, s.trauma - SHAKE_DECAY * dt);
+  s.time += dt;
+  const amt = s.trauma * s.trauma;
+  const punch = s.punch;
+  s.punch = punch > 1e-4 ? punch * Math.exp(-SHAKE_PUNCH_DECAY * dt) : 0;
+  if (amt < 1e-5 && punch < 1e-4) return;
+  s.savedPos.copy(camera.position);
+  s.savedQuat.copy(camera.quaternion);
+  s.applied = true;
+  const t = s.time;
+  _shakeRight.set(1, 0, 0).applyQuaternion(camera.quaternion);
+  _shakeUp.set(0, 1, 0).applyQuaternion(camera.quaternion);
+  const jolt = SHAKE_PUNCH * punch;
+  camera.position
+    .addScaledVector(
+      _shakeRight,
+      SHAKE_MAX_POS * (amt * _shakeNoise(0, t) + jolt * 0.5 * s.punchSide),
+    )
+    .addScaledVector(_shakeUp, SHAKE_MAX_POS * (0.8 * amt * _shakeNoise(1, t) - jolt));
+  _shakeEuler.set(
+    SHAKE_MAX_PITCH * (amt * _shakeNoise(2, t) - jolt * 0.4),
+    SHAKE_MAX_YAW * amt * _shakeNoise(3, t),
+    SHAKE_MAX_ROLL * (amt * _shakeNoise(4, t) + jolt * 0.6 * s.punchRoll),
+  );
+  _shakeQuat.setFromEuler(_shakeEuler);
+  camera.quaternion.multiply(_shakeQuat);
+  camera.updateMatrixWorld();
+}
+
+/** Restores the exact pre-shake camera so controls / orbit never see the offset. */
+function clearCameraShake() {
+  const s = _camShake;
+  if (!s.applied) return;
+  camera.position.copy(s.savedPos);
+  camera.quaternion.copy(s.savedQuat);
+  camera.updateMatrixWorld();
+  s.applied = false;
+}
+
 function animate() {
   _meetingRoomSceneAnimationFrame = 0;
   if (!_meetingRoomSceneRendering) return;
@@ -6064,25 +7557,33 @@ function animate() {
   }
   const carDt = 1 / 60;
   let carTimeLeft = dt;
+  updateArenaAi(dt);
   for (let s = 0; s < 3 && carTimeLeft > 0; s++) {
     const step = Math.min(carDt, carTimeLeft);
-    updateCar(step);
+    for (let i = 0; i < arenaCars.length; i++) {
+      const c = arenaCars[i];
+      if (c.ready || c === _playerCarCtx) withCar(c, () => updateCar(step));
+    }
+    resolveArenaCarCollisions();
     carTimeLeft -= step;
   }
   stepCarPhysics(dt);
+  resolveArenaCarCollisions();
   syncCarCamera();
-  updateExhaustEffects(dt);
+  updateCameraDirector(dt);
   updateTableLightReflections();
   updateCarShadowLight();
-  updateFreeCableAssembly(dt);
-  updateCarHitSparks(dt);
+  updateArenaCable(dt);
+  updateArenaCarEffects(dt);
   if (_fireSensorLightMat) {
     const pulse =
       0.16 + 0.84 * (0.5 + 0.5 * Math.sin(clock.elapsedTime * 1.65));
     _fireSensorLightMat.color.setRGB(0.04 * pulse, pulse, 0.12 * pulse);
   }
   controls.update();
+  applyCameraShake(dt);
   renderer.render(scene, camera);
+  clearCameraShake();
 }
 
 export function setMeetingRoomSceneRendering(active) {
