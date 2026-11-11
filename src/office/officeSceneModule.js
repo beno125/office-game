@@ -12323,7 +12323,7 @@ diffuseColor.a = 1.0;
         });
 
         window.officeMeshParts = parts;
-        console.log("office-table-embed93.gltf parts:", parts);
+        console.log("office-table-embed94.gltf parts:", parts);
         return parts;
       }
 
@@ -12356,7 +12356,7 @@ diffuseColor.a = 1.0;
         airPlaneFlight.pathBuilt = false;
       });
       loader.load(
-        officeAsset("office-table-embed93.gltf"),
+        officeAsset("office-table-embed94.gltf"),
         (gltf) => {
           logOfficeMeshParts(gltf);
           const model = gltf.scene;
@@ -12381,7 +12381,7 @@ diffuseColor.a = 1.0;
                 });
                 if (!src) {
                   console.warn(
-                    "No outdoorBackground in office-table-embed93.gltf or fallback " +
+                    "No outdoorBackground in office-table-embed94.gltf or fallback " +
                       OUTDOOR_FALLBACK_GLTF +
                       ". Re-export embed36 with an object named outdoorBackground.",
                   );
@@ -13819,7 +13819,7 @@ diffuseColor.a = 1.0;
         },
         undefined,
         (err) => {
-          console.error("[office] office-table-embed93.gltf failed to load:", err);
+          console.error("[office] office-table-embed94.gltf failed to load:", err);
         },
       );
 
