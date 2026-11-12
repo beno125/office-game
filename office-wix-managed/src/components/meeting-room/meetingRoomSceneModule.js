@@ -8,6 +8,18 @@ import { Reflector } from "three/addons/objects/Reflector.js";
 import { getMeetingRoomSceneMount } from "./meetingRoomSceneMount.js";
 import { emitMeetingRoomSceneEvent } from "../game/meetingRoomSceneEvents.js";
 
+/**
+ * Dev-only perf tooling (both false in production builds):
+ *   ?perf           -> on-screen metrics overlay
+ *   ?perf=baseline  -> overlay with the render optimizations switched off (A/B)
+ */
+const MR_PERF =
+  import.meta.env.DEV &&
+  typeof location !== "undefined" &&
+  new URLSearchParams(location.search).has("perf");
+const MR_PERF_BASELINE =
+  MR_PERF && new URLSearchParams(location.search).get("perf") === "baseline";
+
 const _MEETING_ROOM_BASE = `${import.meta.env.BASE_URL}meeting-room-optimized/`;
 const _OFFICE_BASE = `${import.meta.env.BASE_URL}office-scene-optimized/`;
 const meetingRoomAsset = (path) =>
@@ -3680,9 +3692,27 @@ function setupTablePlateReflector(root) {
   tableReflectorBlur = createTableReflectorBlur(renderTarget);
   reflector.material.uniforms.tDiffuse.value = tableReflectorBlur.texture;
   const tableBase = root.getObjectByName("tableBaseBox");
+  // The mirror's oblique clip plane discards everything below the tabletop, so
+  // static room meshes that sit entirely below it can never show up in the
+  // reflection: hide them for that pass only (identical image, fewer draws).
+  const belowTable = [];
+  if (!MR_PERF_BASELINE) {
+    root.updateMatrixWorld(true);
+    const box = new THREE.Box3();
+    root.traverse((o) => {
+      if (o === table || o === tableBase) return;
+      if (!o.isMesh && !o.isPoints && !o.isLine) return;
+      // Anything that can move up through the table (the power cable) stays.
+      if (/cable/i.test(o.name || "") || o.frustumCulled === false) return;
+      box.setFromObject(o);
+      if (!box.isEmpty() && box.max.y < topY - 0.05) belowTable.push(o);
+    });
+  }
+  const belowTableVisible = new Array(belowTable.length).fill(true);
   const restoreReflectorHelpers = () => {
     table.visible = true;
     if (tableBase) tableBase.visible = true;
+    for (let i = 0; i < belowTable.length; i++) belowTable[i].visible = belowTableVisible[i];
     for (let i = 0; i < tableLightGlows.length; i++) {
       const sprite = tableLightGlows[i].sprite;
       if (sprite && sprite.userData._reflVis !== undefined) {
@@ -3703,6 +3733,10 @@ function setupTablePlateReflector(root) {
   reflector.onBeforeRender = function (renderer, scene, camera) {
     table.visible = false;
     if (tableBase) tableBase.visible = false;
+    for (let i = 0; i < belowTable.length; i++) {
+      belowTableVisible[i] = belowTable[i].visible;
+      belowTable[i].visible = false;
+    }
     for (let i = 0; i < tableLightGlows.length; i++) {
       const sprite = tableLightGlows[i].sprite;
       if (sprite) sprite.userData._reflVis = sprite.visible;
@@ -4145,6 +4179,8 @@ const _sparkInv = new THREE.Matrix4();
 const _sparkTo = new THREE.Vector3();
 const _sparkUp = new THREE.Vector3();
 const _sparkPts = new Float32Array(192 * 3);
+/** One reusable copy of the arc points per fork depth (no per-frame allocation). */
+const _sparkSnapBufs = [0, 1, 2, 3].map(() => new Float32Array(192 * 3));
 const _sparkMaxPts = 192;
 let _sparkPtCount = 0;
 
@@ -4420,7 +4456,13 @@ function _sparkEmitTree(
   _sparkSubdivide(ox, oy, oz, ox + dx, oy + dy, oz + dz, depth, jitter, seed);
   _sparkLiftPath(spark, minY);
   const snapN = _sparkPtCount;
-  const snap = _sparkPts.slice(0, snapN * 3);
+  let snap;
+  if (gen < _sparkSnapBufs.length) {
+    snap = _sparkSnapBufs[gen];
+    snap.set(_sparkPts.subarray(0, snapN * 3));
+  } else {
+    snap = _sparkPts.slice(0, snapN * 3);
+  }
   const bright = 0.55 + live * 0.45 + (1 - gen * 0.16);
   _sparkWritePath(spark, bright);
   if (gen >= maxGen || snapN < 4) return;
@@ -5886,6 +5928,50 @@ function repeatWallPatternAlongZ(root, patternName, wallName) {
   }
 }
 
+/**
+ * The wall pattern repeats above create ~670 cloned meshes that share one
+ * geometry and material (one draw call each, in the main view and again in the
+ * table reflection). Collapse each geometry+material group into a single
+ * InstancedMesh holding every clone's exact transform: same pixels, ~4 draws.
+ */
+const WALL_PATTERN_NAME = /^(wallLeftPattern|wallRightPattern|wallFrontPattern)(_z)?(_\d+)?$/;
+
+function instanceRepeatedWallPatterns(root) {
+  root.updateMatrixWorld(true);
+  const groups = new Map();
+  root.traverse((o) => {
+    if (!o.isMesh || o.isInstancedMesh || !WALL_PATTERN_NAME.test(o.name || "")) return;
+    if (Array.isArray(o.material)) return;
+    const key = o.geometry.uuid + "|" + o.material.uuid;
+    let g = groups.get(key);
+    if (!g) {
+      g = [];
+      groups.set(key, g);
+    }
+    g.push(o);
+  });
+  const rootInv = root.matrixWorld.clone().invert();
+  const m = new THREE.Matrix4();
+  for (const list of groups.values()) {
+    if (list.length < 2) continue;
+    const first = list[0];
+    const inst = new THREE.InstancedMesh(first.geometry, first.material, list.length);
+    inst.name = first.name.replace(/(_z)?(_\d+)?$/, "") + "Instances";
+    inst.castShadow = first.castShadow;
+    inst.receiveShadow = first.receiveShadow;
+    inst.renderOrder = first.renderOrder;
+    for (let i = 0; i < list.length; i++) {
+      m.multiplyMatrices(rootInv, list[i].matrixWorld);
+      inst.setMatrixAt(i, m);
+    }
+    inst.instanceMatrix.needsUpdate = true;
+    inst.computeBoundingBox();
+    inst.computeBoundingSphere();
+    root.add(inst);
+    for (const o of list) o.removeFromParent();
+  }
+}
+
 function repeatWallLeftPatternAlongNegZ(root) {
   const mesh = root.getObjectByName("wallLeftPattern");
   const wall = root.getObjectByName("wallBack");
@@ -6492,6 +6578,7 @@ function loadMeetingRoom() {
         repeatWallPatternAlongX(_model, "wallLeftPattern", "wallLeft");
         repeatWallPatternAlongZ(_model, "wallFrontPattern", "wallFront");
         repeatWallLeftPatternAlongNegZ(_model);
+        if (!MR_PERF_BASELINE) instanceRepeatedWallPatterns(_model);
         frameMeetingRoomInterior(_model);
         setupTablePlateReflector(_model);
         applyLightBlend(lightBlend);
@@ -6725,6 +6812,9 @@ function _addCornersInside(P, Q, acc) {
   }
 }
 
+const _bumpAxes = new Float64Array(8);
+const _bumpAcc = { x: 0, z: 0, n: 0 };
+
 /** SAT overlap of two car boxes; normal points from A to B. */
 function _carBoxOverlap(A, B, res) {
   const dx = B.x - A.x;
@@ -6732,7 +6822,15 @@ function _carBoxOverlap(A, B, res) {
   let best = Infinity;
   let bnx = 0;
   let bnz = 0;
-  const axes = [A.ux, A.uz, A.fx, A.fz, B.ux, B.uz, B.fx, B.fz];
+  const axes = _bumpAxes;
+  axes[0] = A.ux;
+  axes[1] = A.uz;
+  axes[2] = A.fx;
+  axes[3] = A.fz;
+  axes[4] = B.ux;
+  axes[5] = B.uz;
+  axes[6] = B.fx;
+  axes[7] = B.fz;
   for (let i = 0; i < 8; i += 2) {
     const nx = axes[i];
     const nz = axes[i + 1];
@@ -6749,7 +6847,10 @@ function _carBoxOverlap(A, B, res) {
   res.nx = bnx;
   res.nz = bnz;
   res.depth = best;
-  const acc = { x: 0, z: 0, n: 0 };
+  const acc = _bumpAcc;
+  acc.x = 0;
+  acc.z = 0;
+  acc.n = 0;
   _addCornersInside(B, A, acc);
   _addCornersInside(A, B, acc);
   if (acc.n > 0) {
@@ -7237,33 +7338,45 @@ function _carCableDistance(cable) {
   );
 }
 
+const _cableInsideCars = [];
+const _cableInsideDist = [];
+
 function selectCableTargetCar() {
   const cable = _freeCable;
   if (!cable || !cable.ready) return null;
   _syncActiveCarCtx();
   let nearest = null;
   let nearestDist = Infinity;
-  const inside = [];
+  const inside = _cableInsideCars;
+  const insideD = _cableInsideDist;
+  inside.length = 0;
+  insideD.length = 0;
   for (let i = 0; i < arenaCars.length; i++) {
     const c = arenaCars[i];
     // Never target a car that has fallen off (or is falling / respawning).
     if (!_arenaCarOnTable(c)) continue;
-    const d = withCar(c, () => _carCableDistance(cable));
+    _cableDistProbeCable = cable;
+    const d = withCar(c, _carCableDistanceActive);
     if (d < nearestDist) {
       nearestDist = d;
       nearest = c;
     }
-    if (d < FREE_CABLE_ATTACK_OUTER) inside.push({ c, d });
+    if (d < FREE_CABLE_ATTACK_OUTER) {
+      // Keep `inside` sorted by distance (nearest first), as before.
+      let k = inside.length;
+      while (k > 0 && insideD[k - 1] > d) k--;
+      inside.splice(k, 0, c);
+      insideD.splice(k, 0, d);
+    }
   }
   for (let i = _cableEntryOrder.length - 1; i >= 0; i--) {
-    if (!inside.some((e) => e.c === _cableEntryOrder[i])) _cableEntryOrder.splice(i, 1);
+    if (inside.indexOf(_cableEntryOrder[i]) < 0) _cableEntryOrder.splice(i, 1);
   }
-  inside.sort((p, q) => p.d - q.d);
   for (let i = 0; i < inside.length; i++) {
-    if (!_cableEntryOrder.includes(inside[i].c)) _cableEntryOrder.push(inside[i].c);
+    if (_cableEntryOrder.indexOf(inside[i]) < 0) _cableEntryOrder.push(inside[i]);
   }
   let target =
-    _cableTargetCar && _cableEntryOrder.includes(_cableTargetCar)
+    _cableTargetCar && _cableEntryOrder.indexOf(_cableTargetCar) >= 0
       ? _cableTargetCar
       : _cableEntryOrder[0] || null;
   // Nobody in range: aim stays on the nearest car so the cable relaxes to idle
@@ -7274,6 +7387,11 @@ function selectCableTargetCar() {
     _cableTargetCar = target;
   }
   return target;
+}
+
+let _cableDistProbeCable = null;
+function _carCableDistanceActive() {
+  return _carCableDistance(_cableDistProbeCable);
 }
 
 function updateArenaCable(dt) {
@@ -8482,10 +8600,93 @@ function clearCameraShake() {
   s.applied = false;
 }
 
+// ---------------------------------------------------------------------------
+// Dev-only performance overlay: add ?perf to the URL in `npm run dev`.
+// Compiled out of production builds (import.meta.env.DEV is false there).
+// ---------------------------------------------------------------------------
+const _mrPerf = MR_PERF
+  ? {
+      el: null,
+      t0: performance.now(),
+      loadMs: 0,
+      frames: 0,
+      cpuMs: 0,
+      calls: 0,
+      tris: 0,
+      acc: 0,
+      frameStart: 0,
+      last: null,
+    }
+  : null;
+
+/** Dev-only (?perf): lets a measurement hold the scene still for a fair A/B. */
+if (MR_PERF) {
+  window.__mrPerfCtl = {
+    holdIntro() {
+      _arenaGame.t = -1e9;
+    },
+    get phase() {
+      return _arenaGame.phase;
+    },
+  };
+}
+
+function _perfBeginFrame() {
+  const p = _mrPerf;
+  if (!p.el) {
+    renderer.info.autoReset = false;
+    p.el = document.createElement("pre");
+    p.el.style.cssText =
+      "position:fixed;left:8px;top:8px;z-index:99999;margin:0;padding:6px 8px;" +
+      "font:11px/1.35 ui-monospace,Menlo,monospace;color:#9fe;background:rgba(0,0,0,.7);" +
+      "pointer-events:none;white-space:pre";
+    document.body.appendChild(p.el);
+  }
+  renderer.info.reset();
+  p.frameStart = performance.now();
+}
+
+function _perfEndFrame(dt) {
+  const p = _mrPerf;
+  p.frames += 1;
+  p.cpuMs += performance.now() - p.frameStart;
+  p.calls += renderer.info.render.calls;
+  p.tris += renderer.info.render.triangles;
+  p.acc += dt;
+  if (!p.loadMs && _arenaGame.phase !== "waiting") p.loadMs = performance.now() - p.t0;
+  if (p.acc < 0.5) return;
+  const n = p.frames;
+  const mem = performance.memory ? (performance.memory.usedJSHeapSize / 1048576).toFixed(0) + " MB" : "n/a";
+  p.last = {
+    fps: n / p.acc,
+    cpuMs: p.cpuMs / n,
+    calls: p.calls / n,
+    tris: p.tris / n,
+    geometries: renderer.info.memory.geometries,
+    textures: renderer.info.memory.textures,
+    programs: renderer.info.programs ? renderer.info.programs.length : 0,
+    heap: mem,
+    loadMs: p.loadMs,
+  };
+  window.__mrPerf = p.last;
+  const L = p.last;
+  p.el.textContent =
+    `fps ${L.fps.toFixed(1)}  cpu ${L.cpuMs.toFixed(2)} ms/frame\n` +
+    `draws ${L.calls.toFixed(0)}  tris ${(L.tris / 1000).toFixed(1)}k\n` +
+    `geo ${L.geometries}  tex ${L.textures}  programs ${L.programs}\n` +
+    `heap ${L.heap}  load ${(L.loadMs / 1000).toFixed(2)} s`;
+  p.frames = 0;
+  p.cpuMs = 0;
+  p.calls = 0;
+  p.tris = 0;
+  p.acc = 0;
+}
+
 function animate() {
   _meetingRoomSceneAnimationFrame = 0;
   if (!_meetingRoomSceneRendering) return;
   _meetingRoomSceneAnimationFrame = requestAnimationFrame(animate);
+  if (MR_PERF) _perfBeginFrame();
   const dt = Math.min(clock.getDelta(), 0.05);
   const lightBlendDelta = lightBlendTarget - lightBlend;
   if (Math.abs(lightBlendDelta) > 0.0001) {
@@ -8528,6 +8729,7 @@ function animate() {
   applyCameraShake(dt);
   renderer.render(scene, camera);
   clearCameraShake();
+  if (MR_PERF) _perfEndFrame(dt);
 }
 
 export function setMeetingRoomSceneRendering(active) {
