@@ -14,8 +14,9 @@
       import { RectAreaLightUniformsLib } from "three/addons/lights/RectAreaLightUniformsLib.js";
 import { getKitchenSceneMount } from "./kitchenSceneMount.js";
 import { emitKitchenSceneEvent } from "../game/kitchenSceneEvents.js";
-import { StadiumTrack, LapTracker, RaceAIDriver, RaceHud, RACE_LAPS, RACE_COUNTDOWN_SEC } from "./kitchenRace.js";
+import { StadiumTrack, LapTracker, RaceAIDriver, RaceHud, RACE_LAPS, RACE_COUNTDOWN_SEC, raceAiMaxOutward } from "./kitchenRace.js";
 import {
+  CAR_MASS,
   CAR_BUMP_SLIDE_DECAY,
   CAR_BUMP_SPIN_DECAY,
   CAR_BUMP_YAW_CAP,
@@ -2256,16 +2257,22 @@ let _worldSwitched = false;
       const carMaterial = new CANNON.Material("car");
       const floorPhysMaterial = new CANNON.Material("floor");
       const propPhysMaterial = new CANNON.Material("prop");
+      // Pyramid cups keep their original physics (own material, mass, damping).
+      const cupPhysMaterial = new CANNON.Material("cup");
+      const KITCHEN_PROP_FRICTION = 0.4; // props on the table / floor (was 0.25)
+      const KITCHEN_CUP_FRICTION = 0.25;
       // Props on the table / floor: they slide when pushed rather than dig in.
       for (const surface of [tablePlatePhysicsMaterial, floorPhysMaterial]) {
-        physicsWorld.addContactMaterial(
-          new CANNON.ContactMaterial(propPhysMaterial, surface, {
-            friction: 0.25,
-            restitution: 0.05,
-            contactEquationStiffness: 1e8,
-            contactEquationRelaxation: 2,
-          }),
-        );
+        for (const [mat, friction] of [[propPhysMaterial, KITCHEN_PROP_FRICTION], [cupPhysMaterial, KITCHEN_CUP_FRICTION]]) {
+          physicsWorld.addContactMaterial(
+            new CANNON.ContactMaterial(mat, surface, {
+              friction,
+              restitution: 0.05,
+              contactEquationStiffness: 1e8,
+              contactEquationRelaxation: 2,
+            }),
+          );
+        }
       }
       // Car tumbling off the table: the meeting room's car contact values.
       const carFallMaterial = new CANNON.Material("carFall");
@@ -2343,11 +2350,34 @@ let _worldSwitched = false;
         // The cup is not listed here: buildCupPyramid() stacks it with its
         // copies into a pyramid and adds them to _cupPyramidPairs.
       ];
-      const KITCHEN_PROP_MASS = 2;
+      // Prop masses by type (the car counts as CAR_MASS = 1.8, shared bump physics).
+      const KITCHEN_PLATE_MASS = 7; // smallest fruit plate; bigger plates scale with radius
+      const KITCHEN_PLATE_REF_RADIUS = 1.55;
+      const KITCHEN_GREY_BOX_MASS = 10;
+      const KITCHEN_BIN_SIGN_MASS = 8;
+      const KITCHEN_CUP_MASS = 2; // pyramid cups: original physics, unchanged
+      const KITCHEN_CUP_LINEAR_DAMPING = 0.35;
+      const KITCHEN_CUP_ANGULAR_DAMPING = 0.5;
+      /** Cup speed after a shove, relative to the car's speed toward it (original). */
+      const KITCHEN_CUP_PUSH_RESTITUTION = 1.1;
+      // Car ↔ prop response (momentum based):
+      const KITCHEN_PROP_CAR_RESTITUTION = 0.15; // bounce on a hit
+      const KITCHEN_PROP_IMPACT_MIN_SPEED = 2; // closing speed that counts as a hit
+      const KITCHEN_PROP_CAR_MIN_KEEP = 0.35; // a hit never takes more than 65% of the speed
+      const KITCHEN_PROP_PUSH_DRAG = 0.9; // pushing drag, × (prop mass / car mass), speed / s
+
+      /** Mass of a prop by type, bigger plates heavier. */
+      function kitchenPropMass(physName, isCup, radius) {
+        if (isCup) return KITCHEN_CUP_MASS;
+        if (/^greyBox/.test(physName)) return KITCHEN_GREY_BOX_MASS;
+        if (/^binSign/.test(physName)) return KITCHEN_BIN_SIGN_MASS;
+        if (/^fruitPlate/.test(physName)) return KITCHEN_PLATE_MASS * Math.max(1, radius / KITCHEN_PLATE_REF_RADIUS);
+        return KITCHEN_PLATE_MASS;
+      }
       /** Car spawn offset from the table centre: clear of greyBox and binSign3. */
       const KITCHEN_CAR_SPAWN_OFFSET_X = 4.3;
-      const KITCHEN_PROP_LINEAR_DAMPING = 0.35;
-      const KITCHEN_PROP_ANGULAR_DAMPING = 0.5;
+      const KITCHEN_PROP_LINEAR_DAMPING = 0.8;
+      const KITCHEN_PROP_ANGULAR_DAMPING = 0.85;
       /**
        * Gap between a prop's lowest visible point and its physics body's
        * bottom. The body rests on the surface (with cannon's tiny resting
@@ -2508,11 +2538,12 @@ let _worldSwitched = false;
 
       // --- cup pyramid ------------------------------------------------------
       // The cup group (cupBase + cupGraphic, body cupPhysic) is copied into a
-      // 6-row (21 cup) pyramid standing where the cup was, as a wall facing the long
-      // axis of the table. Cups stack with real solver contacts (unlike the
-      // other props), start asleep so the pyramid stands perfectly still, and
-      // all wake together once the car knocks any of them.
-      const KITCHEN_CUP_PYRAMID_ROWS = 6;
+      // square-based 3D pyramid standing where the cup was: each layer is an
+      // n×n grid, every cup resting on the four below it (centred over their
+      // gap). Cups stack with real solver contacts (unlike the other props),
+      // start asleep so the pyramid stands perfectly still, and all wake
+      // together once the car knocks any of them.
+      const KITCHEN_CUP_PYRAMID_LAYERS = 5; // 5×5 + 4×4 + 3×3 + 2×2 + 1 = 55 cups
       /** Gravity for the cups once falling: the falling car's (scaled meeting room). */
       const KITCHEN_CUP_GRAVITY = 70;
       const KITCHEN_CUP_GAP = 0.004;
@@ -2537,10 +2568,12 @@ let _worldSwitched = false;
         const worldPos = parts.map((o) => o.getWorldPosition(new THREE.Vector3()));
         const delta = new THREE.Vector3();
         let idx = 0;
-        for (let row = 0; row < KITCHEN_CUP_PYRAMID_ROWS; row++) {
-          const count = KITCHEN_CUP_PYRAMID_ROWS - row;
-          for (let i = 0; i < count; i++) {
-            delta.set(0, row * rise, (i - (count - 1) / 2) * step);
+        for (let layer = 0; layer < KITCHEN_CUP_PYRAMID_LAYERS; layer++) {
+          const count = KITCHEN_CUP_PYRAMID_LAYERS - layer;
+          for (let i = 0; i < count * count; i++) {
+            const ix = i % count;
+            const iz = Math.floor(i / count);
+            delta.set((ix - (count - 1) / 2) * step, layer * rise, (iz - (count - 1) / 2) * step);
             const names = idx === 0
               ? ["cupBase", "cupGraphic", "cupPhysic"]
               : [`cupBase_p${idx}`, `cupGraphic_p${idx}`, `cupPhysic_p${idx}`];
@@ -2638,9 +2671,9 @@ let _worldSwitched = false;
             center.y = tableTop + 0.002 + row * (height + KITCHEN_CUP_GAP) + height / 2;
           }
           const body = new CANNON.Body({
-            mass: KITCHEN_PROP_MASS,
-            linearDamping: KITCHEN_PROP_LINEAR_DAMPING,
-            angularDamping: KITCHEN_PROP_ANGULAR_DAMPING,
+            mass: kitchenPropMass(physName, isCup, radius),
+            linearDamping: isCup ? KITCHEN_CUP_LINEAR_DAMPING : KITCHEN_PROP_LINEAR_DAMPING,
+            angularDamping: isCup ? KITCHEN_CUP_ANGULAR_DAMPING : KITCHEN_PROP_ANGULAR_DAMPING,
             allowSleep: true,
             sleepSpeedLimit: 0.6,
             sleepTimeLimit: 0.5,
@@ -2653,7 +2686,7 @@ let _worldSwitched = false;
             collisionFilterMask: isCup
               ? ~(PHYS_GROUP_CAR | PHYS_GROUP_PROP)
               : ~(PHYS_GROUP_CAR | PHYS_GROUP_PROP | PHYS_GROUP_CUP),
-            material: propPhysMaterial,
+            material: isCup ? cupPhysMaterial : propPhysMaterial,
           });
           if (shapeKind === "box") {
             const he = new CANNON.Vec3(size.x / 2, height / 2, size.z / 2);
@@ -2865,6 +2898,8 @@ let _worldSwitched = false;
       // stepCarDrive() / collideCarWithRails() code with AI inputs.
       const RACE_GRID_GAP = 4; // progress units between grid slots
       const RACE_ISLAND_MARGIN = 0.55;
+      /** Gap kept between the AI's widest turn line and raceBoundaries, beyond half the car's width. */
+      const RACE_TRACK_X_BUFFER = 0.6;
       const RACE_START_DELAY_SEC = 1.4;
       const RACE_GO_SHOW_SEC = 0.9;
       const RACE_AI_CARS = [
@@ -3108,8 +3143,23 @@ let _worldSwitched = false;
         }
         islandR += RACE_ISLAND_MARGIN;
         const centreR = (islandR + (bounds.zFar - z0)) / 2;
+        const laneHalf = (bounds.zFar - z0 - islandR) / 2;
         const startX = (bounds.xMin + bounds.xMax) / 2;
-        _raceTrack = new StadiumTrack({ xL, xR, z0, radius: centreR, startX, laneHalf: (bounds.zFar - z0 - islandR) / 2 });
+        // Widen the loop on X only: the half-circle ends move out toward
+        // raceBoundaries, so the widest AI line in a turn stays half a car width
+        // plus RACE_TRACK_X_BUFFER inside them. (Z, the turn radius and the lanes
+        // are unchanged.)
+        const carHalfWidth = _carRailFoot.ok ? _carRailFoot.hr : 1.2;
+        let maxOut = 0;
+        for (const cfg of RACE_AI_CARS) maxOut = Math.max(maxOut, raceAiMaxOutward(laneHalf, cfg.turnWiden ?? 1));
+        const xMargin = carHalfWidth + RACE_TRACK_X_BUFFER + maxOut + centreR;
+        const xLWide = bounds.xMin + xMargin;
+        const xRWide = bounds.xMax - xMargin;
+        if (xRWide - xLWide > xR - xL) {
+          xL = Math.min(xL, xLWide);
+          xR = Math.max(xR, xRWide);
+        }
+        _raceTrack = new StadiumTrack({ xL, xR, z0, radius: centreR, startX, laneHalf });
 
         scene.add(makeRaceStartLineMesh(startX, z0 + islandR + 0.08, bounds.zFar - 0.08));
 
@@ -3759,22 +3809,60 @@ let _worldSwitched = false;
       const _pushAx = new CANNON.Vec3();
       const _pushImpulse = new CANNON.Vec3();
       const _pushPoint = new CANNON.Vec3();
-      /** Prop speed after a shove, relative to the car's speed toward it. */
-      const KITCHEN_PROP_PUSH_RESTITUTION = 1.1;
       /** Bounciness of prop-to-prop shoves (0 = they move off together). */
       const KITCHEN_PROP_PROP_RESTITUTION = 0.2;
       const _pushAz = new CANNON.Vec3();
       const _pushAxes = new Float64Array(8);
       /** Props are pushed by the player's bumper and by every race car's bumper. */
       function pushKitchenPropsOutOfCar() {
-        pushKitchenPropsOutOfBumper(_carPropBumper);
+        _kitchenPropFrame++;
+        pushKitchenPropsOutOfBumper(_carPropBumper, carFalling ? null : carState);
         for (let i = 0; i < _raceCars.length; i++) {
           const rc = _raceCars[i];
-          if (!rc.isPlayer && rc.bumper) pushKitchenPropsOutOfBumper(rc.bumper);
+          if (!rc.isPlayer && rc.bumper) pushKitchenPropsOutOfBumper(rc.bumper, rc.state);
         }
       }
+      let _kitchenPropFrame = 0;
+      let _kitchenPropDt = 1 / 60;
 
-      function pushKitchenPropsOutOfBumper(bb) {
+      /**
+       * Momentum-based slow-down of the pushing car (its drive state `st`):
+       * the first touch is a hit (car and prop share momentum by mass, a little
+       * bounce, the car keeps at least KITCHEN_PROP_CAR_MIN_KEEP of its speed);
+       * staying in contact is a steady drag ∝ prop mass / car mass, so heavy
+       * props are pushed slower but the throttle always wins (never stuck).
+       * Scaled by how head-on the contact is. Returns the prop's new normal speed.
+       */
+      function kitchenPropCarResponse(st, b, bbId, carVn, vn, nx, nz) {
+        // Pyramid cups: original response (shoved ahead, the car is not slowed).
+        if (b._propCup) return Math.max(0, carVn) * KITCHEN_CUP_PUSH_RESTITUTION;
+        const touchedBefore = b._touchFrame && b._touchFrame[bbId] === _kitchenPropFrame - 1;
+        (b._touchFrame || (b._touchFrame = {}))[bbId] = _kitchenPropFrame;
+        if (!(carVn > 0)) return 0;
+        const mC = CAR_MASS;
+        const mP = b.mass;
+        const fn = Math.abs(Math.sin(st ? st.angle : 0) * nx + Math.cos(st ? st.angle : 0) * nz);
+        if (!touchedBefore && carVn - vn > KITCHEN_PROP_IMPACT_MIN_SPEED) {
+          const e = KITCHEN_PROP_CAR_RESTITUTION;
+          const v0 = Math.max(0, vn);
+          const vStar = (mC * carVn + mP * v0) / (mC + mP);
+          const carAfter = vStar + e * (vStar - carVn);
+          if (st) {
+            const keep = Math.max(KITCHEN_PROP_CAR_MIN_KEEP, Math.min(1, carAfter / carVn));
+            st.speed *= 1 - (1 - keep) * fn;
+          }
+          return vStar + e * (vStar - v0);
+        }
+        if (st) {
+          const drag = KITCHEN_PROP_PUSH_DRAG * (mP / mC) * _kitchenPropDt * fn;
+          const sp = Math.abs(st.speed);
+          st.speed = Math.sign(st.speed) * Math.max(0, sp - drag);
+        }
+        // Pushed along: just ahead of the car, so it stays in front of it.
+        return carVn * 1.05;
+      }
+
+      function pushKitchenPropsOutOfBumper(bb, st) {
         if (!bb) return;
         const shape = bb.shapes[0];
         const he = shape.halfExtents;
@@ -3871,7 +3959,7 @@ let _worldSwitched = false;
           // it slides / spins with the car's speed but is never tipped or lifted.
           const carVn = bb.velocity.x * _pushN.x + bb.velocity.z * _pushN.z;
           const vn = b.velocity.x * _pushN.x + b.velocity.z * _pushN.z;
-          const want = Math.max(0, carVn) * KITCHEN_PROP_PUSH_RESTITUTION;
+          const want = kitchenPropCarResponse(st, b, bb.id, carVn, vn, _pushN.x, _pushN.z);
           if (vn < want) {
             const j = (want - vn) * b.mass;
             _pushImpulse.set(_pushN.x * j, 0, _pushN.z * j);
@@ -3975,11 +4063,15 @@ let _worldSwitched = false;
             b.position.z += nz * h;
             const vRel = (b.velocity.x - a.velocity.x) * nx + (b.velocity.z - a.velocity.z) * nz;
             if (vRel < 0) {
-              const dv = (-vRel * (1 + KITCHEN_PROP_PROP_RESTITUTION)) / 2;
-              a.velocity.x -= nx * dv;
-              a.velocity.z -= nz * dv;
-              b.velocity.x += nx * dv;
-              b.velocity.z += nz * dv;
+              // Split by mass: a light prop gives way to a heavy one (cups keep
+              // their original equal split).
+              const dv = -vRel * (1 + KITCHEN_PROP_PROP_RESTITUTION);
+              const wa = a._propCup || b._propCup ? 0.5 : b.mass / (a.mass + b.mass);
+              const wb = 1 - wa;
+              a.velocity.x -= nx * dv * wa;
+              a.velocity.z -= nz * dv * wa;
+              b.velocity.x += nx * dv * wb;
+              b.velocity.z += nz * dv * wb;
             }
             a.aabbNeedsUpdate = true;
             b.aabbNeedsUpdate = true;
@@ -9719,6 +9811,7 @@ let _worldSwitched = false;
                 _kitchenIdlePhysicsAccumulator = 0;
               }
             }
+            _kitchenPropDt = physicsStepDt;
             syncKitchenProps();
           }
 

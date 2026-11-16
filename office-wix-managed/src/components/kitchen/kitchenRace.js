@@ -15,6 +15,13 @@ export const RACE_COUNTDOWN_SEC = 3;
 export const RACE_AI_STUCK_WINDOW = 2;
 export const RACE_AI_STUCK_DIST = 1.5;
 export const RACE_AI_REVERSE_SEC = 1;
+/** AI racing line stays this far inside the lane edge (world units). */
+export const RACE_AI_LANE_INSET = 1.1;
+
+/** Furthest an AI car's line may swing outward from the centre line in a turn. */
+export function raceAiMaxOutward(laneHalf, turnWiden) {
+  return Math.max(0, laneHalf - RACE_AI_LANE_INSET) + turnWiden;
+}
 
 function wrapAngle(a) {
   while (a > Math.PI) a -= Math.PI * 2;
@@ -237,7 +244,7 @@ export class RaceAIDriver {
     // A car close ahead in our path: pass it on the side with more room.
     const fx = Math.sin(state.angle);
     const fz = Math.cos(state.angle);
-    const lim = Math.max(0, track.laneHalf - 1.1);
+    const lim = Math.max(0, track.laneHalf - RACE_AI_LANE_INSET);
     if (others) {
       let bestAhead = Infinity;
       let avoidLat = null;
