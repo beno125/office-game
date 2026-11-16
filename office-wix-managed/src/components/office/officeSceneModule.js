@@ -3285,7 +3285,7 @@ let _officeSceneAnimationFrame = 0;
               metalness: 0.3,
               roughness: 0.6,
             });
-            new THREE.TextureLoader().load(officeAsset("keyboard image.jpg"), (tex) => {
+            new THREE.TextureLoader().load(officeAsset("keyboard-image.jpg"), (tex) => {
               tex.colorSpace = THREE.SRGBColorSpace;
               tex.wrapS = THREE.ClampToEdgeWrapping;
               tex.wrapT = THREE.ClampToEdgeWrapping;

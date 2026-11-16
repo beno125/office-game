@@ -5917,7 +5917,7 @@ let _worldSwitched = false;
                         );
                     };
                     _barChairWoodMat.customProgramCacheKey = () => "barChairWoodDimmer";
-                    const _woodTexDir = KITCHEN_COVER_TEX_DIR + "wood texture/2K/";
+                    const _woodTexDir = KITCHEN_COVER_TEX_DIR + "wood-texture/2K/";
                     const _woodLoader = new THREE.TextureLoader();
                     const _loadWoodTex = (file, isColor) =>
                       _woodLoader.loadAsync(encodeURI(_woodTexDir + file)).then((tex) => {
