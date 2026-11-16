@@ -7,6 +7,13 @@ import { RectAreaLightUniformsLib } from "three/addons/lights/RectAreaLightUnifo
 import { Reflector } from "three/addons/objects/Reflector.js";
 import { getMeetingRoomSceneMount } from "./meetingRoomSceneMount.js";
 import { emitMeetingRoomSceneEvent } from "../game/meetingRoomSceneEvents.js";
+import {
+  CAR_MASS,
+  CAR_BUMP_RESET_SPEED,
+  CAR_BUMP_SLIDE_DECAY,
+  CAR_BUMP_SPIN_DECAY,
+  solveCarBump,
+} from "../game/carBumpPhysics.js";
 
 /**
  * Dev-only perf tooling (both false in production builds):
@@ -6662,22 +6669,8 @@ const ARENA_SPAWN_PLAYER_DEPTH = 0.62;
 const ARENA_SPAWN_CORNER_DEPTH = 0.72;
 const ARENA_SPAWN_CORNER_WIDTH = 0.72;
 const ARENA_SPAWN_EDGE_CLEAR = 0.16;
-const CAR_MASS = 1.8;
-const CAR_BUMP_RESTITUTION = 0.58;
-const CAR_BUMP_FRICTION = 0.12;
-const CAR_BUMP_SLOP = 0.0015;
-/** Closing speed above which a hit restarts a (cable-)sliding car's impact timer. */
-const CAR_BUMP_RESET_SPEED = 0.6;
-/** How fast a driving car's collision push (sideways slide / spin) dies out, 1/s. */
-const CAR_BUMP_SLIDE_DECAY = 2.8;
-const CAR_BUMP_SPIN_DECAY = 3.2;
-/**
- * Directional resistance of the car being pushed, as an effective-mass factor:
- * pushed along its own length (from behind / head-on) it resists hard, pushed
- * from the side it gives way easily. Angles in between blend smoothly (cos²).
- */
-const CAR_PUSH_RESIST_ALONG = 2.4;
-const CAR_PUSH_RESIST_SIDE = 0.65;
+// Car mass, bump restitution / friction / decay and push resistance live in
+// ../game/carBumpPhysics.js (shared with the kitchen race).
 
 /**
  * Start positions from the camera's actual view: the player at the front edge
@@ -6814,96 +6807,6 @@ function clearCarBump() {
   carBumpYaw = 0;
 }
 
-/** Inverse effective mass of car K along direction (dx, dz), with directional resistance. */
-function _carInvMassAlong(K, dx, dz) {
-  const a = K.fx * dx + K.fz * dz;
-  const l = K.ux * dx + K.uz * dz;
-  return ((a * a) / K.resAlong + (l * l) / K.resSide) / CAR_MASS;
-}
-
-/** Velocity change of car K for planar impulse (jx, jz): anisotropic mass tensor. */
-function _carApplyImpulse(K, jx, jz, sign) {
-  const a = (K.fx * jx + K.fz * jz) / K.resAlong;
-  const l = (K.ux * jx + K.uz * jz) / K.resSide;
-  K.vx += (sign * (K.fx * a + K.ux * l)) / CAR_MASS;
-  K.vz += (sign * (K.fz * a + K.uz * l)) / CAR_MASS;
-}
-
-function _obbRadius(K, nx, nz) {
-  return (
-    K.hx * Math.abs(K.ux * nx + K.uz * nz) + K.hz * Math.abs(K.fx * nx + K.fz * nz)
-  );
-}
-
-function _addCornersInside(P, Q, acc) {
-  for (let su = -1; su <= 1; su += 2) {
-    for (let sf = -1; sf <= 1; sf += 2) {
-      const cx = P.x + P.ux * P.hx * su + P.fx * P.hz * sf;
-      const cz = P.z + P.uz * P.hx * su + P.fz * P.hz * sf;
-      const rx = cx - Q.x;
-      const rz = cz - Q.z;
-      const lu = rx * Q.ux + rz * Q.uz;
-      const lf = rx * Q.fx + rz * Q.fz;
-      if (Math.abs(lu) <= Q.hx + 1e-4 && Math.abs(lf) <= Q.hz + 1e-4) {
-        acc.x += cx;
-        acc.z += cz;
-        acc.n += 1;
-      }
-    }
-  }
-}
-
-const _bumpAxes = new Float64Array(8);
-const _bumpAcc = { x: 0, z: 0, n: 0 };
-
-/** SAT overlap of two car boxes; normal points from A to B. */
-function _carBoxOverlap(A, B, res) {
-  const dx = B.x - A.x;
-  const dz = B.z - A.z;
-  let best = Infinity;
-  let bnx = 0;
-  let bnz = 0;
-  const axes = _bumpAxes;
-  axes[0] = A.ux;
-  axes[1] = A.uz;
-  axes[2] = A.fx;
-  axes[3] = A.fz;
-  axes[4] = B.ux;
-  axes[5] = B.uz;
-  axes[6] = B.fx;
-  axes[7] = B.fz;
-  for (let i = 0; i < 8; i += 2) {
-    const nx = axes[i];
-    const nz = axes[i + 1];
-    const d = dx * nx + dz * nz;
-    const o = _obbRadius(A, nx, nz) + _obbRadius(B, nx, nz) - Math.abs(d);
-    if (o <= 0) return false;
-    if (o < best) {
-      best = o;
-      const sg = d < 0 ? -1 : 1;
-      bnx = nx * sg;
-      bnz = nz * sg;
-    }
-  }
-  res.nx = bnx;
-  res.nz = bnz;
-  res.depth = best;
-  const acc = _bumpAcc;
-  acc.x = 0;
-  acc.z = 0;
-  acc.n = 0;
-  _addCornersInside(B, A, acc);
-  _addCornersInside(A, B, acc);
-  if (acc.n > 0) {
-    res.px = acc.x / acc.n;
-    res.pz = acc.z / acc.n;
-  } else {
-    res.px = (A.x + B.x) * 0.5;
-    res.pz = (A.z + B.z) * 0.5;
-  }
-  return true;
-}
-
 /**
  * Puts the loaded car into the existing IMPACT slide state with the given
  * post-collision velocity — the same coast/decay/settle path a cable hit uses,
@@ -6980,93 +6883,23 @@ const _kinB = {};
 const _bumpRes = {};
 
 /**
- * Directional resistance for the car being pushed. The striker is whichever car
- * closes faster along the contact normal; the blend between "A pushes B" and
- * "B pushes A" is smooth so near-equal head-on hits stay symmetric.
- */
-function _setPushResistance(A, B, nx, nz) {
-  const sA = A.vx * nx + A.vz * nz;
-  const sB = -(B.vx * nx + B.vz * nz);
-  const diff = (sA - sB) / (Math.abs(sA) + Math.abs(sB) + 0.05);
-  const bPushed = _cableSmoothstep(-0.35, 0.35, diff);
-  const weights = [
-    [B, bPushed],
-    [A, 1 - bPushed],
-  ];
-  for (let i = 0; i < 2; i++) {
-    const K = weights[i][0];
-    const w = weights[i][1];
-    K.resAlong = THREE.MathUtils.lerp(1, CAR_PUSH_RESIST_ALONG, w);
-    K.resSide = THREE.MathUtils.lerp(1, CAR_PUSH_RESIST_SIDE, w);
-  }
-}
-
-/**
  * Bumper-car impulse between two cars, applied at the contact point (so
  * off-centre hits also spin the car). Each car's mass is direction-dependent:
  * the pushed car resists being shoved along its length and gives way sideways,
- * smoothly by the angle between the hit and its heading (see _carInvMassAlong).
+ * smoothly by the angle between the hit and its heading (see carInvMassAlong in ../game/carBumpPhysics.js).
  */
 function _resolveCarPair(cA, cB) {
   const A = withCar(cA, () => (_carCanBump() ? _readCarKinematics(_kinA) : null));
   if (!A) return;
   const B = withCar(cB, () => (_carCanBump() ? _readCarKinematics(_kinB) : null));
   if (!B) return;
-  if (!_carBoxOverlap(A, B, _bumpRes)) return;
+  if (!solveCarBump(A, B, _bumpRes)) return;
   const nx = _bumpRes.nx;
   const nz = _bumpRes.nz;
-  _setPushResistance(A, B, nx, nz);
-  const rAx = _bumpRes.px - A.x;
-  const rAz = _bumpRes.pz - A.z;
-  const rBx = _bumpRes.px - B.x;
-  const rBz = _bumpRes.pz - B.z;
-  const vAx = A.vx + A.w * rAz;
-  const vAz = A.vz - A.w * rAx;
-  const vBx = B.vx + B.w * rBz;
-  const vBz = B.vz - B.w * rBx;
-  const rvx = vBx - vAx;
-  const rvz = vBz - vAz;
-  const vn = rvx * nx + rvz * nz;
-  const wAn = _carInvMassAlong(A, nx, nz);
-  const wBn = _carInvMassAlong(B, nx, nz);
-  let impulsed = false;
-  if (vn < 0) {
-    const cAn = rAz * nx - rAx * nz;
-    const cBn = rBz * nx - rBx * nz;
-    const denom = wAn + wBn + (cAn * cAn) / A.inertia + (cBn * cBn) / B.inertia;
-    const j = (-(1 + CAR_BUMP_RESTITUTION) * vn) / denom;
-    let jx = nx * j;
-    let jz = nz * j;
-    let tx = rvx - vn * nx;
-    let tz = rvz - vn * nz;
-    const tl = Math.hypot(tx, tz);
-    if (tl > 1e-5) {
-      tx /= tl;
-      tz /= tl;
-      const vt = rvx * tx + rvz * tz;
-      const cAt = rAz * tx - rAx * tz;
-      const cBt = rBz * tx - rBx * tz;
-      const dt =
-        _carInvMassAlong(A, tx, tz) +
-        _carInvMassAlong(B, tx, tz) +
-        (cAt * cAt) / A.inertia +
-        (cBt * cBt) / B.inertia;
-      const jt = THREE.MathUtils.clamp(-vt / dt, -CAR_BUMP_FRICTION * j, CAR_BUMP_FRICTION * j);
-      jx += tx * jt;
-      jz += tz * jt;
-    }
-    _carApplyImpulse(A, jx, jz, -1);
-    A.w -= (rAz * jx - rAx * jz) / A.inertia;
-    _carApplyImpulse(B, jx, jz, 1);
-    B.w += (rBz * jx - rBx * jz) / B.inertia;
-    impulsed = true;
-  }
-  // Separate fully, split by how easily each car moves along the normal.
-  const depth = Math.max(0, _bumpRes.depth - CAR_BUMP_SLOP);
-  const shareA = wAn / Math.max(1e-6, wAn + wBn);
-  const pushA = depth * shareA;
-  const pushB = depth - pushA;
-  const hitSpeed = Math.max(0, -vn);
+  const impulsed = _bumpRes.impulsed;
+  const pushA = _bumpRes.pushA;
+  const pushB = _bumpRes.pushB;
+  const hitSpeed = _bumpRes.hitSpeed;
   if (impulsed) {
     noteCameraImpact(hitSpeed);
     noteCarContact(cA, cB, hitSpeed);

@@ -2880,7 +2880,7 @@ let _worldSwitched = false;
         const sidePlane = _findKitchenMesh(kmodel, "mainTableSidePlane", meshByName);
         if (!topPlane && !sidePlane) {
           console.warn(
-            "ul-kitchen21.gltf: mainTableTopPlane / mainTableSidePlane not found",
+            "ul-kitchen23.gltf: mainTableTopPlane / mainTableSidePlane not found",
           );
           return { coverCloneStepX: null, topMat: null, sideMat: null };
         }
@@ -3425,7 +3425,7 @@ let _worldSwitched = false;
         const loadToken = ++_kitchenLoadToken;
         const kLoader = new GLTFLoader();
         kLoader.load(
-          "ul-kitchen21.gltf",
+          "ul-kitchen23.gltf",
           (gltf) => {
             if (!_worldSwitched || loadToken !== _kitchenLoadToken) return;
 
@@ -3447,7 +3447,7 @@ let _worldSwitched = false;
             });
             const surfaceMesh = kitchenPlate || kitchenPlatePhysic;
             if (!surfaceMesh) {
-              console.warn("ul-kitchen21.gltf: no mainTablePlate/mainTablePlatePhysic mesh found");
+              console.warn("ul-kitchen23.gltf: no mainTablePlate/mainTablePlatePhysic mesh found");
               _worldSwitched = false;
               return;
             }
@@ -4931,7 +4931,7 @@ let _worldSwitched = false;
           },
           undefined,
           (err) => {
-            console.error("Failed to load ul-kitchen21.gltf:", err);
+            console.error("Failed to load ul-kitchen23.gltf:", err);
             _worldSwitched = false;
           },
         );

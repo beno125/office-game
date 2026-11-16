@@ -14,6 +14,14 @@
       import { RectAreaLightUniformsLib } from "three/addons/lights/RectAreaLightUniformsLib.js";
 import { getKitchenSceneMount } from "./kitchenSceneMount.js";
 import { emitKitchenSceneEvent } from "../game/kitchenSceneEvents.js";
+import { StadiumTrack, LapTracker, RaceAIDriver, RaceHud, RACE_LAPS, RACE_COUNTDOWN_SEC } from "./kitchenRace.js";
+import {
+  CAR_BUMP_SLIDE_DECAY,
+  CAR_BUMP_SPIN_DECAY,
+  CAR_BUMP_YAW_CAP,
+  carBoxInertia,
+  solveCarBump,
+} from "../game/carBumpPhysics.js";
 
 const _KITCHEN_BASE = `${import.meta.env.BASE_URL}kitchen-scene-optimized/`;
 const _OFFICE_BASE = `${import.meta.env.BASE_URL}office-scene-optimized/`;
@@ -1892,6 +1900,10 @@ export function isKitchenSceneReady() {
         steerSpeed: 3.4,
         turnRate: 14,
         velY: 0,
+        // Collision push from other cars (race): rides on top of driving, decays.
+        bumpVX: 0,
+        bumpVZ: 0,
+        bumpYaw: 0,
       };
       const CAR_GRAVITY = 75;
       const CAR_AIR_RESISTANCE = 0.08;
@@ -2573,6 +2585,29 @@ let _worldSwitched = false;
         }
       }
 
+      /** greyBox group (greyBox, greyBoxCup) and greyBoxPhysic: turned 90° about Y around the proxy's centre. */
+      const KITCHEN_GREY_BOX_YAW = Math.PI / 2;
+      function rotateKitchenGreyBox(model) {
+        const phys = model.getObjectByName("greyBoxPhysic");
+        if (!phys) return;
+        model.updateMatrixWorld(true);
+        const pivot = new THREE.Box3().setFromObject(phys).getCenter(new THREE.Vector3());
+        const turn = new THREE.Matrix4()
+          .makeTranslation(pivot.x, pivot.y, pivot.z)
+          .multiply(new THREE.Matrix4().makeRotationY(KITCHEN_GREY_BOX_YAW))
+          .multiply(new THREE.Matrix4().makeTranslation(-pivot.x, -pivot.y, -pivot.z));
+        for (const name of ["greyBox", "greyBoxCup", "greyBoxPhysic"]) {
+          const o = model.getObjectByName(name);
+          if (!o) continue;
+          const world = turn.clone().multiply(o.matrixWorld);
+          const local = o.parent
+            ? new THREE.Matrix4().copy(o.parent.matrixWorld).invert().multiply(world)
+            : world;
+          local.decompose(o.position, o.quaternion, o.scale);
+        }
+        model.updateMatrixWorld(true);
+      }
+
       function setupKitchenPropPhysics(model) {
         model.updateMatrixWorld(true);
         // Physics proxies (…Physic) are never drawn, paired with a prop or not.
@@ -2702,6 +2737,740 @@ let _worldSwitched = false;
         }
       }
 
+      // ── Race boundaries: the car is stopped by the rails (raceBoundariesPhysic).
+      // The car is moved by code, not the solver, so the rails are a list of
+      // vertical wall segments in xz and the car's footprint rectangle is pushed
+      // out of them each car step.
+      const KITCHEN_RAIL_BOUNCE = 0.3;
+      const _railSegs = []; // [ax, az, bx, bz, ...]
+      let _railTopY = -Infinity;
+      let _railBottomY = Infinity;
+      // Car footprint in the car's own frame (right / forward), from the bumper box.
+      const _carRailFoot = { ok: false, lr: 0, lf: 0, hr: 0, hf: 0 };
+
+      function buildKitchenRaceBoundaries(model) {
+        _railSegs.length = 0;
+        const mesh = model.getObjectByName("raceBoundariesPhysic");
+        if (!mesh || !mesh.isMesh) return;
+        mesh.updateMatrixWorld(true);
+        const geo = mesh.geometry;
+        const pos = geo.attributes.position;
+        const idx = geo.index;
+        const triCount = idx ? idx.count / 3 : pos.count / 3;
+        const v = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()];
+        const seen = new Set();
+        for (let t = 0; t < triCount; t++) {
+          for (let k = 0; k < 3; k++) {
+            const vi = idx ? idx.getX(t * 3 + k) : t * 3 + k;
+            v[k].fromBufferAttribute(pos, vi).applyMatrix4(mesh.matrixWorld);
+            if (v[k].y > _railTopY) _railTopY = v[k].y;
+            if (v[k].y < _railBottomY) _railBottomY = v[k].y;
+          }
+          // A vertical wall triangle projects onto a line: keep its two extreme points.
+          let best = -1;
+          let ia = 0;
+          let ib = 1;
+          for (const [a, b] of [[0, 1], [1, 2], [0, 2]]) {
+            const d = (v[a].x - v[b].x) ** 2 + (v[a].z - v[b].z) ** 2;
+            if (d > best) { best = d; ia = a; ib = b; }
+          }
+          if (best < 1e-6) continue;
+          const r = (n) => Math.round(n * 1000);
+          const ka = r(v[ia].x) + "," + r(v[ia].z);
+          const kb = r(v[ib].x) + "," + r(v[ib].z);
+          const key = ka < kb ? ka + "|" + kb : kb + "|" + ka;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          _railSegs.push(v[ia].x, v[ia].z, v[ib].x, v[ib].z);
+        }
+      }
+
+      function captureCarRailFootprint(bodyPos, ex, ez) {
+        if (!canonBodyPhys) return;
+        const a = carState.angle;
+        const fx = Math.sin(a), fz = Math.cos(a);
+        const rx = Math.cos(a), rz = -Math.sin(a);
+        const ax = new CANNON.Vec3(1, 0, 0);
+        canonBodyPhys.quaternion.vmult(ax, ax);
+        const xIsRight = Math.abs(ax.x * rx + ax.z * rz) >= Math.abs(ax.x * fx + ax.z * fz);
+        const dx = bodyPos.x - car.position.x;
+        const dz = bodyPos.z - car.position.z;
+        _carRailFoot.lr = dx * rx + dz * rz;
+        _carRailFoot.lf = dx * fx + dz * fz;
+        _carRailFoot.hr = xIsRight ? ex : ez;
+        _carRailFoot.hf = xIsRight ? ez : ex;
+        _carRailFoot.ok = true;
+      }
+
+      /** Push the car out of the rails and take speed off (bounce) when driving into one. */
+      function collideCarWithRails(pos, state) {
+        if (!_carRailFoot.ok || _railSegs.length === 0) return;
+        const carBottom = pos.y - carBottomOffsetY;
+        if (carBottom > _railTopY || pos.y < _railBottomY - 1) return;
+        const F = _carRailFoot;
+        for (let iter = 0; iter < 2; iter++) {
+          let hit = false;
+          const a = state.angle;
+          const fx = Math.sin(a), fz = Math.cos(a);
+          const rx = Math.cos(a), rz = -Math.sin(a);
+          const cx = pos.x + rx * F.lr + fx * F.lf;
+          const cz = pos.z + rz * F.lr + fz * F.lf;
+          for (let i = 0; i < _railSegs.length; i += 4) {
+            const ax = _railSegs[i], az = _railSegs[i + 1];
+            const bx = _railSegs[i + 2], bz = _railSegs[i + 3];
+            let sx = bx - ax, sz = bz - az;
+            const sl = Math.hypot(sx, sz);
+            // Separating axes: car right, car forward, segment normal.
+            const axes = [rx, rz, fx, fz, -sz / sl, sx / sl];
+            let depth = Infinity, nx = 0, nz = 0;
+            for (let k = 0; k < 6; k += 2) {
+              const ux = axes[k], uz = axes[k + 1];
+              const rad = F.hr * Math.abs(ux * rx + uz * rz) + F.hf * Math.abs(ux * fx + uz * fz);
+              const c = cx * ux + cz * uz;
+              const p0 = ax * ux + az * uz, p1 = bx * ux + bz * uz;
+              const sMin = Math.min(p0, p1), sMax = Math.max(p0, p1);
+              const pushNeg = c + rad - sMin; // move car along -u
+              const pushPos = sMax - (c - rad); // move car along +u
+              if (pushNeg <= 0 || pushPos <= 0) { depth = 0; break; }
+              if (pushNeg < depth) { depth = pushNeg; nx = -ux; nz = -uz; }
+              if (pushPos < depth) { depth = pushPos; nx = ux; nz = uz; }
+            }
+            if (!(depth > 0)) continue;
+            hit = true;
+            pos.x += nx * depth;
+            pos.z += nz * depth;
+            // A collision push (from another car) never carries on into the rail.
+            if (state.bumpVX || state.bumpVZ) {
+              const bn = state.bumpVX * nx + state.bumpVZ * nz;
+              if (bn < 0) {
+                state.bumpVX -= bn * nx;
+                state.bumpVZ -= bn * nz;
+              }
+            }
+            const fn = fx * nx + fz * nz; // n points from the rail toward the car
+            if (state.speed * fn < 0) {
+              const k = Math.abs(fn);
+              state.speed = state.speed * (1 - k) - state.speed * k * KITCHEN_RAIL_BOUNCE;
+              if (Math.abs(state.speed) < 0.04) state.speed = 0;
+            }
+            break;
+          }
+          if (!hit) break;
+        }
+      }
+
+      // ── Kitchen race ─────────────────────────────────────────────────────
+      // A 4-lap race around the table: the player against 2 AI cars. The AI
+      // cars are copies of the player's car model, driven by the same
+      // stepCarDrive() / collideCarWithRails() code with AI inputs.
+      const RACE_GRID_GAP = 4; // progress units between grid slots
+      const RACE_ISLAND_MARGIN = 0.55;
+      const RACE_START_DELAY_SEC = 1.4;
+      const RACE_GO_SHOW_SEC = 0.9;
+      const RACE_AI_CARS = [
+        {
+          name: "Blue",
+          color: 0x1f6fff,
+          lateral: -0.45,
+          speedFactor: 1,
+          turnSpeedFactor: 0.9,
+          lookahead: 4,
+          turnWiden: 1.1,
+          wobble: 0.35,
+          wobbleRate: 0.13,
+          phase: 0,
+        },
+        {
+          name: "Green",
+          color: 0x22c35e,
+          lateral: 0.55,
+          speedFactor: 0.97,
+          turnSpeedFactor: 0.85,
+          lookahead: 4.6,
+          turnWiden: 0.8,
+          wobble: 0.5,
+          wobbleRate: 0.09,
+          phase: 1.7,
+        },
+      ];
+      // Grid order (front to back): AI 0, player, AI 1.
+      const RACE_GRID_ORDER = ["ai0", "player", "ai1"];
+      const _raceNoInput = { forward: false, reverse: false, left: false, right: false, brake: false };
+      let _raceTrack = null;
+      let _racePhase = "off"; // off | waiting | countdown | racing | finished
+      let _raceTimer = 0;
+      let _raceGoTimer = 0;
+      let _raceModel = null;
+      let _raceAiTemplate = null;
+      let _raceHud = null;
+      let _raceWinner = null;
+      const _raceCars = [];
+      // The car body collider's pose in the car's local frame (for AI bumpers).
+      const _raceBodyLocalPos = new THREE.Vector3();
+      const _raceBodyLocalQuat = new THREE.Quaternion();
+      let _raceBodyLocalOk = false;
+      const _racePt = { x: 0, z: 0, heading: 0 };
+      const _raceTmpV = new THREE.Vector3();
+      const _raceTmpQ = new THREE.Quaternion();
+      const _raceSteerQ = new THREE.Quaternion();
+      const _raceRollQ = new THREE.Quaternion();
+
+      function kitchenRaceInputsLocked() {
+        return _racePhase === "waiting" || _racePhase === "countdown" || _racePhase === "finished";
+      }
+
+      /** Copy of the player's car model (lights / particles stripped later) for the AI cars. */
+      function prepareKitchenRaceCarTemplate(carModel) {
+        _raceAiTemplate = carModel.clone(true);
+        if (canonBodyPhys) {
+          car.updateMatrixWorld(true);
+          const p = canonBodyPhys.position;
+          const q = canonBodyPhys.quaternion;
+          _raceBodyLocalPos.set(p.x, p.y, p.z);
+          car.worldToLocal(_raceBodyLocalPos);
+          _raceBodyLocalQuat.copy(car.quaternion).invert().multiply(_raceTmpQ.set(q.x, q.y, q.z, q.w));
+          _raceBodyLocalOk = true;
+        }
+      }
+
+      function createRaceDriveState() {
+        return {
+          speed: 0,
+          angle: 0,
+          steerAngle: 0,
+          wheelAngle: 0,
+          driftAngle: 0,
+          turnHoldTime: 0,
+          maxSpeed: carState.maxSpeed,
+          accel: carState.accel,
+          brakeDecel: carState.brakeDecel,
+          brakeDecelReverseKey: carState.brakeDecelReverseKey,
+          friction: carState.friction,
+          steerSpeed: carState.steerSpeed,
+          turnRate: carState.turnRate,
+          velY: 0,
+          bumpVX: 0,
+          bumpVZ: 0,
+          bumpYaw: 0,
+        };
+      }
+
+      function createRaceAiCar(cfg) {
+        const root = new THREE.Group();
+        root.name = "raceCar" + cfg.name;
+        root.scale.copy(car.scale);
+        const model = _raceAiTemplate.clone(true);
+        const strip = [];
+        model.traverse((o) => {
+          if (o.isLight || o.isPoints || o.isSprite) strip.push(o);
+        });
+        for (const o of strip) o.parent && o.parent.remove(o);
+        let paint = null;
+        model.traverse((o) => {
+          if (!o.isMesh || !o.material || Array.isArray(o.material)) return;
+          const isBody = /^carBody/.test(o.material.name || "") || o.name === "body";
+          const isAirIn = o.name === "airIn1" || o.name === "airIn2" || o.name === "airIn3";
+          if (!isBody && !isAirIn) return;
+          if (!paint) {
+            paint = o.material.clone();
+            paint.color.setHex(cfg.color);
+          }
+          o.material = paint;
+        });
+        root.add(model);
+        // Same head / tail lamps as the player's car: spot lights + table glows.
+        const spots = [];
+        for (const e of _carLampSpots) {
+          const src = e.spot;
+          const spot = new THREE.SpotLight(src.color, src.intensity, src.distance, src.angle, src.penumbra, src.decay);
+          spot.name = src.name;
+          spot.castShadow = false;
+          spot.position.copy(src.position);
+          const target = new THREE.Object3D();
+          target.name = src.target.name;
+          target.position.copy(src.target.position);
+          spot.target = target;
+          root.add(spot);
+          root.add(target);
+          spots.push({ spot, kind: e.kind, zSign: e.zSign, aimAlong: e.aimAlong });
+        }
+        const glows = [];
+        setupTableLightReflections(model, glows);
+        const wheels = ["wheelFL", "wheelFR", "wheelRL", "wheelRR"].map((n) => model.getObjectByName(n));
+        const playerWheels = [wheelFL, wheelFR, wheelRL, wheelRR];
+        wheels.forEach((w, i) => {
+          if (w && playerWheels[i] && playerWheels[i].baseQuat) w.baseQuat = playerWheels[i].baseQuat.clone();
+        });
+        scene.add(root);
+        applyTextureAnisotropyToRoot(root);
+        applyPerformanceShadowPolicy(root);
+        let bumper = null;
+        if (_carPropBumper) {
+          const he = _carPropBumper.shapes[0].halfExtents;
+          const off = _carPropBumper.shapeOffsets[0];
+          bumper = new CANNON.Body({
+            type: CANNON.Body.KINEMATIC,
+            collisionFilterGroup: PHYS_GROUP_PROP_BUMPER,
+            collisionFilterMask: 0,
+          });
+          bumper.addShape(new CANNON.Box(new CANNON.Vec3(he.x, he.y, he.z)), new CANNON.Vec3(off.x, off.y, off.z));
+          physicsWorld.addBody(bumper);
+        }
+        return {
+          id: "",
+          name: cfg.name,
+          color: cfg.color,
+          isPlayer: false,
+          root,
+          pos: root.position,
+          state: createRaceDriveState(),
+          input: { forward: false, reverse: false, left: false, right: false, brake: false },
+          ai: new RaceAIDriver(_raceTrack, cfg),
+          tracker: new LapTracker(_raceTrack),
+          wheels,
+          spots,
+          glows,
+          bumper,
+          bumperPrev: new CANNON.Vec3(),
+          bumperPrevValid: false,
+          finishOrder: 0,
+        };
+      }
+
+      function makeRaceStartLineMesh(x, z0, z1) {
+        const width = 0.9;
+        const length = Math.abs(z1 - z0);
+        const cols = 2;
+        const rows = Math.max(4, Math.round((length / width) * cols));
+        const cv = document.createElement("canvas");
+        cv.width = cols * 32;
+        cv.height = rows * 32;
+        const ctx = cv.getContext("2d");
+        for (let r = 0; r < rows; r++) {
+          for (let c = 0; c < cols; c++) {
+            ctx.fillStyle = (r + c) % 2 ? "#111111" : "#f4f4f4";
+            ctx.fillRect(c * 32, r * 32, 32, 32);
+          }
+        }
+        const tex = new THREE.CanvasTexture(cv);
+        tex.colorSpace = THREE.SRGBColorSpace;
+        tex.magFilter = THREE.NearestFilter;
+        tex.generateMipmaps = false;
+        tex.minFilter = THREE.LinearFilter;
+        const mat = new THREE.MeshStandardMaterial({
+          map: tex,
+          roughness: 0.55,
+          metalness: 0,
+          polygonOffset: true,
+          polygonOffsetFactor: -2,
+          polygonOffsetUnits: -2,
+        });
+        const mesh = new THREE.Mesh(new THREE.PlaneGeometry(width, length), mat);
+        mesh.name = "raceStartLine";
+        mesh.rotation.x = -Math.PI / 2;
+        mesh.position.set(x, tableSurfaceY + 0.006, (z0 + z1) / 2);
+        mesh.receiveShadow = true;
+        mesh.renderOrder = 2;
+        return mesh;
+      }
+
+      /** Track, rails, start line, AI cars and HUD (once the kitchen is loaded). */
+      function setupKitchenRace() {
+        if (_raceTrack || !_raceModel || !_raceAiTemplate || _railSegs.length === 0) return;
+        const bounds = { xMin: Infinity, xMax: -Infinity, zNear: Infinity, zFar: -Infinity };
+        for (let i = 0; i < _railSegs.length; i += 2) {
+          bounds.xMin = Math.min(bounds.xMin, _railSegs[i]);
+          bounds.xMax = Math.max(bounds.xMax, _railSegs[i]);
+          bounds.zNear = Math.min(bounds.zNear, _railSegs[i + 1]);
+          bounds.zFar = Math.max(bounds.zFar, _railSegs[i + 1]);
+        }
+
+        // The loop runs around the props on the table's middle line (no rail of its
+        // own: the model's rails are the only boundary).
+        const z0 = (bounds.zNear + bounds.zFar) / 2;
+        let xL = Infinity;
+        let xR = -Infinity;
+        for (const p of _kitchenProps) {
+          if (p.body._propCup) continue;
+          xL = Math.min(xL, p.body.position.x);
+          xR = Math.max(xR, p.body.position.x);
+        }
+        if (!(xR > xL)) {
+          xL = bounds.xMin + (bounds.xMax - bounds.xMin) * 0.25;
+          xR = bounds.xMax - (bounds.xMax - bounds.xMin) * 0.25;
+        }
+        let islandR = 2;
+        for (const p of _kitchenProps) {
+          if (p.body._propCup) continue;
+          const b = p.body;
+          const dx = Math.max(0, xL - b.position.x, b.position.x - xR);
+          islandR = Math.max(islandR, Math.hypot(dx, b.position.z - z0) + b._propRadius);
+        }
+        islandR += RACE_ISLAND_MARGIN;
+        const centreR = (islandR + (bounds.zFar - z0)) / 2;
+        const startX = (bounds.xMin + bounds.xMax) / 2;
+        _raceTrack = new StadiumTrack({ xL, xR, z0, radius: centreR, startX, laneHalf: (bounds.zFar - z0 - islandR) / 2 });
+
+        scene.add(makeRaceStartLineMesh(startX, z0 + islandR + 0.08, bounds.zFar - 0.08));
+
+        // Cars: the player plus the AI cars, each with a lap tracker.
+        _raceCars.length = 0;
+        _raceCars.push({
+          id: "player",
+          name: "You",
+          isPlayer: true,
+          pos: car.position,
+          state: carState,
+          tracker: new LapTracker(_raceTrack),
+          finishOrder: 0,
+        });
+        RACE_AI_CARS.forEach((cfg, i) => {
+          const rc = createRaceAiCar(cfg);
+          rc.id = "ai" + i;
+          _raceCars.push(rc);
+        });
+        scheduleRebuildBloomDarkenLists();
+
+        _raceHud = new RaceHud();
+        _raceHud.attach(getKitchenSceneMount());
+        resetKitchenRace();
+      }
+
+      function placeRaceCar(rc, x, z, heading) {
+        rc.pos.set(x, tableSpawn.y, z);
+        rc.state.angle = heading;
+        rc.state.speed = 0;
+        rc.state.steerAngle = 0;
+        rc.state.velY = 0;
+        rc.state._brakeTime = 0;
+        rc.state.bumpVX = 0;
+        rc.state.bumpVZ = 0;
+        rc.state.bumpYaw = 0;
+      }
+
+      /** Cars back on the grid behind the start line, then a countdown. */
+      function resetKitchenRace() {
+        if (!_raceTrack) return;
+        const side = Math.max(0.6, Math.min(1.35, (_raceLaneHalfWidth() - _carRailFoot.hr) - 0.25));
+        RACE_GRID_ORDER.forEach((id, slot) => {
+          const rc = _raceCars.find((c) => c.id === id);
+          if (!rc) return;
+          const pt = _raceTrack.pointAt(-(slot + 0.8) * RACE_GRID_GAP, slot % 2 ? -side : side, _racePt);
+          if (rc.isPlayer) {
+            stopKitchenCarTumble();
+            carFalling = false;
+            carFloorTimer = 0;
+            placeRaceCar(rc, pt.x, pt.z, pt.heading);
+            car.quaternion.setFromAxisAngle(_flatUp, pt.heading);
+            carUpLerp.set(0, 1, 0);
+            _bumperPrevValid = false;
+            tableSpawn.x = pt.x;
+            tableSpawn.z = pt.z;
+            car.updateMatrixWorld(true);
+          } else {
+            placeRaceCar(rc, pt.x, pt.z, pt.heading);
+            rc.ai.reset();
+            rc.bumperPrevValid = false;
+            syncRaceAiCar(rc, 0);
+          }
+          rc.finishOrder = 0;
+          rc.tracker.reset(rc.pos.x, rc.pos.z);
+        });
+        _raceWinner = null;
+        _racePhase = "waiting";
+        _raceTimer = RACE_START_DELAY_SEC;
+        _raceGoTimer = 0;
+        if (_raceHud) {
+          _raceHud.hideResult();
+          _raceHud.setBig("");
+        }
+      }
+
+      function _raceLaneHalfWidth() {
+        // Centre line sits in the middle of the lane between island and outer rail.
+        let zFar = -Infinity;
+        for (let i = 1; i < _railSegs.length; i += 2) zFar = Math.max(zFar, _railSegs[i]);
+        return Math.max(0.5, zFar - (_raceTrack.z0 + _raceTrack.r));
+      }
+
+      /** Where the player goes back on the track after a fall during the race. */
+      function kitchenRaceRespawnPoint() {
+        if (!_raceTrack || _racePhase === "off") return null;
+        const p = _raceTrack.progress(car.position.x, car.position.z);
+        return _raceTrack.pointAt(p, 0, { x: 0, z: 0, heading: 0 });
+      }
+
+      /** A race car's lamp spots aimed at the table, as updateCarLampSpotAim does for the player. */
+      function aimRaceCarSpots(rc, tableY) {
+        if (!rc.spots || !rc.spots.length) return;
+        _raceTmpV.set(rc.root.position.x, tableY, rc.root.position.z);
+        rc.root.worldToLocal(_raceTmpV);
+        const tableLocalY = _raceTmpV.y;
+        for (const e of rc.spots) {
+          const spot = e.spot;
+          const aimY = e.kind === "front" ? tableLocalY : spot.position.y * 0.55 + tableLocalY * 0.45;
+          spot.target.position.set(spot.position.x, aimY, spot.position.z + e.zSign * e.aimAlong);
+        }
+      }
+
+      /** AI car visuals (pose + wheels) and its prop bumper follow its drive state. */
+      function syncRaceAiCar(rc, dt) {
+        const st = rc.state;
+        rc.root.position.y = tableSpawn.y;
+        rc.root.quaternion.setFromAxisAngle(_flatUp, st.angle);
+        rc.root.updateMatrixWorld(true);
+        st.wheelAngle = (st.wheelAngle + (st.speed * dt) / WHEEL_RADIUS) % (Math.PI * 2);
+        _raceRollQ.setFromAxisAngle(_axisWheelRoll, st.wheelAngle);
+        _raceSteerQ.setFromAxisAngle(_axisWheelY, -st.steerAngle);
+        rc.wheels.forEach((w, i) => {
+          if (!w || !w.baseQuat) return;
+          w.quaternion.copy(w.baseQuat);
+          if (i < 2) w.quaternion.multiply(_raceSteerQ);
+          w.quaternion.multiply(_raceRollQ);
+        });
+        const b = rc.bumper;
+        if (!b || !_raceBodyLocalOk) return;
+        _raceTmpV.copy(_raceBodyLocalPos);
+        rc.root.localToWorld(_raceTmpV);
+        _raceTmpQ.copy(rc.root.quaternion).multiply(_raceBodyLocalQuat);
+        if (rc.bumperPrevValid && dt > 0) {
+          const inv = 1 / dt;
+          b.velocity.set((_raceTmpV.x - rc.bumperPrev.x) * inv, (_raceTmpV.y - rc.bumperPrev.y) * inv, (_raceTmpV.z - rc.bumperPrev.z) * inv);
+          const sp = b.velocity.length();
+          if (sp > KITCHEN_PROP_BUMPER_MAX_SPEED) b.velocity.scale(KITCHEN_PROP_BUMPER_MAX_SPEED / sp, b.velocity);
+        } else {
+          b.velocity.set(0, 0, 0);
+        }
+        rc.bumperPrev.set(_raceTmpV.x, _raceTmpV.y, _raceTmpV.z);
+        rc.bumperPrevValid = true;
+        b.position.set(_raceTmpV.x, _raceTmpV.y, _raceTmpV.z);
+        b.quaternion.set(_raceTmpQ.x, _raceTmpQ.y, _raceTmpQ.z, _raceTmpQ.w);
+        b.aabbNeedsUpdate = true;
+      }
+
+      // ── Car-to-car pushing: the meeting room's bumper-car physics, shared via
+      // ../game/carBumpPhysics.js. Every race car is an oriented box (its
+      // collision footprint) with the same mass; a hit's along-heading part goes
+      // into the car's speed, the rest is a decaying sideways push / spin on top
+      // of its driving (the meeting room's "driving" path).
+      const _raceKin = [];
+      const _raceBumpRes = {};
+      const _raceOthers = []; // other cars' positions, for the AI to steer around
+
+      /** Planar kinematics of a race car as an oriented box (for solveCarBump). */
+      function readRaceCarKinematics(rc, out) {
+        const st = rc.state;
+        const a = st.angle;
+        out.a = a;
+        out.ux = Math.cos(a);
+        out.uz = -Math.sin(a);
+        out.fx = Math.sin(a);
+        out.fz = Math.cos(a);
+        out.x = rc.pos.x + out.ux * _carRailFoot.lr + out.fx * _carRailFoot.lf;
+        out.z = rc.pos.z + out.uz * _carRailFoot.lr + out.fz * _carRailFoot.lf;
+        out.hx = _carRailFoot.hr;
+        out.hz = _carRailFoot.hf;
+        out.vx = out.fx * st.speed + st.bumpVX;
+        out.vz = out.fz * st.speed + st.bumpVZ;
+        out.w = st.bumpYaw;
+        out.inertia = carBoxInertia(out.hx, out.hz);
+        out.resAlong = 1;
+        out.resSide = 1;
+        return out;
+      }
+
+      /** Result of a hit on a driving car (as _applyCarBumpResult in the meeting room). */
+      function applyRaceCarBump(rc, K, impulsed, dx, dz) {
+        const st = rc.state;
+        rc.pos.x += dx;
+        rc.pos.z += dz;
+        if (!impulsed) return;
+        const along = K.vx * K.fx + K.vz * K.fz;
+        const cap = st.maxSpeed * 1.25;
+        st.speed = Math.max(-cap, Math.min(cap, along));
+        st.bumpVX = K.vx - K.fx * along;
+        st.bumpVZ = K.vz - K.fz * along;
+        st.bumpYaw = Math.max(-CAR_BUMP_YAW_CAP, Math.min(CAR_BUMP_YAW_CAP, K.w));
+      }
+
+      /** Per car step: the collision push slides / spins the car, then decays. */
+      function integrateRaceCarBump(pos, st, dt) {
+        if (st.bumpVX === 0 && st.bumpVZ === 0 && st.bumpYaw === 0) return;
+        pos.x += st.bumpVX * dt;
+        pos.z += st.bumpVZ * dt;
+        st.angle += st.bumpYaw * dt;
+        const kv = Math.exp(-CAR_BUMP_SLIDE_DECAY * dt);
+        const kw = Math.exp(-CAR_BUMP_SPIN_DECAY * dt);
+        st.bumpVX *= kv;
+        st.bumpVZ *= kv;
+        st.bumpYaw *= kw;
+        if (Math.hypot(st.bumpVX, st.bumpVZ) < 0.01) {
+          st.bumpVX = 0;
+          st.bumpVZ = 0;
+        }
+        if (Math.abs(st.bumpYaw) < 0.02) st.bumpYaw = 0;
+      }
+
+      function raceCarCanBump(rc) {
+        return !rc.isPlayer || (!carFalling && carState.velY === 0);
+      }
+
+      /** Car-to-car contacts, every pair (two passes, as in the meeting room). */
+      function collideRaceCars() {
+        if (!_carRailFoot.ok) return;
+        for (let pass = 0; pass < 2; pass++) {
+          for (let i = 0; i < _raceCars.length; i++) {
+            const cA = _raceCars[i];
+            if (!raceCarCanBump(cA)) continue;
+            for (let j = i + 1; j < _raceCars.length; j++) {
+              const cB = _raceCars[j];
+              if (!raceCarCanBump(cB)) continue;
+              const A = readRaceCarKinematics(cA, _raceKin[0] || (_raceKin[0] = {}));
+              const B = readRaceCarKinematics(cB, _raceKin[1] || (_raceKin[1] = {}));
+              if (!solveCarBump(A, B, _raceBumpRes)) continue;
+              const r = _raceBumpRes;
+              applyRaceCarBump(cA, A, r.impulsed, -r.nx * r.pushA, -r.nz * r.pushA);
+              applyRaceCarBump(cB, B, r.impulsed, r.nx * r.pushB, r.nz * r.pushB);
+            }
+          }
+        }
+      }
+
+      /** Per car step (after the player's updateCar): AI driving and car contacts. */
+      function stepKitchenRaceCars(dt) {
+        if (!_raceTrack) return;
+        const locked = kitchenRaceInputsLocked();
+        for (const rc of _raceCars) {
+          if (rc.isPlayer) continue;
+          let input = _raceNoInput;
+          if (!locked) {
+            _raceOthers.length = 0;
+            for (const o of _raceCars) if (o !== rc) _raceOthers.push(o.pos);
+            input = rc.ai.computeInput(rc.pos, rc.state, dt, rc.input, _raceOthers);
+          }
+          stepCarDrive(rc.state, input, rc.pos, false, dt);
+          integrateRaceCarBump(rc.pos, rc.state, dt);
+          collideCarWithRails(rc.pos, rc.state);
+        }
+        // No pushing while the cars are held (waiting / countdown / finished).
+        if (!locked) collideRaceCars();
+        // A car pushed by another one must still not end up inside a rail.
+        for (const rc of _raceCars) {
+          if (rc.isPlayer && (carFalling || carState.velY !== 0)) continue;
+          collideCarWithRails(rc.pos, rc.state);
+        }
+        // An AI car pushed through a gap in the outer rails is put back on the track.
+        for (const rc of _raceCars) {
+          if (rc.isPlayer) continue;
+          const offX = Math.abs(rc.pos.x - tablePlateCenter.x) > tablePlateHalfX;
+          const offZ = Math.abs(rc.pos.z - tablePlateCenter.z) > tablePlateHalfZ;
+          if (!offX && !offZ) continue;
+          const pt = _raceTrack.pointAt(_raceTrack.progress(rc.pos.x, rc.pos.z), 0, _racePt);
+          placeRaceCar(rc, pt.x, pt.z, pt.heading);
+          rc.bumperPrevValid = false;
+        }
+      }
+
+      function kitchenRaceCarsMoving() {
+        if (_racePhase === "racing") return true;
+        for (const rc of _raceCars) {
+          if (!rc.isPlayer && Math.abs(rc.state.speed) > 0.05) return true;
+        }
+        return false;
+      }
+
+      function raceStandings() {
+        return _raceCars.slice().sort((a, b) => {
+          if (a.finishOrder || b.finishOrder) {
+            if (!a.finishOrder) return 1;
+            if (!b.finishOrder) return -1;
+            return a.finishOrder - b.finishOrder;
+          }
+          return b.tracker.progressValue - a.tracker.progressValue;
+        });
+      }
+
+      /** Per frame: race phases, laps, HUD, AI car visuals. */
+      function updateKitchenRace(dt) {
+        if (!_raceTrack) {
+          if (_kitchenSceneReady) setupKitchenRace();
+          if (!_raceTrack) return;
+        }
+        _raceHud.attach(getKitchenSceneMount());
+        for (const rc of _raceCars) if (!rc.isPlayer) syncRaceAiCar(rc, dt);
+
+        if (_racePhase === "waiting") {
+          _raceTimer -= dt;
+          if (_raceTimer <= 0) {
+            _racePhase = "countdown";
+            _raceTimer = RACE_COUNTDOWN_SEC;
+          }
+        } else if (_racePhase === "countdown") {
+          _raceTimer -= dt;
+          if (_raceTimer <= 0) {
+            _racePhase = "racing";
+            _raceGoTimer = RACE_GO_SHOW_SEC;
+            _raceHud.setBig("GO!", "#4dff88");
+          } else {
+            _raceHud.setBig(String(Math.ceil(_raceTimer)), "#ffd23f");
+          }
+        } else if (_racePhase === "racing") {
+          if (_raceGoTimer > 0) {
+            _raceGoTimer -= dt;
+            if (_raceGoTimer <= 0) _raceHud.setBig("");
+          }
+          let order = 0;
+          for (const rc of _raceCars) order = Math.max(order, rc.finishOrder);
+          for (const rc of _raceCars) {
+            rc.tracker.update(rc.pos.x, rc.pos.z);
+            if (!rc.finishOrder && rc.tracker.lapsDone >= RACE_LAPS) {
+              rc.finishOrder = ++order;
+              if (!_raceWinner) _raceWinner = rc;
+            }
+          }
+          if (_raceWinner) {
+            _racePhase = "finished";
+            _raceHud.setBig("");
+            if (_raceWinner.isPlayer) {
+              _raceHud.showResult("You win!", "Press R to race again", "#4dff88");
+            } else {
+              const hex = "#" + _raceWinner.color.toString(16).padStart(6, "0");
+              _raceHud.showResult(`${_raceWinner.name} car wins`, "Press R to race again", hex);
+            }
+          }
+        }
+
+        const standings = raceStandings();
+        const player = _raceCars.find((c) => c.isPlayer);
+        if (player) {
+          const lap = Math.min(RACE_LAPS, player.tracker.lapsDone + 1);
+          _raceHud.setStatus(lap, RACE_LAPS, standings.indexOf(player) + 1, _raceCars.length);
+        }
+      }
+
+      window.kitchenRace = {
+        restart: () => resetKitchenRace(),
+        getState: () => ({
+          phase: _racePhase,
+          winner: _raceWinner ? _raceWinner.name : null,
+          cars: _raceCars.map((rc) => ({
+            name: rc.name,
+            laps: rc.tracker.lapsDone,
+            progress: +rc.tracker.progressValue.toFixed(2),
+            speed: +rc.state.speed.toFixed(2),
+            x: +rc.pos.x.toFixed(2),
+            z: +rc.pos.z.toFixed(2),
+          })),
+        }),
+      };
+
+      window.addEventListener("keydown", (e) => {
+        if (e.code !== "KeyR" || e.repeat || e.metaKey || e.ctrlKey || e.altKey) return;
+        if (!_kitchenSceneRendering || !_raceTrack) return;
+        e.preventDefault();
+        resetKitchenRace();
+      });
+
       // Car bumper for props: the car's body collider starts above the plates
       // and only the 4 wheel cylinders reach their height, so a plate could
       // slip under / between them. This box covers the car's whole footprint
@@ -2753,6 +3522,7 @@ let _worldSwitched = false;
         _carPropBumper.quaternion.copy(canonBodyPhys.quaternion);
         physicsWorld.addBody(_carPropBumper);
         _bumperPrevValid = false;
+        captureCarRailFootprint(bp, ex, ez);
       }
 
       /** Bumper follows the car body, with a real velocity so it pushes props. */
@@ -2920,6 +3690,16 @@ let _worldSwitched = false;
         car.position.copy(tableSpawn);
         car.quaternion.identity();
         carState.angle = 0;
+        carState.bumpVX = 0;
+        carState.bumpVZ = 0;
+        carState.bumpYaw = 0;
+        // During the race: back on the track where the car left it.
+        const racePt = kitchenRaceRespawnPoint();
+        if (racePt) {
+          car.position.x = racePt.x;
+          car.position.z = racePt.z;
+          carState.angle = racePt.heading;
+        }
         carState.speed = 0;
         carState.steerAngle = 0;
         carState.velY = 0;
@@ -2985,8 +3765,16 @@ let _worldSwitched = false;
       const KITCHEN_PROP_PROP_RESTITUTION = 0.2;
       const _pushAz = new CANNON.Vec3();
       const _pushAxes = new Float64Array(8);
+      /** Props are pushed by the player's bumper and by every race car's bumper. */
       function pushKitchenPropsOutOfCar() {
-        const bb = _carPropBumper;
+        pushKitchenPropsOutOfBumper(_carPropBumper);
+        for (let i = 0; i < _raceCars.length; i++) {
+          const rc = _raceCars[i];
+          if (!rc.isPlayer && rc.bumper) pushKitchenPropsOutOfBumper(rc.bumper);
+        }
+      }
+
+      function pushKitchenPropsOutOfBumper(bb) {
         if (!bb) return;
         const shape = bb.shapes[0];
         const he = shape.halfExtents;
@@ -3246,7 +4034,20 @@ let _worldSwitched = false;
           const r = b.boundingRadius + KITCHEN_PROP_WAKE_MARGIN;
           const dx = car.position.x - b.position.x;
           const dz = car.position.z - b.position.z;
-          if (dx * dx + dz * dz < r * r) b.wakeUp();
+          if (dx * dx + dz * dz < r * r) {
+            b.wakeUp();
+            continue;
+          }
+          for (let k = 0; k < _raceCars.length; k++) {
+            const rc = _raceCars[k];
+            if (rc.isPlayer) continue;
+            const ex = rc.pos.x - b.position.x;
+            const ez = rc.pos.z - b.position.z;
+            if (ex * ex + ez * ez < r * r) {
+              b.wakeUp();
+              break;
+            }
+          }
         }
       }
 
@@ -4040,8 +4841,12 @@ let _worldSwitched = false;
           _carLampSpots.push({ spot, kind, zSign, aimAlong });
         }
       }
-      function setupTableLightReflections(carRoot) {
-        tableLightGlows = [];
+      /** Table glows of a car's lamps (the player's by default, or into `list` for a race car). */
+      function setupTableLightReflections(carRoot, list) {
+        if (!list) {
+          tableLightGlows = [];
+          list = tableLightGlows;
+        }
         const specs = [
           { name: "frontLights", color: 0xffffff, size: 0.44, kind: "front" },
           { name: "rearLights", color: 0xff3333, size: 0.36, kind: "rear" },
@@ -4057,7 +4862,7 @@ let _worldSwitched = false;
           const mesh = carRoot.getObjectByName(spec.name);
           if (!mesh) continue;
           if (spec.kind === "front") {
-            tableLightGlows.push({
+            list.push({
               mesh,
               sprite: createTableLightGlowSprite(
                 spec.color,
@@ -4071,7 +4876,7 @@ let _worldSwitched = false;
             continue;
           }
           for (let side = -1; side <= 1; side += 2) {
-            tableLightGlows.push({
+            list.push({
               mesh,
               sprite: createTableLightGlowSprite(
                 spec.color,
@@ -4086,7 +4891,7 @@ let _worldSwitched = false;
         }
         carRoot.traverse((node) => {
           if (!node.isMesh || node.name !== "lightBar1") return;
-          tableLightGlows.push({
+          list.push({
             mesh: node,
             sprite: createTableLightGlowSprite(0xff2222, 0.24),
             kind: "bar",
@@ -4118,21 +4923,35 @@ let _worldSwitched = false;
           for (let gi = 0; gi < tableLightGlows.length; gi++) {
             tableLightGlows[gi].sprite.visible = false;
           }
+          for (const rc of _raceCars) {
+            if (rc.glows) for (const g of rc.glows) g.sprite.visible = false;
+          }
           return;
         }
         const tableY = getTablePlaySurfaceY();
         if (tableY == null) return;
         updateCarLampSpotAim();
         updateCarLightAxes();
-        const carYaw = carState.angle + (carState.driftAngle || 0);
+        drawCarTableGlows(tableLightGlows, carState.angle + (carState.driftAngle || 0), keys.brake, tableY);
+        for (let ri = 0; ri < _raceCars.length; ri++) {
+          const rc = _raceCars[ri];
+          if (rc.isPlayer || !rc.glows) continue;
+          aimRaceCarSpots(rc, tableY);
+          drawCarTableGlows(rc.glows, rc.state.angle, false, tableY);
+        }
+      }
+
+      const _glowFwd = new THREE.Vector3();
+      /** Place a car's table glows (headlight beam, tail / brake / light bar glows). */
+      function drawCarTableGlows(glows, carYaw, brakeOn, tableY) {
         const worldHalfW = Math.max(0.08, halfW * storedCarScale);
-        const worldHalfL = Math.max(0.08, halfL * storedCarScale);
-        for (let gi = 0; gi < tableLightGlows.length; gi++) {
-          const entry = tableLightGlows[gi];
+        _glowFwd.set(Math.sin(carYaw), 0, Math.cos(carYaw));
+        for (let gi = 0; gi < glows.length; gi++) {
+          const entry = glows[gi];
           let alpha = 0;
           if (entry.kind === "front") alpha = 0.08;
           else if (entry.kind === "rear") alpha = 0.52;
-          else if (entry.kind === "brake") alpha = keys.brake ? 0.92 : 0.18;
+          else if (entry.kind === "brake") alpha = brakeOn ? 0.92 : 0.18;
           else if (entry.kind === "bar") alpha = 0.38;
           if (alpha < 0.02) {
             entry.sprite.visible = false;
@@ -4144,7 +4963,7 @@ let _worldSwitched = false;
           if (entry.kind === "front") {
             const beamWidth = Math.max(0.55, lampSpan * 2.4);
             const beamLength = beamWidth * HEADLIGHT_BEAM_ASPECT;
-            _v0.addScaledVector(_carLightFwd, beamLength * 0.58);
+            _v0.addScaledVector(_glowFwd, beamLength * 0.58);
             entry.sprite.scale.set(beamWidth * 1.2, 1, beamLength);
           } else {
             const sc = Math.max(0.1, Math.min(lampSpan * 0.45, worldHalfW * 0.5));
@@ -4244,6 +5063,8 @@ let _worldSwitched = false;
         _trashFxFade = 0;
         _trashFxActivePlane = null;
         setTrashFxVisible(false);
+        stopMisterSpotLaser(_misterSpot);
+        resetMisterSpotTrail();
         _misterSpot = null;
         if (_shelfDownLights.length) {
           for (const entry of _shelfDownLights) {
@@ -4664,7 +5485,7 @@ let _worldSwitched = false;
         const sidePlane = _findKitchenMesh(kmodel, "mainTableSidePlane", meshByName);
         if (!topPlane && !sidePlane) {
           console.warn(
-            "ul-kitchen21.gltf: mainTableTopPlane / mainTableSidePlane not found",
+            "ul-kitchen23.gltf: mainTableTopPlane / mainTableSidePlane not found",
           );
           return { coverCloneStepX: null, topMat: null, sideMat: null };
         }
@@ -4834,6 +5655,270 @@ let _worldSwitched = false;
       const ROBOT_RAIL_OFFSET_Y = 8;
       let _misterSpot = null;
 
+      // ── Mister Spot lasers: at each stop before a turn the eyes (eyeLeft /
+      // eyeRight) fire red beams that scan the room for 2 s, ending on the
+      // first wall / object they hit (raycast), with a flare + sparks there.
+      const MISTER_SPOT_LASER_DURATION = 5; // per sequence (two per corner); the robot stays stopped for all of it
+      // Sweep limits in the robot's own frame (radians from straight ahead):
+      // each eye sweeps mostly outward, never back across / into the body.
+      const MISTER_SPOT_LASER_YAW_OUT = 0.95;
+      const MISTER_SPOT_LASER_YAW_IN = 0.1;
+      const MISTER_SPOT_LASER_YAW_AMP = 0.5;
+      const MISTER_SPOT_LASER_PITCH_MIN = -0.06;
+      const MISTER_SPOT_LASER_PITCH_MAX = 0.28;
+      const MISTER_SPOT_LASER_FADE_IN = 0.25;
+      const MISTER_SPOT_LASER_FADE_OUT = 0.35;
+      const MISTER_SPOT_LASER_MAX_DIST = 160;
+      const MISTER_SPOT_LASER_SPARKS = 16;
+      const MISTER_SPOT_LASER_SPARK_LIFE = 0.28;
+      let _misterLaser = null;
+      const _laserRaycaster = new THREE.Raycaster();
+      const _laserOrigin = new THREE.Vector3();
+      const _laserDir = new THREE.Vector3();
+      const _laserEnd = new THREE.Vector3();
+      const _laserQuat = new THREE.Quaternion();
+      const _laserUp = new THREE.Vector3(0, 1, 0);
+      const _laserBox = new THREE.Box3();
+
+      function _laserBloom(obj) {
+        obj.layers.enable(CAR_LIGHTS_BLOOM_LAYER);
+        obj.frustumCulled = false;
+        obj.visible = false;
+        obj.renderOrder = 6;
+        scene.add(obj);
+        return obj;
+      }
+
+      /** Beam / flare / spark objects, made once and reused (shown only while firing). */
+      function createMisterSpotLasers() {
+        const beamGeo = new THREE.CylinderGeometry(1, 1, 1, 10, 1, true);
+        beamGeo.translate(0, 0.5, 0); // base at the origin, length along +Y
+        const beams = [];
+        for (let i = 0; i < 2; i++) {
+          const coreMat = new THREE.MeshBasicMaterial({
+            color: 0xff6a55,
+            transparent: true,
+            opacity: 0,
+            depthWrite: false,
+            toneMapped: false,
+          });
+          const glowMat = new THREE.MeshBasicMaterial({
+            color: 0xff1208,
+            transparent: true,
+            opacity: 0,
+            depthWrite: false,
+            blending: THREE.AdditiveBlending,
+            toneMapped: false,
+          });
+          const core = _laserBloom(new THREE.Mesh(beamGeo, coreMat));
+          const glow = _laserBloom(new THREE.Mesh(beamGeo, glowMat));
+          const flareMat = new THREE.SpriteMaterial({
+            map: getTableLightGlowTexture(),
+            color: 0xff2a14,
+            transparent: true,
+            opacity: 0,
+            depthWrite: false,
+            blending: THREE.AdditiveBlending,
+            toneMapped: false,
+          });
+          const flare = _laserBloom(new THREE.Sprite(flareMat));
+          const dotMat = flareMat.clone();
+          dotMat.color.setHex(0xffd0c0);
+          const dot = _laserBloom(new THREE.Sprite(dotMat));
+          const sparkPos = new Float32Array(MISTER_SPOT_LASER_SPARKS * 3);
+          const sparkGeo = new THREE.BufferGeometry();
+          sparkGeo.setAttribute("position", new THREE.BufferAttribute(sparkPos, 3));
+          const sparkMat = new THREE.PointsMaterial({
+            map: getTableLightGlowTexture(), // round sparks, not square points
+            color: 0xffa070,
+            size: 0.3,
+            transparent: true,
+            opacity: 0,
+            depthWrite: false,
+            blending: THREE.AdditiveBlending,
+            toneMapped: false,
+          });
+          const sparks = _laserBloom(new THREE.Points(sparkGeo, sparkMat));
+          const sparkVel = new Float32Array(MISTER_SPOT_LASER_SPARKS * 3);
+          const sparkAge = new Float32Array(MISTER_SPOT_LASER_SPARKS);
+          for (let s = 0; s < MISTER_SPOT_LASER_SPARKS; s++) {
+            sparkAge[s] = (s / MISTER_SPOT_LASER_SPARKS) * MISTER_SPOT_LASER_SPARK_LIFE;
+          }
+          beams.push({ core, glow, flare, dot, sparks, sparkPos, sparkVel, sparkAge, hit: new THREE.Vector3(), normal: new THREE.Vector3(0, 1, 0) });
+        }
+        _misterLaser = { beams, targets: [], active: false };
+        scheduleRebuildBloomDarkenLists();
+      }
+
+      function _laserSetVisible(on) {
+        if (!_misterLaser) return;
+        for (const b of _misterLaser.beams) {
+          b.core.visible = b.glow.visible = b.flare.visible = b.dot.visible = b.sparks.visible = on;
+        }
+      }
+
+      /** Room meshes the beams can hit: visible kitchen meshes, not the robot itself. */
+      function _collectMisterSpotLaserTargets(m) {
+        const targets = [];
+        const root = m.object.parent;
+        if (!root) return targets;
+        root.traverseVisible((o) => {
+          if (!o.isMesh || !o.geometry) return;
+          let p = o;
+          while (p) {
+            if (p === m.object) return;
+            p = p.parent;
+          }
+          targets.push(o);
+        });
+        return targets;
+      }
+
+      /** Front surface (robot-local z) of an eye mesh. */
+      function _misterSpotEyeFrontZ(m, eye) {
+        if (!eye.geometry.boundingBox) eye.geometry.computeBoundingBox();
+        const bb = eye.geometry.boundingBox;
+        const toLocal = new THREE.Matrix4().copy(m.object.matrixWorld).invert().multiply(eye.matrixWorld);
+        let maxZ = -Infinity;
+        for (let c = 0; c < 8; c++) {
+          _laserEnd.set(c & 1 ? bb.max.x : bb.min.x, c & 2 ? bb.max.y : bb.min.y, c & 4 ? bb.max.z : bb.min.z).applyMatrix4(toLocal);
+          if (_laserEnd.z > maxZ) maxZ = _laserEnd.z;
+        }
+        return maxZ + 0.002;
+      }
+
+      function startMisterSpotLaser(m) {
+        if (!_misterLaser) createMisterSpotLasers();
+        _misterLaser.targets = _collectMisterSpotLaserTargets(m);
+        _misterLaser.active = true;
+        m.object.updateMatrixWorld(true);
+        // Each beam starts on the front surface of its eye (robot-local).
+        _misterLaser.beams.forEach((b, i) => {
+          b.hasHit = false;
+          const eye = m.eyes && m.eyes[i];
+          if (!eye) return;
+          if (!eye.geometry.boundingBox) eye.geometry.computeBoundingBox();
+          eye.geometry.boundingBox.getCenter(_laserOrigin);
+          eye.localToWorld(_laserOrigin);
+          m.object.worldToLocal(_laserOrigin);
+          b.outSign = _laserOrigin.x >= 0 ? 1 : -1;
+          _laserOrigin.z = _misterSpotEyeFrontZ(m, eye);
+          b.localOrigin = (b.localOrigin || new THREE.Vector3()).copy(_laserOrigin);
+        });
+        _laserSetVisible(true);
+        // Place the beams for this sequence right away (they still hold the last
+        // sequence's pose, from before the turn, until the first update).
+        updateMisterSpotLaser(m, 0, 0);
+      }
+
+      function stopMisterSpotLaser(m) {
+        if (!_misterLaser) return;
+        _misterLaser.active = false;
+        _misterLaser.targets = [];
+        _laserSetVisible(false);
+        if (m && m.eyeMat) m.eyeMat.emissiveIntensity = 0;
+      }
+
+      /** One frame of the sequence; t = seconds since the robot stopped. */
+      function updateMisterSpotLaser(m, t, dt) {
+        const L = _misterLaser;
+        if (!L || !L.active || !m.eyes) return;
+        const fadeIn = Math.min(1, t / MISTER_SPOT_LASER_FADE_IN);
+        const fadeOut = Math.min(1, Math.max(0, (MISTER_SPOT_LASER_DURATION - t) / MISTER_SPOT_LASER_FADE_OUT));
+        const env = _misterSpotSmooth(Math.min(fadeIn, fadeOut));
+        if (m.eyeMat) m.eyeMat.emissiveIntensity = 3 * env;
+        m.object.updateMatrixWorld(true);
+        m.object.getWorldQuaternion(_laserQuat);
+        _laserRaycaster.far = MISTER_SPOT_LASER_MAX_DIST;
+        for (let i = 0; i < 2; i++) {
+          const eye = m.eyes[i];
+          const b = L.beams[i];
+          if (!eye) continue;
+          // Start at the eye (its socket mouth), in world space, every frame.
+          if (b.localOrigin) {
+            _laserOrigin.copy(b.localOrigin);
+            m.object.localToWorld(_laserOrigin);
+          } else {
+            if (!eye.geometry.boundingBox) eye.geometry.computeBoundingBox();
+            eye.geometry.boundingBox.getCenter(_laserOrigin);
+            eye.localToWorld(_laserOrigin);
+          }
+          // Scan: side to side with a slower up / down sweep, the eyes slightly
+          // offset. The sweep leans toward the way the robot is about to turn
+          // (into the room) but its centre is kept inside the eye's limits so the
+          // sine swing never passes them: it eases back at the edges by itself.
+          const ph = i * 0.55;
+          const out = b.outSign || 1; // +1: this eye's outward side is local +x
+          const lo = -MISTER_SPOT_LASER_YAW_IN + MISTER_SPOT_LASER_YAW_AMP;
+          const hi = MISTER_SPOT_LASER_YAW_OUT - MISTER_SPOT_LASER_YAW_AMP;
+          const centre = Math.max(lo, Math.min(hi, out * (m.laserLean || 0) * 0.6));
+          const yaw = out * (centre + MISTER_SPOT_LASER_YAW_AMP * Math.sin(t * Math.PI * 1.1 + ph));
+          const pMid = (MISTER_SPOT_LASER_PITCH_MIN + MISTER_SPOT_LASER_PITCH_MAX) / 2;
+          const pHalf = (MISTER_SPOT_LASER_PITCH_MAX - MISTER_SPOT_LASER_PITCH_MIN) / 2;
+          const pitch = pMid + pHalf * Math.sin(t * Math.PI * 1.7 + ph * 1.4);
+          _laserDir.set(Math.sin(yaw) * Math.cos(pitch), Math.sin(pitch), Math.cos(yaw) * Math.cos(pitch));
+          _laserDir.applyQuaternion(_laserQuat).normalize();
+          _laserRaycaster.set(_laserOrigin, _laserDir);
+          const hits = _laserRaycaster.intersectObjects(L.targets, false);
+          let len = MISTER_SPOT_LASER_MAX_DIST;
+          b.hasHit = false;
+          for (const h of hits) {
+            if (h.distance < 0.05) continue;
+            len = h.distance;
+            b.hit.copy(h.point);
+            if (h.face) b.normal.copy(h.face.normal).transformDirection(h.object.matrixWorld);
+            else b.normal.copy(_laserDir).negate();
+            if (b.normal.dot(_laserDir) > 0) b.normal.negate();
+            b.hasHit = true;
+            break;
+          }
+          if (!b.hasHit) b.hit.copy(_laserOrigin).addScaledVector(_laserDir, len);
+          // Beam: core + softer additive glow, from the eye to the hit point.
+          for (const [mesh, r] of [[b.core, 0.035], [b.glow, 0.15]]) {
+            mesh.position.copy(_laserOrigin);
+            mesh.quaternion.setFromUnitVectors(_laserUp, _laserDir);
+            mesh.scale.set(r, len, r);
+          }
+          b.core.material.opacity = env;
+          b.glow.material.opacity = 0.42 * env;
+          // Impact: flare + hot dot (pulsing), and sparks thrown off the surface.
+          const pulse = 1 + 0.18 * Math.sin(t * 38 + i * 2);
+          _laserEnd.copy(b.hit).addScaledVector(b.normal, 0.06);
+          b.flare.position.copy(_laserEnd);
+          b.flare.scale.setScalar(2.2 * pulse);
+          b.flare.material.opacity = (b.hasHit ? 0.95 : 0) * env;
+          b.dot.position.copy(_laserEnd);
+          b.dot.scale.setScalar(0.55 * pulse);
+          b.dot.material.opacity = (b.hasHit ? 1 : 0) * env;
+          const pos = b.sparkPos;
+          for (let s = 0; s < MISTER_SPOT_LASER_SPARKS; s++) {
+            let age = b.sparkAge[s] + dt;
+            const k = s * 3;
+            if (age >= MISTER_SPOT_LASER_SPARK_LIFE || t <= dt) {
+              age = t <= dt ? (s / MISTER_SPOT_LASER_SPARKS) * MISTER_SPOT_LASER_SPARK_LIFE : 0;
+              // New spark: out of the surface, spread sideways.
+              const vx = b.normal.x * 3 + (Math.random() - 0.5) * 6;
+              const vy = b.normal.y * 3 + Math.random() * 3;
+              const vz = b.normal.z * 3 + (Math.random() - 0.5) * 6;
+              b.sparkVel[k] = vx;
+              b.sparkVel[k + 1] = vy;
+              b.sparkVel[k + 2] = vz;
+              pos[k] = _laserEnd.x;
+              pos[k + 1] = _laserEnd.y;
+              pos[k + 2] = _laserEnd.z;
+            } else {
+              b.sparkVel[k + 1] -= 14 * dt;
+              pos[k] += b.sparkVel[k] * dt;
+              pos[k + 1] += b.sparkVel[k + 1] * dt;
+              pos[k + 2] += b.sparkVel[k + 2] * dt;
+            }
+            b.sparkAge[s] = age;
+          }
+          b.sparks.geometry.attributes.position.needsUpdate = true;
+          b.sparks.material.opacity = (b.hasHit ? 0.9 : 0) * env;
+        }
+      }
+
       function _buildRobotRailPath(rail, kmodel) {
         let mesh = rail && rail.isMesh ? rail : null;
         if (!mesh && rail) {
@@ -4906,6 +5991,579 @@ let _worldSwitched = false;
           acc += len;
         }
         return { segs, pathLength: acc, y };
+      }
+
+      // ── Mister Spot rubber trail: the squeegee ("rubber", a curved strip
+      // around the back of the robot's base) leaves a glowing, smoky wiped streak
+      // on the floor plus small glowing particles, in the rubber's own colour.
+      // Each trail slice is the rubber's real (curved) floor footprint, so the
+      // trail flows straight out of its rounded edge. Emitted by distance
+      // travelled (none while the robot stands still, e.g. during the lasers);
+      // everything fades by age on the GPU.
+      const MISTER_TRAIL_LIFETIME = 5.2; // seconds a trail point stays visible
+      const MISTER_TRAIL_STEP = 0.35; // world units of rubber travel per trail slice
+      const MISTER_TRAIL_SEGMENTS = 256; // ring buffer (~80 slices alive at most over the lifetime)
+      const MISTER_TRAIL_CURVE_POINTS = 11; // samples across the rubber's footprint
+      const MISTER_TRAIL_LIFT = 0.025; // above the floor
+      const MISTER_TRAIL_SPREAD = 0.18; // edge widening with age (fraction of width)
+      const MISTER_RUBBER_GLOW = 0.6; // rubber emissive (its own colour)
+      const MISTER_PARTICLE_MAX = 420;
+      const MISTER_PARTICLE_STEP = 0.16; // world units of rubber travel per particle
+      // Rise targets, as fractions of Mister Spot's measured height.
+      const MISTER_PARTICLE_LOW_MIN = 0.3;
+      const MISTER_PARTICLE_LOW_MAX = 0.7;
+      const MISTER_PARTICLE_HIGH_MIN = 1.0;
+      const MISTER_PARTICLE_HIGH_MAX = 1.2;
+      const MISTER_PARTICLE_HIGH_SHARE = 0.25; // share of particles that rise to the top
+      // Lifetime: base seconds + seconds per robot-height of rise.
+      const MISTER_PARTICLE_LIFE_BASE = 1.4;
+      const MISTER_PARTICLE_LIFE_PER_HEIGHT = 2.8;
+      const MISTER_PARTICLE_RISE_EASE = 2.4; // >1: strong initial lift, slowing near the top
+      const MISTER_PARTICLE_DRIFT_DRAG = 0.8; // damping of the sideways drift (per second)
+      const MISTER_PARTICLE_SWIRL = 1.2; // sideways swirl strength (world units / s²)
+      const MISTER_PARTICLE_SWIRL_RATE = 3; // swirl turning speed (radians / s)
+      let _misterTrail = null;
+      const _trailHsl = { h: 0, s: 0, l: 0 };
+
+      const _MISTER_TRAIL_NOISE_GLSL = `
+        float mtHash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123); }
+        float mtNoise(vec2 p) {
+          vec2 i = floor(p);
+          vec2 f = fract(p);
+          vec2 u = f * f * (3.0 - 2.0 * f);
+          return mix(mix(mtHash(i), mtHash(i + vec2(1.0, 0.0)), u.x),
+                     mix(mtHash(i + vec2(0.0, 1.0)), mtHash(i + vec2(1.0, 1.0)), u.x), u.y);
+        }
+        float mtFbm(vec2 p) {
+          float v = 0.0;
+          float a = 0.5;
+          for (int i = 0; i < 4; i++) { v += a * mtNoise(p); p = p * 2.03 + 17.1; a *= 0.5; }
+          return v;
+        }
+      `;
+
+      /**
+       * The rubber's floor footprint as a curve in its local space: its bottom
+       * vertices, averaged per x into a centre line, resampled to K points.
+       */
+      function _misterRubberFootprint(rubber) {
+        const pos = rubber.geometry.attributes.position;
+        let minY = Infinity;
+        for (let i = 0; i < pos.count; i++) minY = Math.min(minY, pos.getY(i));
+        let maxY = -Infinity;
+        for (let i = 0; i < pos.count; i++) maxY = Math.max(maxY, pos.getY(i));
+        const eps = Math.max(1e-4, (maxY - minY) * 0.25);
+        const groups = new Map();
+        for (let i = 0; i < pos.count; i++) {
+          if (pos.getY(i) > minY + eps) continue;
+          const key = Math.round(pos.getX(i) * 1000);
+          const g = groups.get(key) || { x: pos.getX(i), z: 0, n: 0 };
+          g.z += pos.getZ(i);
+          g.n++;
+          groups.set(key, g);
+        }
+        const prof = [...groups.values()].map((g) => ({ x: g.x, z: g.z / g.n })).sort((a, b) => a.x - b.x);
+        const K = MISTER_TRAIL_CURVE_POINTS;
+        const out = [];
+        if (prof.length < 2) {
+          if (!rubber.geometry.boundingBox) rubber.geometry.computeBoundingBox();
+          const bb = rubber.geometry.boundingBox;
+          for (let k = 0; k < K; k++) {
+            out.push(new THREE.Vector3(bb.min.x + ((bb.max.x - bb.min.x) * k) / (K - 1), minY, (bb.min.z + bb.max.z) / 2));
+          }
+          return out;
+        }
+        const x0 = prof[0].x;
+        const x1 = prof[prof.length - 1].x;
+        let j = 0;
+        for (let k = 0; k < K; k++) {
+          const x = x0 + ((x1 - x0) * k) / (K - 1);
+          while (j < prof.length - 2 && prof[j + 1].x < x) j++;
+          const a = prof[j];
+          const b = prof[j + 1];
+          const t = b.x > a.x ? (x - a.x) / (b.x - a.x) : 0;
+          out.push(new THREE.Vector3(x, minY, a.z + (b.z - a.z) * Math.min(1, Math.max(0, t))));
+        }
+        return out;
+      }
+
+      /** Floor height under the robot (raycast once against the kitchen meshes). */
+      function _misterFloorY(m) {
+        const root = m.object.parent;
+        const targets = [];
+        if (root) {
+          root.traverseVisible((o) => {
+            if (!o.isMesh) return;
+            let p = o;
+            while (p) {
+              if (p === m.object) return;
+              p = p.parent;
+            }
+            targets.push(o);
+          });
+        }
+        const o = m.object.position;
+        _laserRaycaster.set(new THREE.Vector3(o.x, o.y + 4, o.z), new THREE.Vector3(0, -1, 0));
+        _laserRaycaster.far = 30;
+        const hit = _laserRaycaster.intersectObjects(targets, false)[0];
+        return hit ? hit.point.y : o.y;
+      }
+
+      function createMisterSpotTrail() {
+        // Trail ribbon: one independent strip per segment (ring buffer), each
+        // joining two copies of the rubber's footprint curve, so the newest and
+        // oldest slices are never joined.
+        const N = MISTER_TRAIL_SEGMENTS;
+        const K = MISTER_TRAIL_CURVE_POINTS;
+        const V = K * 2; // vertices per segment: (previous, current) per curve point
+        const pos = new Float32Array(N * V * 3);
+        const birth = new Float32Array(N * V).fill(-1e6);
+        const segBirth = new Float32Array(N * V).fill(-1e6);
+        const side = new Float32Array(N * V);
+        const along = new Float32Array(N * V);
+        const right = new Float32Array(N * V * 2);
+        const index = new Uint32Array(N * (K - 1) * 6);
+        let ii = 0;
+        for (let s = 0; s < N; s++) {
+          const v = s * V;
+          for (let k = 0; k < K; k++) {
+            side[v + k * 2] = side[v + k * 2 + 1] = -1 + (2 * k) / (K - 1);
+          }
+          for (let k = 0; k < K - 1; k++) {
+            const a = v + k * 2; // previous slice, point k
+            const b = a + 1; // current slice, point k
+            const c = a + 2; // previous slice, point k + 1
+            const d = a + 3; // current slice, point k + 1
+            index.set([a, c, b, c, d, b], ii);
+            ii += 6;
+          }
+        }
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+        geo.setAttribute("aBirth", new THREE.BufferAttribute(birth, 1));
+        geo.setAttribute("aSegBirth", new THREE.BufferAttribute(segBirth, 1));
+        geo.setAttribute("aSide", new THREE.BufferAttribute(side, 1));
+        geo.setAttribute("aAlong", new THREE.BufferAttribute(along, 1));
+        geo.setAttribute("aRight", new THREE.BufferAttribute(right, 2));
+        geo.setIndex(new THREE.BufferAttribute(index, 1));
+        for (const name of ["position", "aBirth", "aSegBirth", "aAlong", "aRight"]) geo.attributes[name].setUsage(THREE.DynamicDrawUsage);
+        const mat = new THREE.ShaderMaterial({
+          uniforms: {
+            uTime: { value: 0 },
+            uLife: { value: MISTER_TRAIL_LIFETIME },
+            uSpread: { value: MISTER_TRAIL_SPREAD },
+            uColor: { value: new THREE.Color(1, 1, 1) },
+            uCore: { value: new THREE.Color(1, 1, 1) },
+          },
+          vertexShader: `
+            attribute float aBirth;
+            attribute float aSegBirth;
+            attribute float aSide;
+            attribute float aAlong;
+            attribute vec2 aRight;
+            uniform float uTime;
+            uniform float uLife;
+            uniform float uSpread;
+            varying float vAge;
+            varying float vSide;
+            varying float vAlong;
+            void main() {
+              float age = (uTime - aBirth) / uLife;
+              vAge = age;
+              vSide = aSide;
+              vAlong = aAlong;
+              // Skip a segment only once all of it has expired (its newer slice):
+              // moving single vertices away would stretch half-expired triangles.
+              if ((uTime - aSegBirth) / uLife > 1.0) { gl_Position = vec4(0.0, 0.0, -2.0, 1.0); return; }
+              age = clamp(age, 0.0, 1.0);
+              vec3 p = position;
+              // The mist drifts wider as it ages.
+              p.xz += aRight * aSide * age * uSpread;
+              gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
+            }
+          `,
+          fragmentShader: `
+            uniform float uTime;
+            uniform float uLife;
+            uniform vec3 uColor;
+            uniform vec3 uCore;
+            varying float vAge;
+            varying float vSide;
+            varying float vAlong;
+            ${_MISTER_TRAIL_NOISE_GLSL}
+            void main() {
+              if (vAge > 1.0) discard;
+              // Noise in world distance along the trail (never stretched by its
+              // length); the age shifts it so older mist keeps drifting / changing,
+              // and a slow large-scale layer varies the density along the length.
+              vec2 q = vec2(vAlong * 0.32, vSide * 1.6);
+              float n = mtFbm(q + vec2(uTime * 0.18, uTime * 0.35) + vec2(0.0, vAge * 1.3));
+              float n2 = mtFbm(q * 2.3 - vec2(uTime * 0.4, -uTime * 0.2) + n);
+              float n3 = mtFbm(vec2(vAlong * 0.07, vSide * 0.6) + uTime * 0.05);
+              // Edges broken up by noise: soft, ragged, more transparent.
+              float edge = 1.0 - smoothstep(0.25, 1.0, abs(vSide) + (n2 - 0.5) * 0.7);
+              float centre = 1.0 - smoothstep(0.0, 0.7, abs(vSide));
+              float life = pow(1.0 - vAge, 1.6);
+              float fresh = exp(-vAge * uLife * 2.7); // bright right behind the rubber (~0.4 s)
+              float smoke = smoothstep(0.18, 0.85, n * 0.65 + n2 * 0.55) * (0.65 + 0.7 * n3);
+              float a = edge * life * (0.16 + 0.42 * smoke + 0.35 * centre * fresh);
+              if (a < 0.003) discard;
+              vec3 col = mix(uColor, uCore, centre * fresh * 0.8);
+              gl_FragColor = vec4(col * a, a);
+            }
+          `,
+          transparent: true,
+          depthWrite: false,
+          blending: THREE.AdditiveBlending,
+          side: THREE.DoubleSide,
+          polygonOffset: true,
+          polygonOffsetFactor: -2,
+          polygonOffsetUnits: -2,
+          toneMapped: false,
+        });
+        const ribbon = new THREE.Mesh(geo, mat);
+        ribbon.name = "misterSpotTrail";
+        ribbon.frustumCulled = false; // buffers change in place: no stale culling
+        ribbon.renderOrder = 3; // after the floor
+        // Drawn with its own (additive) material in the bloom pass too, instead of
+        // as a black occluder that would cut the particles' glow behind it.
+        ribbon.userData.skipBloomDarken = true;
+        scene.add(ribbon);
+
+        // Particles: fixed pool, round soft glow per point.
+        const P = MISTER_PARTICLE_MAX;
+        const ppos = new Float32Array(P * 3);
+        const pbirth = new Float32Array(P).fill(-1e6);
+        const plife = new Float32Array(P).fill(1);
+        const psize = new Float32Array(P);
+        const ptall = new Float32Array(P);
+        const pgeo = new THREE.BufferGeometry();
+        pgeo.setAttribute("position", new THREE.BufferAttribute(ppos, 3));
+        pgeo.setAttribute("aBirth", new THREE.BufferAttribute(pbirth, 1));
+        pgeo.setAttribute("aLife", new THREE.BufferAttribute(plife, 1));
+        pgeo.setAttribute("aSize", new THREE.BufferAttribute(psize, 1));
+        pgeo.setAttribute("aTall", new THREE.BufferAttribute(ptall, 1));
+        for (const name of ["position", "aBirth", "aLife", "aSize", "aTall"]) pgeo.attributes[name].setUsage(THREE.DynamicDrawUsage);
+        const pmat = new THREE.ShaderMaterial({
+          uniforms: {
+            uTime: { value: 0 },
+            uPixelScale: { value: 400 },
+            uColor: { value: new THREE.Color(1, 1, 1) },
+            uCore: { value: new THREE.Color(1, 1, 1) },
+          },
+          vertexShader: `
+            attribute float aBirth;
+            attribute float aLife;
+            attribute float aSize;
+            attribute float aTall;
+            uniform float uTime;
+            uniform float uPixelScale;
+            varying float vT;
+            varying float vTall;
+            void main() {
+              float t = (uTime - aBirth) / aLife; // progress toward the target height
+              vT = t;
+              vTall = aTall;
+              if (t < 0.0 || t > 1.0) { gl_Position = vec4(0.0, 0.0, -2.0, 1.0); gl_PointSize = 0.0; return; }
+              vec4 mv = modelViewMatrix * vec4(position, 1.0);
+              gl_Position = projectionMatrix * mv;
+              // Low ones shrink as they fade; tall ones grow a little softer / wider.
+              float grow = mix(1.0 - t * 0.6, 1.0 + t * 0.5, aTall);
+              gl_PointSize = aSize * grow * uPixelScale / max(0.1, -mv.z);
+            }
+          `,
+          fragmentShader: `
+            uniform vec3 uColor;
+            uniform vec3 uCore;
+            varying float vT;
+            varying float vTall;
+            void main() {
+              if (vT < 0.0 || vT > 1.0) discard;
+              vec2 d = gl_PointCoord - 0.5;
+              float r2 = dot(d, d) * 4.0;
+              // Tall particles get a softer glow as they rise.
+              float softness = mix(3.2, 2.0, vTall * vT);
+              float glow = exp(-r2 * softness) * (1.0 - smoothstep(0.75, 1.0, r2));
+              // Fade by progress toward the target height: full most of the way,
+              // easing out near the top (tall ones a bit more transparent up there).
+              float fade = smoothstep(0.0, 0.06, vT) * (1.0 - smoothstep(0.7, 1.0, vT)) * (1.0 - 0.3 * vTall * vT);
+              float a = glow * fade;
+              if (a < 0.004) discard;
+              vec3 col = mix(uColor, uCore, exp(-r2 * 9.0) * 0.8);
+              gl_FragColor = vec4(col * a, a);
+            }
+          `,
+          transparent: true,
+          depthWrite: false,
+          blending: THREE.AdditiveBlending,
+          toneMapped: false,
+        });
+        const points = new THREE.Points(pgeo, pmat);
+        points.name = "misterSpotTrailParticles";
+        points.frustumCulled = false; // positions change in place: no stale culling
+        points.renderOrder = 4;
+        points.layers.enable(CAR_LIGHTS_BLOOM_LAYER);
+        scene.add(points);
+        scheduleRebuildBloomDarkenLists();
+
+        _misterTrail = {
+          ribbon,
+          points,
+          time: 0,
+          seg: 0,
+          along: 0,
+          hasLast: false,
+          last: [],
+          cur: [],
+          lastBirth: 0,
+          distSinceSample: 0,
+          distSinceParticle: 0,
+          prevC: new THREE.Vector3(),
+          prevL: new THREE.Vector3(),
+          curC: new THREE.Vector3(),
+          hasPrev: false,
+          pNext: 0,
+          pvel: new Float32Array(P * 3),
+          pswirl: new Float32Array(P), // swirl phase per particle
+          py0: new Float32Array(P), // start height
+          prise: new Float32Array(P), // target rise (world units)
+          robotHeight: 0,
+          heightOf: null,
+          footprint: null,
+          footprintOf: null,
+          floorY: null,
+          floorOf: null,
+        };
+        for (let k = 0; k < MISTER_TRAIL_CURVE_POINTS; k++) {
+          _misterTrail.last.push(new THREE.Vector3());
+          _misterTrail.cur.push(new THREE.Vector3());
+        }
+      }
+
+      /** The rubber's footprint curve in world space, on the floor (into T.cur). */
+      function _misterRubberCurve(m, rubber) {
+        const T = _misterTrail;
+        if (T.footprintOf !== rubber) {
+          T.footprint = _misterRubberFootprint(rubber);
+          T.footprintOf = rubber;
+        }
+        if (T.floorOf !== m.object) {
+          T.floorY = _misterFloorY(m);
+          T.floorOf = m.object;
+        }
+        const y = T.floorY + MISTER_TRAIL_LIFT;
+        T.curC.set(0, 0, 0);
+        for (let k = 0; k < T.cur.length; k++) {
+          const p = T.cur[k].copy(T.footprint[k]);
+          rubber.localToWorld(p);
+          p.y = y;
+          T.curC.add(p);
+        }
+        T.curC.multiplyScalar(1 / T.cur.length);
+      }
+
+      /** Trail and particle colours follow the rubber's material colour. */
+      function _misterTrailSyncColour(rubber) {
+        const T = _misterTrail;
+        const mat = rubber && rubber.material;
+        if (!mat || !mat.color) return;
+        const base = T.ribbon.material.uniforms.uColor.value;
+        const core = T.ribbon.material.uniforms.uCore.value;
+        base.copy(mat.color);
+        // Glowing core: the same hue, more saturated and brighter.
+        base.getHSL(_trailHsl);
+        core.setHSL(_trailHsl.h, Math.min(1, _trailHsl.s * 1.15 + 0.05), Math.min(0.82, _trailHsl.l + 0.18));
+        T.points.material.uniforms.uColor.value.copy(base);
+        T.points.material.uniforms.uCore.value.copy(core);
+      }
+
+      function _misterTrailWriteSegment(T, birthNow) {
+        const K = MISTER_TRAIL_CURVE_POINTS;
+        const V = K * 2;
+        const geo = T.ribbon.geometry;
+        const pos = geo.attributes.position.array;
+        const birth = geo.attributes.aBirth.array;
+        const segBirth = geo.attributes.aSegBirth.array;
+        const along = geo.attributes.aAlong.array;
+        const right = geo.attributes.aRight.array;
+        const s = T.seg;
+        T.seg = (T.seg + 1) % MISTER_TRAIL_SEGMENTS;
+        const step = T.lastC.distanceTo(T.curC);
+        for (let k = 0; k < K; k++) {
+          for (let w = 0; w < 2; w++) {
+            const v = s * V + k * 2 + w; // w 0: previous slice, 1: current slice
+            const curve = w ? T.cur : T.last;
+            const p = curve[k];
+            pos[v * 3] = p.x;
+            pos[v * 3 + 1] = p.y;
+            pos[v * 3 + 2] = p.z;
+            birth[v] = w ? birthNow : T.lastBirth;
+            segBirth[v] = birthNow;
+            along[v] = w ? T.along + step : T.along;
+            // Sideways direction of this slice (for the age spread), scaled by width.
+            right[v * 2] = curve[K - 1].x - curve[0].x;
+            right[v * 2 + 1] = curve[K - 1].z - curve[0].z;
+          }
+        }
+        T.along += step;
+        for (const name of ["position", "aBirth", "aSegBirth", "aAlong", "aRight"]) geo.attributes[name].needsUpdate = true;
+      }
+
+      function _misterTrailKeepSlice(T) {
+        for (let k = 0; k < T.cur.length; k++) T.last[k].copy(T.cur[k]);
+        T.lastC = (T.lastC || new THREE.Vector3()).copy(T.curC);
+        T.lastBirth = T.time;
+      }
+
+      function _misterTrailEmitParticle(T) {
+        const P = MISTER_PARTICLE_MAX;
+        const K = T.cur.length;
+        const i = T.pNext;
+        T.pNext = (T.pNext + 1) % P;
+        const g = T.points.geometry;
+        const pos = g.attributes.position.array;
+        // Random point along the rubber's (curved) edge.
+        const u = Math.random() * (K - 1);
+        const k = Math.min(K - 2, Math.floor(u));
+        const f = u - k;
+        const a = T.cur[k];
+        const b = T.cur[k + 1];
+        const x = a.x + (b.x - a.x) * f;
+        const z = a.z + (b.z - a.z) * f;
+        pos[i * 3] = x;
+        pos[i * 3 + 1] = a.y + 0.05;
+        pos[i * 3 + 2] = z;
+        // Drift: up, and outward from the robot (away from its centre).
+        let ox = x - T.robotX;
+        let oz = z - T.robotZ;
+        const ol = Math.hypot(ox, oz) || 1;
+        ox /= ol;
+        oz /= ol;
+        const sp = 0.4 + Math.random() * 0.8;
+        T.pvel[i * 3] = ox * 0.7 * sp + (Math.random() - 0.5) * 0.3;
+        T.pvel[i * 3 + 1] = 0;
+        T.pswirl[i] = Math.random() * Math.PI * 2;
+        T.pvel[i * 3 + 2] = oz * 0.7 * sp + (Math.random() - 0.5) * 0.3;
+        // Target height: most stay low, some rise to the robot's full height.
+        const tall = Math.random() < MISTER_PARTICLE_HIGH_SHARE;
+        const frac = tall
+          ? MISTER_PARTICLE_HIGH_MIN + Math.random() * (MISTER_PARTICLE_HIGH_MAX - MISTER_PARTICLE_HIGH_MIN)
+          : MISTER_PARTICLE_LOW_MIN + Math.random() * (MISTER_PARTICLE_LOW_MAX - MISTER_PARTICLE_LOW_MIN);
+        T.py0[i] = pos[i * 3 + 1];
+        T.prise[i] = frac * T.robotHeight;
+        g.attributes.aBirth.array[i] = T.time;
+        g.attributes.aLife.array[i] = MISTER_PARTICLE_LIFE_BASE + frac * MISTER_PARTICLE_LIFE_PER_HEIGHT * (0.85 + Math.random() * 0.3);
+        g.attributes.aSize.array[i] = 0.25 + Math.random() * 0.45;
+        g.attributes.aTall.array[i] = tall ? 1 : 0;
+        g.attributes.aBirth.needsUpdate = true;
+        g.attributes.aLife.needsUpdate = true;
+        g.attributes.aSize.needsUpdate = true;
+        g.attributes.aTall.needsUpdate = true;
+      }
+
+      /** Per frame: emit by rubber travel, move particles, advance the fade clock. */
+      function updateMisterSpotTrail(dt) {
+        const m = _misterSpot;
+        if (!_misterTrail) {
+          if (!m || !m.object) return;
+          createMisterSpotTrail();
+        }
+        const T = _misterTrail;
+        T.time += dt;
+        T.ribbon.material.uniforms.uTime.value = T.time;
+        T.points.material.uniforms.uTime.value = T.time;
+        if (camera && camera.isPerspectiveCamera) {
+          const h = renderer.domElement.height || 800;
+          T.points.material.uniforms.uPixelScale.value = (h * 0.5) / Math.tan((camera.fov * Math.PI) / 360);
+        }
+        // Particles move every frame (CPU), fading / shrinking happens in the shader.
+        const pg = T.points.geometry;
+        const ppos = pg.attributes.position.array;
+        const pb = pg.attributes.aBirth.array;
+        const pl = pg.attributes.aLife.array;
+        let anyAlive = false;
+        for (let i = 0; i < MISTER_PARTICLE_MAX; i++) {
+          if (T.time - pb[i] > pl[i]) continue;
+          anyAlive = true;
+          // Height follows an ease-out toward the particle's target: a strong
+          // initial lift that slows near the top (frame-rate independent).
+          const prog = Math.min(1, (T.time - pb[i]) / pl[i]);
+          ppos[i * 3 + 1] = T.py0[i] + T.prise[i] * (1 - Math.pow(1 - prog, MISTER_PARTICLE_RISE_EASE));
+          // Rising smoke: a slow sideways swirl, stronger as the particle climbs.
+          const sw = T.pswirl[i] + (T.time - pb[i]) * MISTER_PARTICLE_SWIRL_RATE;
+          const swirl = MISTER_PARTICLE_SWIRL * (0.3 + prog) * dt;
+          const drag = 1 - Math.min(1, dt * MISTER_PARTICLE_DRIFT_DRAG);
+          T.pvel[i * 3] = (T.pvel[i * 3] + Math.cos(sw) * swirl) * drag;
+          T.pvel[i * 3 + 2] = (T.pvel[i * 3 + 2] + Math.sin(sw) * swirl) * drag;
+          ppos[i * 3] += T.pvel[i * 3] * dt;
+          ppos[i * 3 + 2] += T.pvel[i * 3 + 2] * dt;
+        }
+        if (anyAlive) pg.attributes.position.needsUpdate = true;
+
+        const rubber = m && m.object && m.rubber;
+        if (!rubber) {
+          T.hasLast = false;
+          T.hasPrev = false;
+          return;
+        }
+        _misterTrailSyncColour(rubber);
+        m.object.updateMatrixWorld(true);
+        if (T.heightOf !== m.object) {
+          // Mister Spot's real height (world units), for the particle rise.
+          T.robotHeight = new THREE.Box3().setFromObject(m.object).getSize(new THREE.Vector3()).y;
+          T.heightOf = m.object;
+        }
+        _misterRubberCurve(m, rubber);
+        T.robotX = m.object.position.x;
+        T.robotZ = m.object.position.z;
+        // Distance the rubber travelled this frame (its end too, for turns in place).
+        const end = T.cur[0];
+        let moved = 0;
+        if (T.hasPrev) {
+          moved = Math.max(T.prevC.distanceTo(T.curC), T.prevL.distanceTo(end));
+          if (moved > 20) {
+            // Teleport (respawn / reload): start a fresh trail.
+            moved = 0;
+            T.hasLast = false;
+          }
+        }
+        T.prevC.copy(T.curC);
+        T.prevL.copy(end);
+        T.hasPrev = true;
+        if (moved < 1e-5) return; // standing still: nothing new, old trail fades
+        if (!T.hasLast) {
+          _misterTrailKeepSlice(T);
+          T.hasLast = true;
+          T.distSinceSample = 0;
+          T.distSinceParticle = 0;
+          return;
+        }
+        T.distSinceSample += moved;
+        T.distSinceParticle += moved;
+        while (T.distSinceParticle >= MISTER_PARTICLE_STEP) {
+          T.distSinceParticle -= MISTER_PARTICLE_STEP;
+          _misterTrailEmitParticle(T);
+        }
+        if (T.distSinceSample >= MISTER_TRAIL_STEP) {
+          T.distSinceSample = 0;
+          _misterTrailWriteSegment(T, T.time);
+          _misterTrailKeepSlice(T);
+        }
+      }
+
+      /** Clear the trail (world unload): every point dead, nothing visible. */
+      function resetMisterSpotTrail() {
+        const T = _misterTrail;
+        if (!T) return;
+        T.ribbon.geometry.attributes.aBirth.array.fill(-1e6);
+        T.ribbon.geometry.attributes.aBirth.needsUpdate = true;
+        T.ribbon.geometry.attributes.aSegBirth.array.fill(-1e6);
+        T.ribbon.geometry.attributes.aSegBirth.needsUpdate = true;
+        T.points.geometry.attributes.aBirth.array.fill(-1e6);
+        T.points.geometry.attributes.aBirth.needsUpdate = true;
+        T.hasLast = false;
+        T.hasPrev = false;
+        T.floorOf = null;
       }
 
       function _misterSpotClosestDist(path, x, z) {
@@ -5007,8 +6665,29 @@ let _worldSwitched = false;
           _misterSpotStartDrive(m, (m.seg + 1) % segs.length, 0);
           return;
         }
-        m.mode = "hold";
-        m.holdT = 0;
+        // Stop before the turn: first laser sequence (see updateMisterSpot).
+        _misterSpotStartLaser(m, MISTER_SPOT_MODE.LASER_1);
+      }
+
+      /**
+       * Corner state machine (one state at a time, each must finish first):
+       * DRIVE → LASER_1 (stopped, sweep leans toward the coming turn) → HOLD →
+       * TURN → LASER_2 (stopped, sweep in the new facing) → DRIVE.
+       */
+      const MISTER_SPOT_MODE = {
+        DRIVE: "drive",
+        LASER_1: "laser1",
+        HOLD: "hold",
+        TURN: "turn",
+        LASER_2: "laser2",
+      };
+
+      function _misterSpotStartLaser(m, mode) {
+        m.mode = mode;
+        m.laserT = 0;
+        // Before the turn the sweep leans into it; after it, it is centred ahead.
+        m.laserLean = mode === MISTER_SPOT_MODE.LASER_1 ? m.yawDelta : 0;
+        startMisterSpotLaser(m);
       }
 
       function updateMisterSpot(dt) {
@@ -5016,6 +6695,26 @@ let _worldSwitched = false;
         if (!m || !m.object || !m.segs || !m.segs.length) return;
         if (dt < 0) dt = 0;
         const segs = m.segs;
+        if (m.mode === MISTER_SPOT_MODE.LASER_1 || m.mode === MISTER_SPOT_MODE.LASER_2) {
+          const before = m.mode === MISTER_SPOT_MODE.LASER_1;
+          m.laserT += dt;
+          // Fully stationary at the corner, facing the old / new direction.
+          m.object.position.set(segs[m.seg].to.x, m.y, segs[m.seg].to.z);
+          m.object.rotation.y = before ? m.yawFrom : m.yawTo;
+          if (m.laserT < MISTER_SPOT_LASER_DURATION) {
+            updateMisterSpotLaser(m, m.laserT, dt);
+            return;
+          }
+          // Faded out completely: next state.
+          stopMisterSpotLaser(m);
+          if (before) {
+            m.mode = MISTER_SPOT_MODE.HOLD;
+            m.holdT = 0;
+          } else {
+            _misterSpotStartDrive(m, (m.seg + 1) % segs.length, 0);
+          }
+          return;
+        }
         if (m.mode === "hold") {
           m.holdT += dt;
           m.object.position.set(segs[m.seg].to.x, m.y, segs[m.seg].to.z);
@@ -5036,7 +6735,8 @@ let _worldSwitched = false;
           m.object.rotation.y = m.yawFrom + m.yawDelta * u;
           if (m.turnT >= 1) {
             m.object.rotation.y = m.yawTo;
-            _misterSpotStartDrive(m, (m.seg + 1) % segs.length, 0);
+            // Turn complete: second laser sequence before driving on.
+            _misterSpotStartLaser(m, MISTER_SPOT_MODE.LASER_2);
           }
           return;
         }
@@ -5118,6 +6818,9 @@ let _worldSwitched = false;
           metalness: 0,
           envMapIntensity: 0.08,
         });
+        // The rubber glows in its own colour (also through the bloom pass).
+        rubberPink.emissive.copy(rubberPink.color);
+        rubberPink.emissiveIntensity = MISTER_RUBBER_GLOW;
         const screenBlack = new THREE.MeshStandardMaterial({
           color: 0x121212,
           roughness: 0.4,
@@ -5137,21 +6840,33 @@ let _worldSwitched = false;
           buttonMain: hotRed,
           buttonsSmall: whiteLight,
           eyes: glossyBlack,
+          eyesMiddle: glossyBlack,
           rubber: rubberPink,
           screen: screenBlack,
         };
         root.traverse((n) => {
           if (!n.isMesh) return;
           const mat = mats[n.name];
+          if (n.name === "rubber") n.layers.enable(CAR_LIGHTS_BLOOM_LAYER);
           if (mat) n.material = mat;
-          else applySceneEnvironmentToMaterial(n.material);
+          else if (n.name === "eyeLeft" || n.name === "eyeRight") {
+            // Own material: lights up red while the lasers fire.
+            if (!root.userData.eyeMat) {
+              const eyeMat = glossyBlack.clone();
+              eyeMat.emissive.setHex(0xff1a0a);
+              eyeMat.emissiveIntensity = 0;
+              root.userData.eyeMat = eyeMat;
+            }
+            n.material = root.userData.eyeMat;
+            n.layers.enable(CAR_LIGHTS_BLOOM_LAYER);
+          } else applySceneEnvironmentToMaterial(n.material);
         });
       }
 
       function loadMisterSpot(kmodel, loadToken) {
         const mLoader = new GLTFLoader();
         mLoader.load(
-          kitchenAsset("Mister-spot.gltf"),
+          kitchenAsset("Mister-spot2.glb"),
           (gltf) => {
             if (!_worldSwitched || loadToken !== _kitchenLoadToken) return;
             const mister = gltf.scene;
@@ -5165,6 +6880,13 @@ let _worldSwitched = false;
               n.frustumCulled = true;
             });
             _applyMisterSpotMaterials(mister);
+            // "Cylinder" (no material) is a pair of boxes covering both eye
+            // sockets; hidden so the eyes / laser beams show cleanly.
+            const eyeCovers = mister.getObjectByName("Cylinder");
+            if (eyeCovers) eyeCovers.visible = false;
+            // The "sensors" face bar is removed from the robot.
+            const sensors = mister.getObjectByName("sensors");
+            if (sensors && sensors.parent) sensors.parent.remove(sensors);
             const rail = kmodel.getObjectByName("robotRail");
             if (rail) rail.visible = false;
             const path = rail ? _buildRobotRailPath(rail, kmodel) : null;
@@ -5194,7 +6916,11 @@ let _worldSwitched = false;
                 along: 0,
                 mode: "drive",
                 drivePhase: "cruise",
+                eyes: [mister.getObjectByName("eyeLeft"), mister.getObjectByName("eyeRight")],
+                eyeMat: mister.userData.eyeMat || null,
+                rubber: mister.getObjectByName("rubber") || null,
               };
+              scheduleRebuildBloomDarkenLists();
               _misterSpotStartDrive(_misterSpot, segI, along0);
             } else if (rail) {
               mister.position.copy(rail.position);
@@ -5203,7 +6929,7 @@ let _worldSwitched = false;
           },
           undefined,
           (err) => {
-            console.error("Failed to load Mister-spot.gltf:", err);
+            console.error("Failed to load Mister-spot2.glb:", err);
           },
         );
       }
@@ -5212,7 +6938,7 @@ let _worldSwitched = false;
         const loadToken = ++_kitchenLoadToken;
         const kLoader = new GLTFLoader();
         kLoader.load(
-          kitchenAsset("ul-kitchen21.gltf"),
+          kitchenAsset("ul-kitchen23.gltf"),
           (gltf) => {
             if (!_worldSwitched || loadToken !== _kitchenLoadToken) return;
 
@@ -5234,7 +6960,7 @@ let _worldSwitched = false;
             });
             const surfaceMesh = kitchenPlate || kitchenPlatePhysic;
             if (!surfaceMesh) {
-              console.warn("ul-kitchen21.gltf: no mainTablePlate/mainTablePlatePhysic mesh found");
+              console.warn("ul-kitchen23.gltf: no mainTablePlate/mainTablePlatePhysic mesh found");
               _worldSwitched = false;
               return;
             }
@@ -6444,10 +8170,16 @@ let _worldSwitched = false;
             applyGreyBoxMaterials(kmodel);
             applyCupMaterials(kmodel);
             buildCupPyramid(kmodel);
+            rotateKitchenGreyBox(kmodel);
             setupKitchenPropPhysics(kmodel);
+            buildKitchenRaceBoundaries(kmodel);
+            _raceModel = kmodel;
 
             const shadowPlaneGeo = new THREE.PlaneGeometry(tSize.x * 1.5, tSize.z * 1.5);
-            const shadowPlaneMat = new THREE.ShadowMaterial({ opacity: 0.35 });
+            // No depth writes: this invisible plane sits at table height but
+            // extends past the table; writing depth it hid floor-level effects
+            // (e.g. Mister Spot's trail) seen through it from above.
+            const shadowPlaneMat = new THREE.ShadowMaterial({ opacity: 0.35, depthWrite: false });
             carShadowPlane = new THREE.Mesh(shadowPlaneGeo, shadowPlaneMat);
             carShadowPlane.rotation.x = -Math.PI / 2;
             carShadowPlane.position.set(tCenter.x, tTopY + 0.05, tCenter.z);
@@ -7024,7 +8756,7 @@ let _worldSwitched = false;
           },
           undefined,
           (err) => {
-            console.error("Failed to load ul-kitchen21.gltf:", err);
+            console.error("Failed to load ul-kitchen23.gltf:", err);
             _worldSwitched = false;
           },
         );
@@ -7477,6 +9209,7 @@ let _worldSwitched = false;
         applyTextureAnisotropyToRoot(car);
         applyPerformanceShadowPolicy(car);
         scheduleRebuildBloomDarkenLists();
+        prepareKitchenRaceCarTemplate(carScene);
         switchToKitchenWorld();
           },
           undefined,
@@ -7560,101 +9293,119 @@ let _worldSwitched = false;
         if (out.y < 0) out.negate();
       }
 
-      function updateCar(dt) {
-        const inAir = carState.velY !== 0;
+      /**
+       * Driving physics shared by every car (player and AI): speed from the
+       * inputs (throttle / reverse / brake / coasting), steering and the turn
+       * integration of the position. Only the input source differs per car.
+       */
+      function stepCarDrive(state, input, pos, frozen, dt) {
+        const inAir = state.velY !== 0;
         let targetSpeed = 0;
         if (!inAir) {
-          if (keys.forward) targetSpeed = carState.maxSpeed;
-          if (keys.reverse) {
-            if (carState.speed > 0.3) targetSpeed = 0;
-            else targetSpeed = -carState.maxSpeed * 0.5;
+          if (input.forward) targetSpeed = state.maxSpeed;
+          if (input.reverse) {
+            if (state.speed > 0.3) targetSpeed = 0;
+            else targetSpeed = -state.maxSpeed * 0.5;
           }
-          if (keys.forward && keys.reverse) targetSpeed = 0;
-          if (keys.brake) targetSpeed = 0;
+          if (input.forward && input.reverse) targetSpeed = 0;
+          if (input.brake) targetSpeed = 0;
         }
         if (inAir) {
           const airDecay = 1 - Math.exp(-CAR_AIR_RESISTANCE * dt);
-          carState.speed -= carState.speed * airDecay;
-          if (Math.abs(carState.speed) < 0.04) carState.speed = 0;
+          state.speed -= state.speed * airDecay;
+          if (Math.abs(state.speed) < 0.04) state.speed = 0;
         } else {
-          if (keys.brake && Math.abs(carState.speed) > 0.04) {
-            if (!carState._brakeTime) carState._brakeTime = 0;
-            carState._brakeTime += dt;
-            const brakeRamp = Math.min(carState._brakeTime / 1.2, 1);
+          if (input.brake && Math.abs(state.speed) > 0.04) {
+            if (!state._brakeTime) state._brakeTime = 0;
+            state._brakeTime += dt;
+            const brakeRamp = Math.min(state._brakeTime / 1.2, 1);
             const brakePower = 8 + brakeRamp * 30;
-            carState.speed -= Math.sign(carState.speed) * Math.min(Math.abs(carState.speed), brakePower * dt);
+            state.speed -= Math.sign(state.speed) * Math.min(Math.abs(state.speed), brakePower * dt);
           } else {
-            carState._brakeTime = 0;
+            state._brakeTime = 0;
           }
-          if (!keys.brake && keys.reverse && carState.speed > 0.3) {
-            carState.speed = Math.max(
+          if (!input.brake && input.reverse && state.speed > 0.3) {
+            state.speed = Math.max(
               0,
-              carState.speed -
-                (carState.brakeDecelReverseKey || carState.brakeDecel) * dt,
+              state.speed -
+                (state.brakeDecelReverseKey || state.brakeDecel) * dt,
             );
           } else if (
-            Math.abs(carState.speed) > 0.3 &&
-            !keys.forward &&
-            !keys.reverse
+            Math.abs(state.speed) > 0.3 &&
+            !input.forward &&
+            !input.reverse
           ) {
-            carState.speed *= carState.friction;
+            state.speed *= state.friction;
           } else {
-            carState.speed +=
-              (targetSpeed - carState.speed) *
-              (1 - Math.exp(-carState.accel * 0.04 * dt));
+            state.speed +=
+              (targetSpeed - state.speed) *
+              (1 - Math.exp(-state.accel * 0.04 * dt));
           }
-          if (Math.abs(carState.speed) < 0.04) carState.speed = 0;
-        }
-
-        if (car.userData.brakeLightMesh) {
-          const bl = car.userData.brakeLightMesh;
-          bl.material = keys.brake ? bl._brakeMat : bl._offMat;
+          if (Math.abs(state.speed) < 0.04) state.speed = 0;
         }
 
         let steerTarget = 0;
         if (!inAir) {
-          if (keys.left) steerTarget = -MAX_STEER_RAD;
-          if (keys.right) steerTarget = MAX_STEER_RAD;
+          if (input.left) steerTarget = -MAX_STEER_RAD;
+          if (input.right) steerTarget = MAX_STEER_RAD;
         }
-        carState.steerAngle +=
-          (steerTarget - carState.steerAngle) *
-          (1 - Math.exp(-carState.steerSpeed * dt));
-        carState.steerAngle = Math.max(
+        state.steerAngle +=
+          (steerTarget - state.steerAngle) *
+          (1 - Math.exp(-state.steerSpeed * dt));
+        state.steerAngle = Math.max(
           -MAX_STEER_RAD,
-          Math.min(MAX_STEER_RAD, carState.steerAngle),
+          Math.min(MAX_STEER_RAD, state.steerAngle),
         );
 
-        const forwardX = Math.sin(carState.angle);
-        const forwardZ = Math.cos(carState.angle);
-        const rightX = Math.cos(carState.angle);
-        const rightZ = -Math.sin(carState.angle);
-        const moving = Math.abs(carState.speed) > 0.65;
-        const steering = !inAir && Math.abs(carState.steerAngle) > 0.008;
+        const forwardX = Math.sin(state.angle);
+        const forwardZ = Math.cos(state.angle);
+        const rightX = Math.cos(state.angle);
+        const rightZ = -Math.sin(state.angle);
+        const moving = Math.abs(state.speed) > 0.65;
+        const steering = !inAir && Math.abs(state.steerAngle) > 0.008;
 
-        if (!carFalling) {
+        if (!frozen) {
           if (moving && steering) {
-            const speed = carState.speed;
+            const speed = state.speed;
             const sign = speed > 0 ? 1 : -1;
-            const steer = sign > 0 ? carState.steerAngle : -carState.steerAngle;
-            const speedFactor = Math.min(1, Math.abs(speed) / carState.maxSpeed);
-            const effectiveTurnRate = carState.turnRate * speedFactor;
+            const steer = sign > 0 ? state.steerAngle : -state.steerAngle;
+            const speedFactor = Math.min(1, Math.abs(speed) / state.maxSpeed);
+            const effectiveTurnRate = state.turnRate * speedFactor;
             const centerX =
-              car.position.x + rightX * (speed / (effectiveTurnRate * steer));
+              pos.x + rightX * (speed / (effectiveTurnRate * steer));
             const centerZ =
-              car.position.z + rightZ * (speed / (effectiveTurnRate * steer));
+              pos.z + rightZ * (speed / (effectiveTurnRate * steer));
             const dTheta = -effectiveTurnRate * steer * dt;
-            const ddx = car.position.x - centerX;
-            const ddz = car.position.z - centerZ;
+            const ddx = pos.x - centerX;
+            const ddz = pos.z - centerZ;
             const c = Math.cos(dTheta);
             const s = Math.sin(dTheta);
-            car.position.x = centerX + ddx * c - ddz * s;
-            car.position.z = centerZ + ddx * s + ddz * c;
-            carState.angle += dTheta;
+            pos.x = centerX + ddx * c - ddz * s;
+            pos.z = centerZ + ddx * s + ddz * c;
+            state.angle += dTheta;
           } else {
-            car.position.x += forwardX * carState.speed * dt;
-            car.position.z += forwardZ * carState.speed * dt;
+            pos.x += forwardX * state.speed * dt;
+            pos.z += forwardZ * state.speed * dt;
           }
         }
+      }
+
+      /** Player inputs, or none while the race holds the cars (countdown / finish). */
+      function getPlayerDriveInput() {
+        return kitchenRaceInputsLocked() ? _raceNoInput : keys;
+      }
+
+      function updateCar(dt) {
+        const input = getPlayerDriveInput();
+        stepCarDrive(carState, input, car.position, carFalling, dt);
+        if (!carFalling) integrateRaceCarBump(car.position, carState, dt);
+
+        if (car.userData.brakeLightMesh) {
+          const bl = car.userData.brakeLightMesh;
+          bl.material = input.brake ? bl._brakeMat : bl._offMat;
+        }
+
+        if (!carFalling) collideCarWithRails(car.position, carState);
         carState.driftAngle = 0;
         if (!carFalling) {
           _carFrontAxleSurfY = tableSurfaceY;
@@ -7811,7 +9562,7 @@ let _worldSwitched = false;
         }
 
         if (airInParts.length) {
-          const airInTarget = keys.forward ? 1 : 0;
+          const airInTarget = input.forward ? 1 : 0;
           for (const part of airInParts) {
             if (!part?.baseQuat || !part?.openQuat) continue;
             if (part._airInTarget !== airInTarget) {
@@ -7857,6 +9608,7 @@ let _worldSwitched = false;
           for (let s = 0; s < maxCarSteps && carTimeLeft > 0; s++) {
             const step = Math.min(carDt, carTimeLeft);
             updateCar(step);
+            stepKitchenRaceCars(step);
             if (
               carState.velY !== 0 &&
               jumpInitialVelY > 0.02
@@ -7865,6 +9617,7 @@ let _worldSwitched = false;
             }
             carTimeLeft -= step;
           }
+          updateKitchenRace(dt);
           if (_carLandShakePending && camera === carCamera) {
             triggerCarCam1LandingShake(
               jumpLaunchSpeed / Math.max(0.01, carState.maxSpeed),
@@ -7950,6 +9703,7 @@ let _worldSwitched = false;
               keys.left ||
               keys.right ||
               keys.brake ||
+              kitchenRaceCarsMoving() ||
               kitchenPropsMoving();
             if (realtimePhysics) {
               _kitchenIdlePhysicsAccumulator = 0;
@@ -8222,6 +9976,7 @@ let _worldSwitched = false;
           updateTrashPlaneEffect(dt);
           updateIceCoffeeTank(dt);
           updateMisterSpot(dt);
+          updateMisterSpotTrail(dt);
           updateTableLightReflections();
           finalComposer.render();
         } catch (e) {
