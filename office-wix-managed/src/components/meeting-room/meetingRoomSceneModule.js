@@ -12,6 +12,7 @@ import { emitMeetingRoomSceneEvent } from "../game/meetingRoomSceneEvents.js";
  * Dev-only perf tooling (both false in production builds):
  *   ?perf           -> on-screen metrics overlay
  *   ?perf=baseline  -> overlay with the render optimizations switched off (A/B)
+ *   ?perf=noglow    -> overlay with the screen glow switched off (A/B)
  */
 const MR_PERF =
   import.meta.env.DEV &&
@@ -19,6 +20,9 @@ const MR_PERF =
   new URLSearchParams(location.search).has("perf");
 const MR_PERF_BASELINE =
   MR_PERF && new URLSearchParams(location.search).get("perf") === "baseline";
+/** ?perf=noglow -> overlay with the screen glow switched off (A/B for the glow). */
+const MR_PERF_NOGLOW =
+  MR_PERF && new URLSearchParams(location.search).get("perf") === "noglow";
 
 const _MEETING_ROOM_BASE = `${import.meta.env.BASE_URL}meeting-room-optimized/`;
 const _OFFICE_BASE = `${import.meta.env.BASE_URL}office-scene-optimized/`;
@@ -3281,6 +3285,27 @@ function makeColumnCameraPassable(root) {
   });
 }
 
+/** Sofa cushions (sofaSeat / sofaBackSeat) keep their hue at this share of the model's brightness. */
+const SOFA_FABRIC_BRIGHTNESS = 0.22;
+/** Matte fabric: the model's 0.5 roughness gave the seat a whitish sheen under the ceiling lights. */
+const SOFA_FABRIC_ROUGHNESS = 0.85;
+
+/** The model's sofa fabric reads too bright; dim just its color (same hue). */
+function dimSofaFabric(root) {
+  const done = new Set();
+  for (const name of ["sofaSeat", "sofaBackSeat"]) {
+    const mesh = root.getObjectByName(name);
+    if (!mesh || !mesh.isMesh) continue;
+    const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+    for (const mat of mats) {
+      if (!mat || !mat.color || done.has(mat)) continue;
+      mat.color.multiplyScalar(SOFA_FABRIC_BRIGHTNESS);
+      if (mat.roughness !== undefined) mat.roughness = SOFA_FABRIC_ROUGHNESS;
+      done.add(mat);
+    }
+  }
+}
+
 // --- chairs around the tablePlate ------------------------------------------
 const CHAIR_PARTS = ["chairSeat", "chairFrame", "chairAxis", "chairWheels"];
 const CHAIRS_PER_SIDE = 3;
@@ -3420,8 +3445,20 @@ function attachScreenLights(root) {
       Math.max(size.y, 0.25),
     );
     light.name = `${name}AreaLight`;
-    light.position.set(center.x + 0.08, center.y, center.z);
-    light.lookAt(tableAim.x, tableAim.y, tableAim.z);
+    // Face straight out of the screen surface (not tilted toward the table):
+    // a tilted area light this close to the wall lit the wall itself as a hard
+    // triangle. Facing straight out, the wall is entirely behind the light.
+    const outDir = new THREE.Vector3(1, 0, 0);
+    const nAttr = mesh.geometry.getAttribute("normal");
+    if (nAttr) {
+      outDir.fromBufferAttribute(nAttr, 0).transformDirection(mesh.matrixWorld);
+      if (outDir.dot(new THREE.Vector3().subVectors(tableAim, center)) < 0) outDir.negate();
+    }
+    outDir.y = 0;
+    if (outDir.lengthSq() < 1e-6) outDir.set(1, 0, 0);
+    outDir.normalize();
+    light.position.copy(center).addScaledVector(outDir, 0.08);
+    light.lookAt(light.position.x + outDir.x, light.position.y, light.position.z + outDir.z);
     scene.add(light);
     _screenAreaLights.push(light);
   }
@@ -6048,7 +6085,10 @@ function captureRoomReflections(root) {
   const carSparkWas = carSparkGroup ? carSparkGroup.visible : false;
   if (sparkGroup) sparkGroup.visible = false;
   if (carSparkGroup) carSparkGroup.visible = false;
+  const glowWas = _screenGlowMeshes.map((g) => g.visible);
+  for (const g of _screenGlowMeshes) g.visible = false;
   cubeCam.update(renderer, scene);
+  _screenGlowMeshes.forEach((g, i) => (g.visible = glowWas[i]));
   if (sparkGroup) sparkGroup.visible = true;
   if (carSparkGroup) carSparkGroup.visible = carSparkWas;
   if (tableReflector) tableReflector.visible = true;
@@ -6565,6 +6605,7 @@ function loadMeetingRoom() {
         applyPlantGroundTexture(_model, plantGroundMap);
         enableDoubleSidedFaces(_model);
         makeColumnCameraPassable(_model);
+        dimSofaFabric(_model);
         arrangeChairsAroundTable(_model);
         setupArenaScreens(_model);
         scene.add(_model);
@@ -7654,6 +7695,230 @@ const SCREEN_CANVAS_W = 1024;
 const SCREEN_CANVAS_H = 576;
 const SCREEN_TEXT_GAIN = 1.35;
 const _screens = { left: null, right: null };
+let _screensGlow = null;
+
+// --- screen glow (bloom look for screenLeft / screenRight only) --------------
+// A procedural halo: rounded-rectangle distance + smooth falloff. It never
+// samples the screen texture, so no screen detail can leak into it; its color
+// is ONE averaged color per piece of content (see _screenGlowTargetColor).
+/** Overall glow intensity (0 = off). */
+const SCREEN_GLOW_STRENGTH = 0.2;
+/** How far the glow reaches past the screen edge, in meters (glow size). */
+const SCREEN_GLOW_SPREAD = 0.34;
+/** Falloff softness: higher = glow hugs the edge more, fades out sooner. */
+const SCREEN_GLOW_SOFTNESS = 1.8;
+/** Corner rounding of the halo, as a share of SCREEN_GLOW_SPREAD. */
+const SCREEN_GLOW_CORNER = 0.6;
+/** Noise dither on the faint outer fade (in 8-bit steps) to prevent banding. */
+const SCREEN_GLOW_DITHER = 0.5;
+/**
+ * Color source per content type:
+ * - WELCOME image: its average color (computed once from the image),
+ * - countdown text: the word's color, at SCREEN_GLOW_TEXT_LEVEL,
+ * - replay: a fixed soft color, at SCREEN_GLOW_REPLAY_LEVEL.
+ */
+const SCREEN_GLOW_TEXT_LEVEL = 0.3;
+const SCREEN_GLOW_REPLAY_COLOR = new THREE.Color(0x8fb4ff);
+const SCREEN_GLOW_REPLAY_LEVEL = 0.35;
+/** How quickly the glow eases to a new color / level (1/s). */
+const SCREEN_GLOW_EASE = 6;
+/** Dark-Mode emissive intensity of the screen content (glow scales with it). */
+const SCREEN_GLOW_REF_EMISSIVE = 4.4;
+
+const _screenGlowMeshes = [];
+
+const screenGlowVertex = `
+attribute vec2 aRect;
+varying vec2 vRect;
+void main() {
+  vRect = aRect;
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+}
+`;
+const screenGlowFragment = `
+uniform vec3 uColorA;
+uniform vec3 uColorB;
+uniform float uIntA;
+uniform float uIntB;
+uniform float uCenterA;
+uniform float uCenterB;
+uniform vec2 uHalf;
+uniform float uSpread;
+uniform float uSoftness;
+uniform float uCorner;
+uniform float uDither;
+varying vec2 vRect;
+float glowHash(vec2 p) {
+  return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
+}
+void main() {
+  // Rounded-rectangle distance (meters) outside the screen; 0 at/inside it.
+  float r = uCorner;
+  vec2 q = abs(vRect) - (uHalf - vec2(r));
+  float d = max(length(max(q, 0.0)) - r, 0.0);
+  // Inside the screens' outline (incl. the gap between them): no glow.
+  if (d <= 0.0) discard;
+  float t = clamp(d / uSpread, 0.0, 1.0);
+  // smoothstep has zero slope at both ends: no visible inner or outer edge.
+  float fall = pow(1.0 - smoothstep(0.0, 1.0, t), uSoftness);
+  if (fall <= 0.0) discard;
+  // Each side takes its own screen's color / level, blended across the seam.
+  float side = smoothstep(0.0, 1.0, (vRect.x - uCenterA) / (uCenterB - uCenterA));
+  vec3 col = mix(uColorA * uIntA, uColorB * uIntB, side) * fall;
+  col += (glowHash(gl_FragCoord.xy) - 0.5) * (uDither / 255.0);
+  gl_FragColor = vec4(max(col, 0.0), 1.0);
+  #include <colorspace_fragment>
+}
+`;
+
+/** Average color (linear) of an image/canvas, via a tiny downscaled copy. Run rarely. */
+const _glowAvgCanvas = typeof document !== "undefined" ? document.createElement("canvas") : null;
+function _averageImageColor(img, out) {
+  if (!_glowAvgCanvas || !img) return false;
+  const w = img.naturalWidth || img.videoWidth || img.width;
+  const h = img.naturalHeight || img.videoHeight || img.height;
+  if (!(w > 0 && h > 0)) return false;
+  const N = 8;
+  _glowAvgCanvas.width = N;
+  _glowAvgCanvas.height = N;
+  const c = _glowAvgCanvas.getContext("2d", { willReadFrequently: true });
+  c.clearRect(0, 0, N, N);
+  c.drawImage(img, 0, 0, N, N);
+  const px = c.getImageData(0, 0, N, N).data;
+  const tmp = new THREE.Color();
+  let r = 0;
+  let g = 0;
+  let b = 0;
+  for (let i = 0; i < px.length; i += 4) {
+    tmp.setRGB(px[i] / 255, px[i + 1] / 255, px[i + 2] / 255, THREE.SRGBColorSpace);
+    r += tmp.r;
+    g += tmp.g;
+    b += tmp.b;
+  }
+  const n = px.length / 4;
+  out.setRGB(r / n, g / n, b / n);
+  return true;
+}
+
+/**
+ * One soft additive halo around BOTH screens (they sit edge to edge as one
+ * display). Two separate halos overlapped at the seam and added up into bright
+ * wedges above / below it; a single halo cannot overlap itself. Built in the
+ * screens' plane, SCREEN_GLOW_SPREAD past their combined outline, 3 mm toward
+ * the wall, so both screens stay fully sharp in front of it.
+ */
+function createScreensGlow(meshA, meshB) {
+  const meshes = [meshA, meshB].filter(Boolean);
+  if (!meshes.length) return null;
+  const quad = (m) => {
+    const pos = m.geometry.getAttribute("position");
+    if (!pos || pos.count !== 4) return null;
+    m.updateWorldMatrix(true, false);
+    const out = [];
+    for (let i = 0; i < 4; i++) out.push(new THREE.Vector3().fromBufferAttribute(pos, i).applyMatrix4(m.matrixWorld));
+    return out;
+  };
+  const quads = meshes.map(quad);
+  if (quads.some((q) => !q)) return null;
+  const q0 = quads[0];
+  const axisA = new THREE.Vector3().subVectors(q0[1], q0[0]);
+  const axisB = new THREE.Vector3().subVectors(q0[3], q0[0]);
+  if (Math.abs(axisA.clone().normalize().dot(axisB.clone().normalize())) > 0.9) {
+    axisB.subVectors(q0[2], q0[0]);
+  }
+  const normal = new THREE.Vector3().crossVectors(axisA, axisB).normalize();
+  const n = meshes[0].geometry.getAttribute("normal");
+  if (n) {
+    const nw = new THREE.Vector3().fromBufferAttribute(n, 0).transformDirection(meshes[0].matrixWorld);
+    if (nw.dot(normal) < 0) normal.negate();
+  }
+  const u = axisA.clone().normalize();
+  const v = new THREE.Vector3().crossVectors(normal, u).normalize();
+  const origin = q0[0].clone();
+  let uMin = Infinity, uMax = -Infinity, vMin = Infinity, vMax = -Infinity;
+  const centersU = [];
+  for (const q of quads) {
+    let cu = 0;
+    for (const p of q) {
+      const d = p.clone().sub(origin);
+      const pu = d.dot(u);
+      const pv = d.dot(v);
+      uMin = Math.min(uMin, pu);
+      uMax = Math.max(uMax, pu);
+      vMin = Math.min(vMin, pv);
+      vMax = Math.max(vMax, pv);
+      cu += pu;
+    }
+    centersU.push(cu / 4);
+  }
+  const cU = (uMin + uMax) * 0.5;
+  const cV = (vMin + vMax) * 0.5;
+  const halfU = (uMax - uMin) * 0.5;
+  const halfV = (vMax - vMin) * 0.5;
+  const center = origin.clone().addScaledVector(u, cU).addScaledVector(v, cV);
+  const parent = meshes[0].parent;
+  parent.updateWorldMatrix(true, false);
+  const inv = parent.matrixWorld.clone().invert();
+  const eu = halfU + SCREEN_GLOW_SPREAD;
+  const ev = halfV + SCREEN_GLOW_SPREAD;
+  const corners = [
+    [-eu, -ev],
+    [eu, -ev],
+    [eu, ev],
+    [-eu, ev],
+  ];
+  const outPos = new Float32Array(12);
+  const outRect = new Float32Array(8);
+  corners.forEach(([du, dv], i) => {
+    const p = center
+      .clone()
+      .addScaledVector(u, du)
+      .addScaledVector(v, dv)
+      .addScaledVector(normal, -0.003)
+      .applyMatrix4(inv);
+    outPos.set([p.x, p.y, p.z], i * 3);
+    outRect.set([du, dv], i * 2);
+  });
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.BufferAttribute(outPos, 3));
+  geo.setAttribute("aRect", new THREE.BufferAttribute(outRect, 2));
+  geo.setIndex([0, 1, 2, 0, 2, 3]);
+  // Screen centers along the halo's horizontal axis (A = first mesh, B = second).
+  const centerA = centersU[0] - cU;
+  const centerB = (centersU.length > 1 ? centersU[1] : centersU[0] + 1) - cU;
+  const mat = new THREE.ShaderMaterial({
+    uniforms: {
+      uColorA: { value: new THREE.Color(0, 0, 0) },
+      uColorB: { value: new THREE.Color(0, 0, 0) },
+      uIntA: { value: 0 },
+      uIntB: { value: 0 },
+      uCenterA: { value: centerA },
+      uCenterB: { value: centerB },
+      uHalf: { value: new THREE.Vector2(halfU, halfV) },
+      uSpread: { value: SCREEN_GLOW_SPREAD },
+      uSoftness: { value: SCREEN_GLOW_SOFTNESS },
+      uCorner: { value: Math.min(SCREEN_GLOW_SPREAD * SCREEN_GLOW_CORNER, Math.min(halfU, halfV)) },
+      uDither: { value: SCREEN_GLOW_DITHER },
+    },
+    vertexShader: screenGlowVertex,
+    fragmentShader: screenGlowFragment,
+    transparent: true,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+    toneMapped: false,
+    side: THREE.DoubleSide,
+  });
+  const glow = new THREE.Mesh(geo, mat);
+  glow.name = "screensGlow";
+  glow.renderOrder = 1;
+  glow.castShadow = false;
+  glow.receiveShadow = false;
+  glow.userData.skipBounds = true;
+  glow.visible = false; // shown once both screens have a glow color
+  parent.add(glow);
+  _screenGlowMeshes.push(glow);
+  return glow;
+}
 
 function setupArenaScreens(root) {
   for (const key of ["left", "right"]) {
@@ -7683,6 +7948,9 @@ function setupArenaScreens(root) {
     _screens[key] = {
       key,
       mesh,
+      glowColor: new THREE.Color(0, 0, 0),
+      glowInt: 0,
+      glowReady: false,
       base,
       contentMat,
       textMat,
@@ -7695,6 +7963,12 @@ function setupArenaScreens(root) {
       color: "#ffffff",
       textAge: 0,
     };
+  }
+  if (SCREEN_GLOW_STRENGTH > 0 && !MR_PERF_NOGLOW && (_screens.left || _screens.right)) {
+    _screensGlow = createScreensGlow(
+      _screens.left && _screens.left.mesh,
+      _screens.right && _screens.right.mesh,
+    );
   }
 }
 
@@ -7771,12 +8045,70 @@ function restoreScreenContent(key) {
   s.mesh.material = s.contentMat;
 }
 
+const _glowTarget = new THREE.Color();
+
+/** One averaged color for the screen's current content (no per-pixel sampling). */
+function _screenGlowTargetColor(s, out) {
+  if (s.mode === "text") return out.set(s.color);
+  if (s.mode === "replay") return out.copy(SCREEN_GLOW_REPLAY_COLOR);
+  if (!s.contentAvg) {
+    const img = s.contentMat.map && s.contentMat.map.image;
+    const avg = new THREE.Color();
+    if (img && _averageImageColor(img, avg)) s.contentAvg = avg;
+    else return null;
+  }
+  return out.copy(s.contentAvg);
+}
+
+/** Eases one screen's glow color / level toward its current content. */
+function updateScreenGlow(s, dt) {
+  if (!_screenGlowTargetColor(s, _glowTarget)) return false;
+  const level =
+    s.mode === "text"
+      ? SCREEN_GLOW_TEXT_LEVEL
+      : s.mode === "replay"
+        ? SCREEN_GLOW_REPLAY_LEVEL
+        : s.contentMat.emissiveIntensity / SCREEN_GLOW_REF_EMISSIVE;
+  const targetI = SCREEN_GLOW_STRENGTH * level;
+  if (!s.glowReady) {
+    s.glowColor.copy(_glowTarget);
+    s.glowInt = targetI;
+    s.glowReady = true;
+  } else {
+    const k = 1 - Math.exp(-SCREEN_GLOW_EASE * Math.max(0, dt));
+    s.glowColor.lerp(_glowTarget, k);
+    s.glowInt += (targetI - s.glowInt) * k;
+  }
+  return true;
+}
+
+function updateScreensGlow(dt) {
+  const g = _screensGlow;
+  if (!g) return;
+  const A = _screens.left || _screens.right;
+  const B = _screens.right || _screens.left;
+  const okA = updateScreenGlow(A, dt);
+  const okB = B === A ? okA : updateScreenGlow(B, dt);
+  if (!okA || !okB) {
+    g.visible = false;
+    return;
+  }
+  const u = g.material.uniforms;
+  u.uColorA.value.copy(A.glowColor);
+  u.uIntA.value = A.glowInt;
+  u.uColorB.value.copy(B.glowColor);
+  u.uIntB.value = B.glowInt;
+  g.visible = true;
+}
+
 function updateArenaScreens(dt) {
+  updateScreensGlow(dt);
   for (const key of ["left", "right"]) {
     const s = _screens[key];
     if (!s) continue;
     // Original content keeps following the light theme exactly as before.
     s.contentMat.emissiveIntensity = s.base.emissiveIntensity;
+
     if (s.mode === "text" && s.textAge < 0.3) {
       s.textAge += dt;
       _drawScreenText(s);
@@ -8628,6 +8960,11 @@ if (MR_PERF) {
     get phase() {
       return _arenaGame.phase;
     },
+    scene,
+    camera,
+    controls,
+    screenGlows: _screenGlowMeshes,
+    screenLights: _screenAreaLights,
   };
 }
 

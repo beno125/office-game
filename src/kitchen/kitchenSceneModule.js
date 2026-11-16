@@ -1295,6 +1295,18 @@ export function isKitchenSceneReady() {
       finalComposer.addPass(smaaPass);
       finalComposer.addPass(sharpenPass);
       finalComposer.addPass(outputPass);
+      // Dev-only (?perf in `npm run dev`): handles for profiling. Compiled out of production.
+      if (
+        import.meta.env.DEV &&
+        typeof location !== "undefined" &&
+        new URLSearchParams(location.search).has("perf")
+      ) {
+        window.__kitchenPerf = {
+          renderer, scene, finalComposer, bloomComposer, smaaPass, sharpenPass,
+          get world() { return physicsWorld; },
+          get props() { return _kitchenProps; },
+        };
+      }
 
       smaaPass.enabled = perfSettings.smaa;
       sharpenPass.enabled = false;
@@ -2075,14 +2087,24 @@ let _worldSwitched = false;
         try { resize(); } catch (e) {}
       }
 
+      /**
+       * The back-wall plates are one row of identical tiles (65 x ~6.8k tris).
+       * As a single InstancedMesh the whole row is drawn whenever any tile is
+       * in view. Split into chunks of neighbouring tiles, each with its own
+       * bounds, so off-screen chunks are frustum-culled. Same tiles, same
+       * transforms, same material and name: an identical picture.
+       */
+      const KITCHEN_NISH_CHUNK = 8;
+      const _kitchenNishChunks = [];
+
       function disposeKitchenNishInstanced() {
-        if (!_kitchenNishInstanced) return;
-        try {
-          if (_kitchenNishInstanced.parent) {
-            _kitchenNishInstanced.parent.remove(_kitchenNishInstanced);
-          }
-        } catch (e) {}
-        try { _kitchenNishInstanced.dispose(); } catch (e) {}
+        for (const inst of _kitchenNishChunks) {
+          try {
+            if (inst.parent) inst.parent.remove(inst);
+          } catch (e) {}
+          try { inst.dispose(); } catch (e) {}
+        }
+        _kitchenNishChunks.length = 0;
         _kitchenNishInstanced = null;
       }
 
@@ -2090,28 +2112,32 @@ let _worldSwitched = false;
         disposeKitchenNishInstanced();
         if (!mesh || !mesh.geometry || stepX == null || cloneCount < 0) return;
         const total = cloneCount + 1;
-        _kitchenNishInstanced = new THREE.InstancedMesh(
-          mesh.geometry,
-          material,
-          total,
-        );
-        _kitchenNishInstanced.name = "MainNishBackWallPlate_instanced";
-        _kitchenNishInstanced.castShadow = false;
-        _kitchenNishInstanced.receiveShadow = false;
-        _kitchenNishInstanced.frustumCulled = true;
         const base = mesh.position.clone();
         const quat = mesh.quaternion.clone();
         const scale = mesh.scale.clone();
         const m = new THREE.Matrix4();
-        for (let i = 0; i < total; i++) {
-          const pos = base.clone();
-          pos.x += stepX * i;
-          m.compose(pos, quat, scale);
-          _kitchenNishInstanced.setMatrixAt(i, m);
+        const pos = new THREE.Vector3();
+        for (let start = 0; start < total; start += KITCHEN_NISH_CHUNK) {
+          const count = Math.min(KITCHEN_NISH_CHUNK, total - start);
+          const inst = new THREE.InstancedMesh(mesh.geometry, material, count);
+          inst.name = "MainNishBackWallPlate_instanced";
+          inst.castShadow = false;
+          inst.receiveShadow = false;
+          inst.frustumCulled = true;
+          for (let k = 0; k < count; k++) {
+            pos.copy(base);
+            pos.x += stepX * (start + k);
+            m.compose(pos, quat, scale);
+            inst.setMatrixAt(k, m);
+          }
+          inst.instanceMatrix.needsUpdate = true;
+          inst.computeBoundingBox();
+          inst.computeBoundingSphere();
+          parent.add(inst);
+          _kitchenNishChunks.push(inst);
         }
-        _kitchenNishInstanced.instanceMatrix.needsUpdate = true;
+        _kitchenNishInstanced = _kitchenNishChunks[0] || null;
         mesh.visible = false;
-        parent.add(_kitchenNishInstanced);
       }
       let carFalling = false;
       let carFloorTimer = 0;
@@ -2199,6 +2225,10 @@ let _worldSwitched = false;
       let floorPhysBody = null;
       const PHYS_GROUP_DEFAULT = 1;
       const PHYS_GROUP_CAR = 512;
+      /** Low car "bumper" that only touches knockable props (never table/floor). */
+      const PHYS_GROUP_PROP_BUMPER = 1024;
+      const PHYS_GROUP_PROP = 2048;
+      const PHYS_GROUP_CUP = 8192;
 
       physicsWorld = new CANNON.World({
         gravity: new CANNON.Vec3(0, -480, 0),
@@ -2213,6 +2243,36 @@ let _worldSwitched = false;
       const tablePlatePhysicsMaterial = new CANNON.Material("tablePlate");
       const carMaterial = new CANNON.Material("car");
       const floorPhysMaterial = new CANNON.Material("floor");
+      const propPhysMaterial = new CANNON.Material("prop");
+      // Props on the table / floor: they slide when pushed rather than dig in.
+      for (const surface of [tablePlatePhysicsMaterial, floorPhysMaterial]) {
+        physicsWorld.addContactMaterial(
+          new CANNON.ContactMaterial(propPhysMaterial, surface, {
+            friction: 0.25,
+            restitution: 0.05,
+            contactEquationStiffness: 1e8,
+            contactEquationRelaxation: 2,
+          }),
+        );
+      }
+      // Car tumbling off the table: the meeting room's car contact values.
+      const carFallMaterial = new CANNON.Material("carFall");
+      physicsWorld.addContactMaterial(
+        new CANNON.ContactMaterial(carFallMaterial, tablePlatePhysicsMaterial, {
+          friction: 0.35,
+          restitution: 0.04,
+          contactEquationStiffness: 1e7,
+          contactEquationRelaxation: 3,
+        }),
+      );
+      physicsWorld.addContactMaterial(
+        new CANNON.ContactMaterial(carFallMaterial, floorPhysMaterial, {
+          friction: 0.62,
+          restitution: 0.16,
+          contactEquationStiffness: 1e7,
+          contactEquationRelaxation: 3,
+        }),
+      );
       physicsWorld.addContactMaterial(
         new CANNON.ContactMaterial(carMaterial, tablePlatePhysicsMaterial, {
           friction: 0.5,
@@ -2254,6 +2314,952 @@ let _worldSwitched = false;
           new CANNON.Box(new CANNON.Vec3(size.x / 2, hy, size.z / 2))
         );
         physicsWorld.addBody(floorPhysBody);
+      }
+
+      // --- knockable kitchen props ----------------------------------------
+      // [visual mesh(es), invisible physics proxy, collider shape]. The proxy's
+      // bounds become a dynamic body the car can push; every visual in the
+      // group follows it every frame.
+      const KITCHEN_PROP_PAIRS = [
+        ["fruitPlate1", "fruitPlate1Physic", "cylinder"],
+        ["fruitPlate2", "fruitPlate2Physic", "cylinder"],
+        ["fruitPlate3", "fruitPlate3Physic", "cylinder"],
+        [["greyBox", "greyBoxCup"], "greyBoxPhysic", "box"],
+        ["binSign1", "binSign1Physic", "box"],
+        ["binSign2", "binSign2Physic", "box"],
+        ["binSign3", "binSign3Physic", "box"],
+        // The cup is not listed here: buildCupPyramid() stacks it with its
+        // copies into a pyramid and adds them to _cupPyramidPairs.
+      ];
+      const KITCHEN_PROP_MASS = 2;
+      /** Car spawn offset from the table centre: clear of greyBox and binSign3. */
+      const KITCHEN_CAR_SPAWN_OFFSET_X = 4.3;
+      const KITCHEN_PROP_LINEAR_DAMPING = 0.35;
+      const KITCHEN_PROP_ANGULAR_DAMPING = 0.5;
+      /**
+       * Gap between a prop's lowest visible point and its physics body's
+       * bottom. The body rests on the surface (with cannon's tiny resting
+       * overlap), so the visual always sits just above it: never sunk into the
+       * table / floor, and never coplanar with it (no z-fighting).
+       */
+      const KITCHEN_PROP_VISUAL_LIFT = 0.012;
+      /** Overlap with the table top allowed before a prop is lifted back out. */
+      const KITCHEN_PROP_TABLE_TOLERANCE = 0.01;
+      /** Inradius / radius of the props' 12-segment cylinder colliders. */
+      const KITCHEN_PROP_CYL_INRADIUS = Math.cos(Math.PI / 12);
+      /** Gap between the car's prop bumper and the table (it never touches the table). */
+      const KITCHEN_PROP_BUMPER_CLEARANCE = 0.02;
+      const KITCHEN_PROP_BUMPER_MAX_SPEED = 40;
+      const _kitchenProps = [];
+      const _propBodyMat = new THREE.Matrix4();
+      const _propWorldMat = new THREE.Matrix4();
+      const _propParentInv = new THREE.Matrix4();
+      const _propPos = new THREE.Vector3();
+      const _propQuat = new THREE.Quaternion();
+      const _propScale = new THREE.Vector3(1, 1, 1);
+
+      /**
+       * greyBox: matte grey plastic. greyBoxCup (its lid): the bar chairs' oak
+       * wood material (shared, so it follows any chair-material changes).
+       */
+      let _greyBoxPlasticMat = null;
+      function applyGreyBoxMaterials(model) {
+        const box = model.getObjectByName("greyBox");
+        if (box && box.isMesh) {
+          if (!_greyBoxPlasticMat) {
+            _greyBoxPlasticMat = new THREE.MeshStandardMaterial({
+              color: 0x8a8d92,
+              roughness: 0.9,
+              metalness: 0,
+            });
+          }
+          box.material = _greyBoxPlasticMat;
+        }
+        const lid = model.getObjectByName("greyBoxCup");
+        if (lid && lid.isMesh && _barChairWoodMat) {
+          lid.material = _barChairWoodMat;
+        }
+      }
+
+      /**
+       * Cup: cupBase is white plastic; cupGraphic is the printed sleeve
+       * (redrawn from the Wix Cafe sleeve layout). cupGraphic's UVs wrap once
+       * around the cup (u 0→1, left→right seen from outside) and run v 0.25
+       * (top) → 0.5 (bottom), so the canvas is stretched over that band.
+       */
+      let _cupPlasticMat = null;
+      let _cupSleeveMat = null;
+      /** How strongly the cup print lights itself (0 = lit by the scene only). */
+      const KITCHEN_CUP_SLEEVE_GLOW = 0.45;
+      function drawCupSleeveCanvas() {
+        const W = 2048;
+        const H = 896;
+        const cv = document.createElement("canvas");
+        cv.width = W;
+        cv.height = H;
+        const ctx = cv.getContext("2d");
+        const BEIGE = "#cdbf9f";
+        const BLUE = "#2b4a96";
+        const RED = "#e3304e";
+        const PINK = "#ef8aa6";
+        const INK = "#2a1a20";
+        // Top band: beige with a row of 8 blue half-discs (round side left,
+        // flat side right), each spanning the band's full height.
+        const yb = Math.round(H * 0.47);
+        ctx.fillStyle = BEIGE;
+        ctx.fillRect(0, 0, W, yb);
+        ctx.fillStyle = BLUE;
+        const cell = W / 8;
+        const ry = (yb / 2) * 0.96;
+        for (let i = 0; i < 8; i++) {
+          const xr = (i + 1) * cell;
+          ctx.beginPath();
+          ctx.ellipse(xr, yb / 2, cell * 0.985, ry, 0, Math.PI / 2, Math.PI * 1.5);
+          ctx.closePath();
+          ctx.fill();
+        }
+        // Bottom band: red, with a pink triangle rising from the base.
+        ctx.fillStyle = RED;
+        ctx.fillRect(0, yb, W, H - yb);
+        const ax = W * 0.5;
+        ctx.fillStyle = PINK;
+        ctx.beginPath();
+        ctx.moveTo(ax, yb);
+        ctx.lineTo(ax + W * 0.31, H);
+        ctx.lineTo(ax - W * 0.31, H);
+        ctx.closePath();
+        ctx.fill();
+        ctx.fillStyle = INK;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        // WiXCAFE logo in the triangle.
+        const logoY = yb + (H - yb) * 0.6;
+        const logoSize = Math.round((H - yb) * 0.2);
+        ctx.font = `900 ${logoSize}px "Arial Black", "Helvetica Neue", Arial, sans-serif`;
+        const wix = "WiX";
+        ctx.font = `900 ${logoSize}px "Arial Black", "Helvetica Neue", Arial, sans-serif`;
+        const wWix = ctx.measureText(wix).width;
+        ctx.font = `500 ${logoSize}px "Helvetica Neue", Arial, sans-serif`;
+        const wCafe = ctx.measureText("CAFE").width;
+        const x0 = ax - (wWix + wCafe) / 2;
+        ctx.textAlign = "left";
+        ctx.font = `900 ${logoSize}px "Arial Black", "Helvetica Neue", Arial, sans-serif`;
+        ctx.fillText(wix, x0, logoY);
+        ctx.font = `500 ${logoSize}px "Helvetica Neue", Arial, sans-serif`;
+        ctx.fillText("CAFE", x0 + wWix, logoY);
+        // "Freshly roasted coffee" on the red, just below the blue band.
+        ctx.textAlign = "center";
+        ctx.font = `400 ${Math.round((H - yb) * 0.1)}px "Helvetica Neue", Arial, sans-serif`;
+        const tagY = yb + (H - yb) * 0.22;
+        ctx.fillText("Freshly roasted coffee", W * 0.19, tagY);
+        ctx.fillText("Freshly roasted coffee", W * 0.81, tagY);
+        return cv;
+      }
+      function applyCupMaterials(model) {
+        const base = model.getObjectByName("cupBase");
+        if (base && base.isMesh) {
+          if (!_cupPlasticMat) {
+            _cupPlasticMat = new THREE.MeshStandardMaterial({
+              color: 0xf4f4f2,
+              roughness: 0.4,
+              metalness: 0,
+            });
+          }
+          base.material = _cupPlasticMat;
+        }
+        const sleeve = model.getObjectByName("cupGraphic");
+        if (sleeve && sleeve.isMesh && typeof document !== "undefined") {
+          if (!_cupSleeveMat) {
+            const tex = new THREE.CanvasTexture(drawCupSleeveCanvas());
+            tex.colorSpace = THREE.SRGBColorSpace;
+            tex.flipY = false;
+            tex.wrapS = THREE.RepeatWrapping;
+            tex.wrapT = THREE.ClampToEdgeWrapping;
+            // UV v 0.25..0.5 -> canvas top..bottom.
+            tex.repeat.set(1, 4);
+            tex.offset.set(0, -1);
+            tex.anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy());
+            // The print also lights itself a little (emissive = its own
+            // colours) so it stays bright in the dim kitchen.
+            _cupSleeveMat = new THREE.MeshStandardMaterial({
+              map: tex,
+              emissive: 0xffffff,
+              emissiveMap: tex,
+              emissiveIntensity: KITCHEN_CUP_SLEEVE_GLOW,
+              roughness: 0.55,
+              metalness: 0,
+            });
+          }
+          sleeve.material = _cupSleeveMat;
+        }
+      }
+
+      // --- cup pyramid ------------------------------------------------------
+      // The cup group (cupBase + cupGraphic, body cupPhysic) is copied into a
+      // 6-row (21 cup) pyramid standing where the cup was, as a wall facing the long
+      // axis of the table. Cups stack with real solver contacts (unlike the
+      // other props), start asleep so the pyramid stands perfectly still, and
+      // all wake together once the car knocks any of them.
+      const KITCHEN_CUP_PYRAMID_ROWS = 6;
+      /** Gravity for the cups once falling: the falling car's (scaled meeting room). */
+      const KITCHEN_CUP_GRAVITY = 70;
+      const KITCHEN_CUP_GAP = 0.004;
+      let _cupPyramidPairs = [];
+      const _cupBodies = [];
+      /** Set by pushKitchenPropsOutOfCar when the car shoves a cup this frame. */
+      let _cupHitByCar = false;
+
+      function buildCupPyramid(model) {
+        _cupPyramidPairs = [];
+        const base = model.getObjectByName("cupBase");
+        const graphic = model.getObjectByName("cupGraphic");
+        const phys = model.getObjectByName("cupPhysic");
+        if (!base || !graphic || !phys || !phys.isMesh) return;
+        model.updateMatrixWorld(true);
+        const box = new THREE.Box3().setFromObject(phys);
+        const size = box.getSize(new THREE.Vector3());
+        const radius = (size.x + size.z) / 4;
+        const step = 2 * radius + KITCHEN_CUP_GAP;
+        const rise = size.y + KITCHEN_CUP_GAP;
+        const parts = [base, graphic, phys];
+        const worldPos = parts.map((o) => o.getWorldPosition(new THREE.Vector3()));
+        const delta = new THREE.Vector3();
+        let idx = 0;
+        for (let row = 0; row < KITCHEN_CUP_PYRAMID_ROWS; row++) {
+          const count = KITCHEN_CUP_PYRAMID_ROWS - row;
+          for (let i = 0; i < count; i++) {
+            delta.set(0, row * rise, (i - (count - 1) / 2) * step);
+            const names = idx === 0
+              ? ["cupBase", "cupGraphic", "cupPhysic"]
+              : [`cupBase_p${idx}`, `cupGraphic_p${idx}`, `cupPhysic_p${idx}`];
+            parts.forEach((src, k) => {
+              const o = idx === 0 ? src : src.clone();
+              if (idx !== 0) {
+                o.name = names[k];
+                src.parent.add(o);
+              }
+              const wp = worldPos[k].clone().add(delta);
+              o.position.copy(o.parent.worldToLocal(wp));
+              o.updateMatrixWorld(true);
+            });
+            _cupPyramidPairs.push([[names[0], names[1]], names[2], "cylinder", { cup: true }]);
+            idx++;
+          }
+        }
+      }
+
+      // Falling cups get the car's fall gravity instead of the props' -480.
+      // Added in postStep (forces were just cleared) so it is part of the next
+      // step's forces *before* the contact solve: added after the solve, a
+      // resting cup would get an upward kick every step and keep bouncing.
+      physicsWorld.addEventListener("postStep", () => {
+        for (let i = 0; i < _cupBodies.length; i++) {
+          const b = _cupBodies[i];
+          if (b.sleepState === CANNON.Body.SLEEPING) continue;
+          b.force.y += b.mass * (480 - KITCHEN_CUP_GRAVITY);
+        }
+      });
+
+      /**
+       * When the car hits a cup, every cup still asleep wakes so the stack
+       * reacts as a whole. Only a car hit does this: a cup twitching on its
+       * own must not keep re-waking the others (they would never settle).
+       */
+      function wakeCupPyramidIfHit() {
+        if (!_cupHitByCar) return;
+        _cupHitByCar = false;
+        for (let i = 0; i < _cupBodies.length; i++) {
+          if (_cupBodies[i].sleepState === CANNON.Body.SLEEPING) _cupBodies[i].wakeUp();
+        }
+      }
+
+      function setupKitchenPropPhysics(model) {
+        model.updateMatrixWorld(true);
+        // Physics proxies (…Physic) are never drawn, paired with a prop or not.
+        model.traverse((o) => {
+          if (o.isMesh && /Physic$/.test(o.name)) o.visible = false;
+        });
+        const tableTop = tablePlateBody
+          ? tablePlateBody.position.y + tablePlateBody.shapes[0].halfExtents.y
+          : -Infinity;
+        for (const [visNames, physName, shapeKind, opts] of KITCHEN_PROP_PAIRS.concat(_cupPyramidPairs)) {
+          const isCup = !!(opts && opts.cup);
+          const visList = (Array.isArray(visNames) ? visNames : [visNames])
+            .map((n) => model.getObjectByName(n))
+            .filter(Boolean);
+          const phys = model.getObjectByName(physName);
+          if (!visList.length || !phys || !phys.isMesh) continue;
+          const box = new THREE.Box3().setFromObject(phys);
+          if (box.isEmpty()) continue;
+          const center = box.getCenter(new THREE.Vector3());
+          const size = box.getSize(new THREE.Vector3());
+          const radius = (size.x + size.z) / 4;
+          const height = Math.max(size.y, 0.05);
+          // Rest exactly on the table top (no start-up pop if the proxy dips into it).
+          if (box.min.y < tableTop && box.max.y > tableTop) center.y = tableTop + height / 2 + 0.002;
+          // Upper pyramid rows: exactly on the row below (bottom row is snapped above).
+          if (isCup && box.min.y > tableTop + 0.1) {
+            const row = Math.round((box.min.y - tableTop) / (height + KITCHEN_CUP_GAP));
+            center.y = tableTop + 0.002 + row * (height + KITCHEN_CUP_GAP) + height / 2;
+          }
+          const body = new CANNON.Body({
+            mass: KITCHEN_PROP_MASS,
+            linearDamping: KITCHEN_PROP_LINEAR_DAMPING,
+            angularDamping: KITCHEN_PROP_ANGULAR_DAMPING,
+            allowSleep: true,
+            sleepSpeedLimit: 0.6,
+            sleepTimeLimit: 0.5,
+            collisionFilterGroup: isCup ? PHYS_GROUP_CUP : PHYS_GROUP_PROP,
+            // Solver contacts only with the table / floor (and, for pyramid
+            // cups, with each other so they stack and topple). The car and the
+            // other props move a prop through horizontal push-outs
+            // (pushKitchenPropsOutOfCar / separateKitchenProps): solver contacts
+            // let props pop up, ride onto each other and jitter in a pile.
+            collisionFilterMask: isCup
+              ? ~(PHYS_GROUP_CAR | PHYS_GROUP_PROP)
+              : ~(PHYS_GROUP_CAR | PHYS_GROUP_PROP | PHYS_GROUP_CUP),
+            material: propPhysMaterial,
+          });
+          if (shapeKind === "box") {
+            const he = new CANNON.Vec3(size.x / 2, height / 2, size.z / 2);
+            body.addShape(new CANNON.Box(he));
+            body._propBox = he;
+            body._propRadius = Math.hypot(he.x, he.z);
+          } else {
+            body.addShape(new CANNON.Cylinder(radius, radius, height, 12));
+            body._propRadius = radius;
+          }
+          body._propHalfHeight = height / 2;
+          body.position.set(center.x, center.y, center.z);
+          physicsWorld.addBody(body);
+          if (isCup) {
+            body._propCup = true;
+            body.sleep();
+            _cupBodies.push(body);
+          }
+          // Each visual's pose relative to the body, kept while it moves, but
+          // the group seated on the body's bottom: the model's visuals sit
+          // ~0.02 below the proxy's base, i.e. inside the surface once resting.
+          const groupBox = new THREE.Box3();
+          for (const v of visList) groupBox.expandByObject(v);
+          const bodyBottom = center.y - height / 2;
+          const seat = bodyBottom + KITCHEN_PROP_VISUAL_LIFT - groupBox.min.y;
+          const toBody = new THREE.Matrix4().makeTranslation(center.x, center.y, center.z).invert();
+          const seatMat = new THREE.Matrix4().makeTranslation(0, seat, 0);
+          const parts = visList.map((v) => ({
+            vis: v,
+            offset: toBody.clone().multiply(v.matrixWorld).premultiply(seatMat),
+          }));
+          phys.visible = false;
+          _kitchenProps.push({ vis: visList[0], body, parts });
+        }
+      }
+
+      /**
+       * A prop over the table is never allowed below the table top. A hit from
+       * the car (infinite-mass kinematic bodies) can otherwise shove it down
+       * into the table for a few frames before the solver recovers.
+       */
+      function keepKitchenPropsAboveTable() {
+        if (!tablePlateBody) return;
+        const tShape = tablePlateBody.shapes[0];
+        const tp = tablePlateBody.position;
+        const top = tp.y + tShape.halfExtents.y;
+        for (let i = 0; i < _kitchenProps.length; i++) {
+          const b = _kitchenProps[i].body;
+          if (b.sleepState === CANNON.Body.SLEEPING) continue;
+          if (
+            Math.abs(b.position.x - tp.x) > tShape.halfExtents.x ||
+            Math.abs(b.position.z - tp.z) > tShape.halfExtents.z
+          ) {
+            continue;
+          }
+          // Lowest point of the (possibly tilted) cylinder / box.
+          const q = b.quaternion;
+          let lowest;
+          if (b._propBox) {
+            const he = b._propBox;
+            const r10 = 2 * (q.x * q.y + q.w * q.z);
+            const r11 = 1 - 2 * (q.x * q.x + q.z * q.z);
+            const r12 = 2 * (q.y * q.z - q.w * q.x);
+            lowest = b.position.y - (he.x * Math.abs(r10) + he.y * Math.abs(r11) + he.z * Math.abs(r12));
+          } else {
+            const upY = Math.min(1, Math.abs(1 - 2 * (q.x * q.x + q.z * q.z)));
+            const sinT = Math.sqrt(Math.max(0, 1 - upY * upY));
+            // The collider is a 12-sided prism: lying on its side it rests on a
+            // flat face (inradius), not the round radius. Using the round one
+            // here made every tipped-over cup look sunk, so it was lifted each
+            // frame and could never settle / sleep.
+            const sideR = b._propRadius * KITCHEN_PROP_CYL_INRADIUS;
+            lowest = b.position.y - (b._propHalfHeight * upY + sideR * sinT);
+          }
+          // Only real sinking: a resting contact keeps a tiny overlap the
+          // solver needs; removing it every step makes the prop jitter.
+          if (lowest < top - KITCHEN_PROP_TABLE_TOLERANCE) {
+            b.position.y += top - KITCHEN_PROP_TABLE_TOLERANCE - lowest;
+            if (b.velocity.y < 0) b.velocity.y = 0;
+          }
+        }
+      }
+
+      // Car bumper for props: the car's body collider starts above the plates
+      // and only the 4 wheel cylinders reach their height, so a plate could
+      // slip under / between them. This box covers the car's whole footprint
+      // from just above the table to the body, and collides with props only.
+      let _carPropBumper = null;
+      const _bumperPrev = new CANNON.Vec3();
+      let _bumperPrevValid = false;
+
+      function createCarPropBumper() {
+        if (_carPropBumper || !canonBodyPhys) return;
+        const box = canonBodyPhys.shapes[0];
+        if (!box || !box.halfExtents) return;
+        const he = box.halfExtents;
+        const bp = canonBodyPhys.position;
+        const invQ = canonBodyPhys.quaternion.inverse();
+        let ex = he.x;
+        let ez = he.z;
+        let wheelBottom = Infinity;
+        const tmp = new CANNON.Vec3();
+        for (const wb of [canonFLBody, canonFRBody, canonRLBody, canonRRBody]) {
+          if (!wb) continue;
+          wb.position.vsub(bp, tmp);
+          invQ.vmult(tmp, tmp);
+          const r = (wb.shapes[0] && wb.shapes[0].radiusTop) || 0;
+          ex = Math.max(ex, Math.abs(tmp.x) + r);
+          ez = Math.max(ez, Math.abs(tmp.z) + r);
+          wb.updateAABB();
+          wheelBottom = Math.min(wheelBottom, wb.aabb.lowerBound.y);
+        }
+        if (!Number.isFinite(wheelBottom)) return;
+        // Body-local vertical range: just above the table up to the body's top
+        // (tall / stacked props, e.g. the cup pyramid, are hit by the body too).
+        const lowY = wheelBottom + KITCHEN_PROP_BUMPER_CLEARANCE - bp.y;
+        const highY = he.y;
+        if (!(highY > lowY)) return;
+        _carPropBumper = new CANNON.Body({
+          type: CANNON.Body.KINEMATIC,
+          // No solver contacts: props are pushed by pushKitchenPropsOutOfCar,
+          // horizontally only. A solver contact could resolve through the
+          // bumper's top / bottom face and bounce props up and down.
+          collisionFilterGroup: PHYS_GROUP_PROP_BUMPER,
+          collisionFilterMask: 0,
+        });
+        _carPropBumper.addShape(
+          new CANNON.Box(new CANNON.Vec3(ex, (highY - lowY) / 2, ez)),
+          new CANNON.Vec3(0, (highY + lowY) / 2, 0),
+        );
+        _carPropBumper.position.copy(bp);
+        _carPropBumper.quaternion.copy(canonBodyPhys.quaternion);
+        physicsWorld.addBody(_carPropBumper);
+        _bumperPrevValid = false;
+      }
+
+      /** Bumper follows the car body, with a real velocity so it pushes props. */
+      function syncCarPropBumper(dt) {
+        const b = _carPropBumper;
+        if (!b || !canonBodyPhys) return;
+        const p = canonBodyPhys.position;
+        if (_bumperPrevValid && dt > 0) {
+          const inv = 1 / dt;
+          b.velocity.set((p.x - _bumperPrev.x) * inv, (p.y - _bumperPrev.y) * inv, (p.z - _bumperPrev.z) * inv);
+          const sp = b.velocity.length();
+          if (sp > KITCHEN_PROP_BUMPER_MAX_SPEED) b.velocity.scale(KITCHEN_PROP_BUMPER_MAX_SPEED / sp, b.velocity);
+        } else {
+          b.velocity.set(0, 0, 0);
+        }
+        _bumperPrev.copy(p);
+        _bumperPrevValid = true;
+        b.position.copy(p);
+        b.quaternion.copy(canonBodyPhys.quaternion);
+        b.aabbNeedsUpdate = true;
+      }
+
+      // --- car falling off the table: same behaviour as the meeting room -----
+      // Past the table edge the car becomes one dynamic box (wheels + body
+      // footprint) that keeps its driving velocity, tumbles over the edge,
+      // hits the table edge / floor, and respawns 2 s after landing. The
+      // meeting room's numbers are scaled by the kitchen's speed ratio so the
+      // motion looks the same (time is unchanged, distances scale).
+      const PHYS_GROUP_CAR_FALL = 4096;
+      const MEETING_ROOM_CAR_MAX_SPEED = 4.2;
+      const MEETING_ROOM_GRAVITY = 16;
+      const CAR_FALL_TUMBLE = 0.55;
+      const CAR_FALL_LANDED_VY = 1.2;
+      const CAR_FALL_RESPAWN_SEC = 2;
+      const KITCHEN_WORLD_GRAVITY = 480;
+      let _carFallBody = null;
+      let _carTumbling = false;
+      let _carFallLandedAtMs = 0;
+      let _carFallScale = 1;
+      const _carFallRel = new THREE.Matrix4();
+      const _carFallMat4 = new THREE.Matrix4();
+      const _carFallParentInv = new THREE.Matrix4();
+      const _carFallPos = new THREE.Vector3();
+      const _carFallQuat = new THREE.Quaternion();
+      const _carFallScaleV = new THREE.Vector3();
+      const _carFallOne = new THREE.Vector3(1, 1, 1);
+
+      // The kitchen world runs at -480 for props; the tumbling car gets the
+      // meeting room's gravity (scaled) by cancelling the difference.
+      // preStep runs after the contact solve and before integration, so this
+      // is also where an upward push is cancelled: until the car first hits
+      // the floor it only ever goes down (the table edge can slow / tip it,
+      // never pop it up into a jump).
+      physicsWorld.addEventListener("preStep", () => {
+        const b = _carFallBody;
+        if (!b || !_carTumbling) return;
+        if (!_carFallLandedAtMs && b.velocity.y > 0) b.velocity.y = 0;
+      });
+      // Gravity difference goes in before the next step's contact solve
+      // (added after the solve it would kick a resting car upward).
+      function addCarFallGravityForce() {
+        const b = _carFallBody;
+        if (!b || !_carTumbling) return;
+        const g = MEETING_ROOM_GRAVITY * _carFallScale;
+        b.force.y += b.mass * (KITCHEN_WORLD_GRAVITY - g);
+      }
+      physicsWorld.addEventListener("postStep", addCarFallGravityForce);
+
+      function beginKitchenCarTumble() {
+        if (_carTumbling || !canonBodyPhys || !physicsWorld) return false;
+        const box = canonBodyPhys.shapes[0];
+        if (!box || !box.halfExtents) return false;
+        const he = box.halfExtents;
+        const bp = canonBodyPhys.position;
+        const invQ = canonBodyPhys.quaternion.inverse();
+        let ex = he.x;
+        let ez = he.z;
+        let lowY = -he.y;
+        const tmp = new CANNON.Vec3();
+        for (const wb of [canonFLBody, canonFRBody, canonRLBody, canonRRBody]) {
+          if (!wb) continue;
+          wb.position.vsub(bp, tmp);
+          invQ.vmult(tmp, tmp);
+          const r = (wb.shapes[0] && wb.shapes[0].radiusTop) || 0;
+          ex = Math.max(ex, Math.abs(tmp.x) + r);
+          ez = Math.max(ez, Math.abs(tmp.z) + r);
+          lowY = Math.min(lowY, tmp.y - r);
+        }
+        const highY = he.y;
+        // Box bottom exactly on the table top (the wheel colliders sit a bit
+        // into it): any start-up overlap would make the solver pop it upward.
+        if (tablePlateBody && tablePlateBody.shapes[0]) {
+          const tableTop = tablePlateBody.position.y + tablePlateBody.shapes[0].halfExtents.y;
+          lowY = Math.max(lowY, tableTop + 0.005 - bp.y);
+        }
+        if (!(highY - lowY > 0.05)) return false;
+        _carFallScale = Math.max(1, carState.maxSpeed / MEETING_ROOM_CAR_MAX_SPEED);
+        const body = new CANNON.Body({
+          mass: 1.8,
+          material: carFallMaterial,
+          linearDamping: 0.08,
+          angularDamping: 0.28,
+          allowSleep: false,
+          collisionFilterGroup: PHYS_GROUP_CAR_FALL,
+          collisionFilterMask: PHYS_GROUP_DEFAULT,
+        });
+        body.addShape(
+          new CANNON.Box(new CANNON.Vec3(ex, (highY - lowY) / 2, ez)),
+          new CANNON.Vec3(0, (highY + lowY) / 2, 0),
+        );
+        body.position.copy(bp);
+        body.quaternion.copy(canonBodyPhys.quaternion);
+        // Car root pose relative to the body, kept while it tumbles.
+        car.updateMatrixWorld(true);
+        _carFallMat4.compose(
+          _carFallPos.set(bp.x, bp.y, bp.z),
+          _carFallQuat.set(body.quaternion.x, body.quaternion.y, body.quaternion.z, body.quaternion.w),
+          _carFallOne,
+        );
+        _carFallRel.copy(_carFallMat4).invert().multiply(car.matrixWorld);
+        // Driving velocity carries over; tumble spin like the meeting room.
+        const vx = Math.sin(carState.angle) * carState.speed;
+        const vz = Math.cos(carState.angle) * carState.speed;
+        body.velocity.set(vx, Math.min(0, carState.velY), vz);
+        const k = CAR_FALL_TUMBLE / _carFallScale;
+        body.angularVelocity.set(vz * k, 0, -vx * k);
+        physicsWorld.addBody(body);
+        _carFallBody = body;
+        _carTumbling = true;
+        _carFallLandedAtMs = 0;
+        addCarFallGravityForce();
+        return true;
+      }
+
+      /** Car mesh follows the tumbling body (after the frame's orientation code). */
+      function syncCarFromFallBody() {
+        const b = _carFallBody;
+        if (!b || !_carTumbling) return;
+        _carFallMat4.compose(
+          _carFallPos.set(b.position.x, b.position.y, b.position.z),
+          _carFallQuat.set(b.quaternion.x, b.quaternion.y, b.quaternion.z, b.quaternion.w),
+          _carFallOne,
+        );
+        _carFallMat4.multiply(_carFallRel);
+        if (car.parent) {
+          car.parent.updateMatrixWorld();
+          _carFallParentInv.copy(car.parent.matrixWorld).invert();
+          _carFallMat4.premultiply(_carFallParentInv);
+        }
+        _carFallMat4.decompose(car.position, car.quaternion, _carFallScaleV);
+      }
+
+      function stopKitchenCarTumble() {
+        if (_carFallBody) {
+          try { physicsWorld.removeBody(_carFallBody); } catch (e) {}
+        }
+        _carFallBody = null;
+        _carTumbling = false;
+        _carFallLandedAtMs = 0;
+      }
+
+      /** Respawn on the table after a fall (as the meeting room does). */
+      function respawnKitchenCarAfterFall() {
+        stopKitchenCarTumble();
+        car.position.copy(tableSpawn);
+        car.quaternion.identity();
+        carState.angle = 0;
+        carState.speed = 0;
+        carState.steerAngle = 0;
+        carState.velY = 0;
+        carUpLerp.set(0, 1, 0);
+        carFalling = false;
+        carFloorTimer = 0;
+        _bumperPrevValid = false;
+        beginCarCam1ReturnToRest();
+      }
+
+      /** Per car step while tumbling: coast down, detect landing, respawn. */
+      function updateKitchenCarTumble(dt) {
+        const b = _carFallBody;
+        if (!b) return;
+        // Keep the car "airborne" for the rest of the car logic.
+        carState.velY = Math.abs(b.velocity.y) > 1e-4 ? b.velocity.y : -1e-4;
+        carState.speed *= Math.exp(-dt * 1.6);
+        if (Math.abs(carState.speed) < 0.04) carState.speed = 0;
+        carState.steerAngle *= Math.exp(-dt * 4);
+        let floorTopY = null;
+        if (floorPhysBody && floorPhysBody.shapes[0]) {
+          floorTopY = floorPhysBody.position.y + floorPhysBody.shapes[0].halfExtents.y;
+        }
+        let onFloor = false;
+        const cs = physicsWorld.contacts;
+        for (let i = 0; i < cs.length; i++) {
+          const c = cs[i];
+          if ((c.bi === b && c.bj === floorPhysBody) || (c.bj === b && c.bi === floorPhysBody)) {
+            onFloor = true;
+            break;
+          }
+        }
+        if (!_carFallLandedAtMs && onFloor && b.velocity.y <= CAR_FALL_LANDED_VY * _carFallScale) {
+          _carFallLandedAtMs = performance.now();
+        }
+        if (_carFallLandedAtMs) {
+          carFloorTimer = (performance.now() - _carFallLandedAtMs) / 1000;
+          if (carFloorTimer >= CAR_FALL_RESPAWN_SEC) respawnKitchenCarAfterFall();
+        }
+        if (
+          (floorTopY != null && b.position.y < floorTopY - 4 * _carFallScale) ||
+          b.position.y < tableSurfaceY - 120
+        ) {
+          respawnKitchenCarAfterFall();
+        }
+      }
+
+      /**
+       * Hard guarantee that a prop never sits inside the car: after each step,
+       * any prop overlapping the bumper box (in the car's horizontal plane) is
+       * moved straight out to its surface and given at least the car's speed
+       * along that direction. The solver alone lets a fast car overrun a plate
+       * for a frame or two.
+       */
+      const _pushLocal = new CANNON.Vec3();
+      const _pushN = new CANNON.Vec3();
+      const _pushAx = new CANNON.Vec3();
+      const _pushImpulse = new CANNON.Vec3();
+      const _pushPoint = new CANNON.Vec3();
+      /** Prop speed after a shove, relative to the car's speed toward it. */
+      const KITCHEN_PROP_PUSH_RESTITUTION = 1.1;
+      /** Bounciness of prop-to-prop shoves (0 = they move off together). */
+      const KITCHEN_PROP_PROP_RESTITUTION = 0.2;
+      const _pushAz = new CANNON.Vec3();
+      const _pushAxes = new Float64Array(8);
+      function pushKitchenPropsOutOfCar() {
+        const bb = _carPropBumper;
+        if (!bb) return;
+        const shape = bb.shapes[0];
+        const he = shape.halfExtents;
+        const off = bb.shapeOffsets[0];
+        const invQ = bb.quaternion.inverse();
+        for (let i = 0; i < _kitchenProps.length; i++) {
+          const b = _kitchenProps[i].body;
+          const r = b._propRadius;
+          b.position.vsub(bb.position, _pushLocal);
+          invQ.vmult(_pushLocal, _pushLocal);
+          _pushLocal.vsub(off, _pushLocal);
+          // Vertical overlap with the bumper slab?
+          if (Math.abs(_pushLocal.y) > he.y + b._propHalfHeight) continue;
+          const lx = _pushLocal.x;
+          const lz = _pushLocal.z;
+          let nx;
+          let nz;
+          let depth;
+          if (b._propBox) {
+            // Box prop: 2D separating-axis test of the two footprints.
+            const pb = b._propBox;
+            _pushAx.set(1, 0, 0);
+            b.quaternion.vmult(_pushAx, _pushAx);
+            invQ.vmult(_pushAx, _pushAx);
+            _pushAz.set(0, 0, 1);
+            b.quaternion.vmult(_pushAz, _pushAz);
+            invQ.vmult(_pushAz, _pushAz);
+            const axes = _pushAxes;
+            axes[0] = 1; axes[1] = 0;
+            axes[2] = 0; axes[3] = 1;
+            const la = Math.hypot(_pushAx.x, _pushAx.z) || 1;
+            axes[4] = _pushAx.x / la; axes[5] = _pushAx.z / la;
+            const lb = Math.hypot(_pushAz.x, _pushAz.z) || 1;
+            axes[6] = _pushAz.x / lb; axes[7] = _pushAz.z / lb;
+            depth = Infinity;
+            for (let k = 0; k < 8; k += 2) {
+              const ux = axes[k];
+              const uz = axes[k + 1];
+              const rCar = he.x * Math.abs(ux) + he.z * Math.abs(uz);
+              const rProp =
+                pb.x * Math.abs(ux * _pushAx.x + uz * _pushAx.z) +
+                pb.z * Math.abs(ux * _pushAz.x + uz * _pushAz.z);
+              const dist = lx * ux + lz * uz;
+              const ov = rCar + rProp - Math.abs(dist);
+              if (ov <= 0) {
+                depth = 0;
+                break;
+              }
+              if (ov < depth) {
+                depth = ov;
+                const sgn = dist < 0 ? -1 : 1;
+                nx = ux * sgn;
+                nz = uz * sgn;
+              }
+            }
+            if (!(depth > 0)) continue;
+          } else {
+          // Closest point of the rectangle to the plate centre.
+          const cx = Math.max(-he.x, Math.min(he.x, lx));
+          const cz = Math.max(-he.z, Math.min(he.z, lz));
+          const dx = lx - cx;
+          const dz = lz - cz;
+          const d2 = dx * dx + dz * dz;
+          if (d2 > 1e-10) {
+            if (d2 >= r * r) continue;
+            const d = Math.sqrt(d2);
+            nx = dx / d;
+            nz = dz / d;
+            depth = r - d;
+          } else {
+            // Centre is inside the rectangle: leave through the nearest side.
+            const px = he.x - Math.abs(lx);
+            const pz = he.z - Math.abs(lz);
+            if (px < pz) {
+              nx = lx < 0 ? -1 : 1;
+              nz = 0;
+              depth = px + r;
+            } else {
+              nx = 0;
+              nz = lz < 0 ? -1 : 1;
+              depth = pz + r;
+            }
+          }
+          }
+          _pushN.set(nx, 0, nz);
+          bb.quaternion.vmult(_pushN, _pushN);
+          _pushN.y = 0;
+          const nl = Math.hypot(_pushN.x, _pushN.z) || 1;
+          _pushN.x /= nl;
+          _pushN.z /= nl;
+          b.position.x += _pushN.x * depth;
+          b.position.z += _pushN.z * depth;
+          // Horizontal shove at the contact side, at the prop's centre height:
+          // it slides / spins with the car's speed but is never tipped or lifted.
+          const carVn = bb.velocity.x * _pushN.x + bb.velocity.z * _pushN.z;
+          const vn = b.velocity.x * _pushN.x + b.velocity.z * _pushN.z;
+          const want = Math.max(0, carVn) * KITCHEN_PROP_PUSH_RESTITUTION;
+          if (vn < want) {
+            const j = (want - vn) * b.mass;
+            _pushImpulse.set(_pushN.x * j, 0, _pushN.z * j);
+            const reach = b._propBox
+              ? Math.abs(_pushN.x) * b._propBox.x + Math.abs(_pushN.z) * b._propBox.z
+              : b._propRadius;
+            // Contact point on the car-facing side, slid toward the car's centre
+            // line so off-centre hits add a little yaw spin.
+            if (b._propCup) {
+              _cupHitByCar = true;
+              // Cups are hit at the car's height, so they tip over and fly.
+              const by = bb.position.y + bb.shapeOffsets[0].y;
+              const hy = Math.max(-b._propHalfHeight, Math.min(b._propHalfHeight, by - b.position.y));
+              _pushPoint.set(-_pushN.x * reach, hy, -_pushN.z * reach);
+              b.applyImpulse(_pushImpulse, _pushPoint);
+            } else {
+              _pushPoint.set(-_pushN.x * reach, 0, -_pushN.z * reach);
+              b.applyImpulse(_pushImpulse, _pushPoint);
+              b.angularVelocity.x = 0;
+              b.angularVelocity.z = 0;
+            }
+          }
+          b.aabbNeedsUpdate = true;
+          if (b.sleepState !== CANNON.Body.AWAKE) b.wakeUp();
+        }
+      }
+
+      /** Prop footprint radius along a horizontal unit axis (ux, uz). */
+      function propFootprintReach(b, ux, uz) {
+        if (!b._propBox) return b._propRadius;
+        const q = b.quaternion;
+        // Body x / z axes (first / third rotation-matrix columns), horizontal part.
+        const axX = 1 - 2 * (q.y * q.y + q.z * q.z);
+        const axZ = 2 * (q.x * q.z - q.w * q.y);
+        const azX = 2 * (q.x * q.z + q.w * q.y);
+        const azZ = 1 - 2 * (q.x * q.x + q.y * q.y);
+        return (
+          b._propBox.x * Math.abs(ux * axX + uz * axZ) + b._propBox.z * Math.abs(ux * azX + uz * azZ)
+        );
+      }
+
+      const _sepAxes = new Float64Array(10);
+      /**
+       * Props never stack: overlapping footprints are pushed apart sideways
+       * (equal masses, slightly inelastic), like the car pushes them.
+       */
+      function separateKitchenProps() {
+        const n = _kitchenProps.length;
+        for (let i = 0; i < n; i++) {
+          const a = _kitchenProps[i].body;
+          for (let j = i + 1; j < n; j++) {
+            const b = _kitchenProps[j].body;
+            if (a.sleepState === CANNON.Body.SLEEPING && b.sleepState === CANNON.Body.SLEEPING) continue;
+            if (a._propCup && b._propCup) continue;
+            if (Math.abs(a.position.y - b.position.y) > a._propHalfHeight + b._propHalfHeight) continue;
+            const dx = b.position.x - a.position.x;
+            const dz = b.position.z - a.position.z;
+            const dist = Math.hypot(dx, dz);
+            if (dist > a._propRadius + b._propRadius) continue;
+            // Candidate separating axes: centre line + each box's horizontal axes.
+            let k = 0;
+            if (dist > 1e-6) {
+              _sepAxes[k++] = dx / dist;
+              _sepAxes[k++] = dz / dist;
+            }
+            for (const body of [a, b]) {
+              if (!body._propBox) continue;
+              const q = body.quaternion;
+              const axX = 1 - 2 * (q.y * q.y + q.z * q.z);
+              const axZ = 2 * (q.x * q.z - q.w * q.y);
+              const l = Math.hypot(axX, axZ) || 1;
+              _sepAxes[k++] = axX / l;
+              _sepAxes[k++] = axZ / l;
+              _sepAxes[k++] = -axZ / l;
+              _sepAxes[k++] = axX / l;
+            }
+            let depth = Infinity;
+            let nx = 0;
+            let nz = 0;
+            for (let m = 0; m < k; m += 2) {
+              const ux = _sepAxes[m];
+              const uz = _sepAxes[m + 1];
+              const d = dx * ux + dz * uz;
+              const ov = propFootprintReach(a, ux, uz) + propFootprintReach(b, ux, uz) - Math.abs(d);
+              if (ov <= 0) {
+                depth = 0;
+                break;
+              }
+              if (ov < depth) {
+                depth = ov;
+                const sgn = d < 0 ? -1 : 1;
+                nx = ux * sgn;
+                nz = uz * sgn;
+              }
+            }
+            if (!(depth > 0) || depth === Infinity) continue;
+            const h = depth / 2;
+            a.position.x -= nx * h;
+            a.position.z -= nz * h;
+            b.position.x += nx * h;
+            b.position.z += nz * h;
+            const vRel = (b.velocity.x - a.velocity.x) * nx + (b.velocity.z - a.velocity.z) * nz;
+            if (vRel < 0) {
+              const dv = (-vRel * (1 + KITCHEN_PROP_PROP_RESTITUTION)) / 2;
+              a.velocity.x -= nx * dv;
+              a.velocity.z -= nz * dv;
+              b.velocity.x += nx * dv;
+              b.velocity.z += nz * dv;
+            }
+            a.aabbNeedsUpdate = true;
+            b.aabbNeedsUpdate = true;
+            if (a.sleepState !== CANNON.Body.AWAKE) a.wakeUp();
+            if (b.sleepState !== CANNON.Body.AWAKE) b.wakeUp();
+          }
+        }
+      }
+
+      /** Visuals follow their bodies (called after each physics step). */
+      function syncKitchenProps() {
+        pushKitchenPropsOutOfCar();
+        wakeCupPyramidIfHit();
+        separateKitchenProps();
+        keepKitchenPropsAboveTable();
+        for (let i = 0; i < _kitchenProps.length; i++) {
+          const p = _kitchenProps[i];
+          const b = p.body;
+          if (b.sleepState === CANNON.Body.SLEEPING && p.synced) continue;
+          _propPos.set(b.position.x, b.position.y, b.position.z);
+          _propQuat.set(b.quaternion.x, b.quaternion.y, b.quaternion.z, b.quaternion.w);
+          _propBodyMat.compose(_propPos, _propQuat, _propScale);
+          for (let j = 0; j < p.parts.length; j++) {
+            const part = p.parts[j];
+            _propWorldMat.multiplyMatrices(_propBodyMat, part.offset);
+            const parent = part.vis.parent;
+            if (parent) {
+              parent.updateMatrixWorld();
+              _propParentInv.copy(parent.matrixWorld).invert();
+              _propWorldMat.premultiply(_propParentInv);
+            }
+            _propWorldMat.decompose(part.vis.position, part.vis.quaternion, part.vis.scale);
+          }
+          p.synced = true;
+        }
+      }
+
+      /**
+       * The car's kinematic bodies are positioned by code and stay "asleep" in
+       * cannon, and cannon skips collision checks between two sleeping bodies.
+       * So wake a resting prop whenever the car comes near it; it is then
+       * checked against the car, gets pushed, and goes back to sleep at rest.
+       */
+      const KITCHEN_PROP_WAKE_MARGIN = 6;
+      function wakeKitchenPropsNearCar() {
+        if (!car) return;
+        for (let i = 0; i < _kitchenProps.length; i++) {
+          const b = _kitchenProps[i].body;
+          if (b.sleepState !== CANNON.Body.SLEEPING) continue;
+          // Pyramid cups stay asleep (perfectly still) until actually hit.
+          if (b._propCup) continue;
+          const r = b.boundingRadius + KITCHEN_PROP_WAKE_MARGIN;
+          const dx = car.position.x - b.position.x;
+          const dz = car.position.z - b.position.z;
+          if (dx * dx + dz * dz < r * r) b.wakeUp();
+        }
+      }
+
+      /** True while any prop is still moving (physics then runs in real time). */
+      function kitchenPropsMoving() {
+        for (let i = 0; i < _kitchenProps.length; i++) {
+          const b = _kitchenProps[i].body;
+          if (b.sleepState === CANNON.Body.SLEEPING) continue;
+          if (b.velocity.lengthSquared() > 0.01 || b.angularVelocity.lengthSquared() > 0.01) {
+            return true;
+          }
+        }
+        return false;
       }
 
       const _reflectionBox = new THREE.Box3();
@@ -3658,7 +4664,7 @@ let _worldSwitched = false;
         const sidePlane = _findKitchenMesh(kmodel, "mainTableSidePlane", meshByName);
         if (!topPlane && !sidePlane) {
           console.warn(
-            "ul-kitchen19.gltf: mainTableTopPlane / mainTableSidePlane not found",
+            "ul-kitchen21.gltf: mainTableTopPlane / mainTableSidePlane not found",
           );
           return { coverCloneStepX: null, topMat: null, sideMat: null };
         }
@@ -4206,7 +5212,7 @@ let _worldSwitched = false;
         const loadToken = ++_kitchenLoadToken;
         const kLoader = new GLTFLoader();
         kLoader.load(
-          kitchenAsset("ul-kitchen19.gltf"),
+          kitchenAsset("ul-kitchen21.gltf"),
           (gltf) => {
             if (!_worldSwitched || loadToken !== _kitchenLoadToken) return;
 
@@ -4228,7 +5234,7 @@ let _worldSwitched = false;
             });
             const surfaceMesh = kitchenPlate || kitchenPlatePhysic;
             if (!surfaceMesh) {
-              console.warn("ul-kitchen19.gltf: no mainTablePlate/mainTablePlatePhysic mesh found");
+              console.warn("ul-kitchen21.gltf: no mainTablePlate/mainTablePlatePhysic mesh found");
               _worldSwitched = false;
               return;
             }
@@ -5435,6 +6441,10 @@ let _worldSwitched = false;
               new CANNON.Box(new CANNON.Vec3(tSize.x / 2, plateThickness / 2, tSize.z / 2)),
             );
             physicsWorld.addBody(tablePlateBody);
+            applyGreyBoxMaterials(kmodel);
+            applyCupMaterials(kmodel);
+            buildCupPyramid(kmodel);
+            setupKitchenPropPhysics(kmodel);
 
             const shadowPlaneGeo = new THREE.PlaneGeometry(tSize.x * 1.5, tSize.z * 1.5);
             const shadowPlaneMat = new THREE.ShadowMaterial({ opacity: 0.35 });
@@ -5449,7 +6459,9 @@ let _worldSwitched = false;
             const _carBottomOff = (typeof carBottomOffsetY === "number" && carBottomOffsetY > 0)
               ? carBottomOffsetY
               : 0.05;
-            tableSpawn.set(tCenter.x, tTopY + _carBottomOff, tCenter.z);
+            // Shifted along the table so the car doesn't start inside greyBox
+            // (it sits on the table centre); also used for respawns.
+            tableSpawn.set(tCenter.x + KITCHEN_CAR_SPAWN_OFFSET_X, tTopY + _carBottomOff, tCenter.z);
             tableMinY = tTopY + Math.max(0.05, _carBottomOff * 0.5);
             car.position.copy(tableSpawn);
             car.rotation.set(0, 0, 0);
@@ -5507,6 +6519,7 @@ let _worldSwitched = false;
                 canonBodyPhys.quaternion.set(_wq.x, _wq.y, _wq.z, _wq.w);
                 canonBodyPhys.velocity.set(0, 0, 0);
                 canonBodyPhys.angularVelocity.set(0, 0, 0);
+                _bumperPrevValid = false; // respawn teleport: no fake bumper speed
               }
             } catch (e) {}
 
@@ -5878,6 +6891,7 @@ let _worldSwitched = false;
 
             carFalling = false;
             carFloorTimer = 0;
+            stopKitchenCarTumble();
             try { _rampLeftJumpActive = false; _rampJumpMatrixActive = false; _rampJumpMatrixOrbitProgress = 0; _rampJumpFxBlend = 0; _rampJumpFxIn = 0; _carCam1JumpEffect = 0; _carCam1LandShakeTime = 0; _rampJumpCamRestOffset.set(0, 0, 0); jumpInitialVelY = 0; } catch (e) {}
             try { _legacyDarkLightsScale = 0.48; applyDarkModePreset(_darkModeKitchen); } catch (e) {}
             try { setKitchenPerfMode(true); } catch (e) {}
@@ -6010,7 +7024,7 @@ let _worldSwitched = false;
           },
           undefined,
           (err) => {
-            console.error("Failed to load ul-kitchen19.gltf:", err);
+            console.error("Failed to load ul-kitchen21.gltf:", err);
             _worldSwitched = false;
           },
         );
@@ -6433,6 +7447,7 @@ let _worldSwitched = false;
             _canonWorldQuat.w,
           );
           physicsWorld.addBody(canonBodyPhys);
+          createCarPropBumper();
         }
 
         car.userData._carPhysWires = [];
@@ -6654,6 +7669,7 @@ let _worldSwitched = false;
         if (offTable && !carFalling) {
           carFalling = true;
           carFloorTimer = 0;
+          beginKitchenCarTumble();
           _rampJumpFxBlend = 0;
           _rampJumpFxIn = 0;
           beginCarCam1ReturnToRest();
@@ -6664,7 +7680,9 @@ let _worldSwitched = false;
           _rampJumpCamRestOffset.set(0, 0, 0);
           _carLandShakePending = false;
         }
-        if (carFalling) {
+        if (carFalling && _carTumbling) {
+          updateKitchenCarTumble(dt);
+        } else if (carFalling) {
           car.position.y += carState.velY * dt;
           carState.velY -= CAR_GRAVITY * dt;
           let floorTopY = null;
@@ -6760,6 +7778,7 @@ let _worldSwitched = false;
         ) {
           car.position.copy(tableSpawn);
           carFalling = false;
+          stopKitchenCarTumble();
         }
 
         carState.wheelAngle =
@@ -6817,6 +7836,8 @@ let _worldSwitched = false;
         }
       }
 
+      /** Reused each frame by the wheel physics sync (no per-frame array). */
+      const _wheelBodiesList = [null, null, null, null];
       function animate() {
         if (!_kitchenSceneRendering) {
           _kitchenSceneAnimationFrame = 0;
@@ -6857,9 +7878,11 @@ let _worldSwitched = false;
             _wheelsList[3] = wheelRR;
             car.updateMatrixWorld(true);
             const _syncInvDt = dt > 0 ? 1 / dt : 0;
-            const _wheelBodies = [
-              canonFLBody, canonFRBody, canonRLBody, canonRRBody,
-            ];
+            const _wheelBodies = _wheelBodiesList;
+            _wheelBodies[0] = canonFLBody;
+            _wheelBodies[1] = canonFRBody;
+            _wheelBodies[2] = canonRLBody;
+            _wheelBodies[3] = canonRRBody;
             for (let wi = 0; wi < 4; wi++) {
               const w = _wheelsList[wi];
               const wb = _wheelBodies[wi];
@@ -6902,6 +7925,7 @@ let _worldSwitched = false;
                 _canonWorldQuat.z,
                 _canonWorldQuat.w,
               );
+              syncCarPropBumper(dt);
             }
             if (car.userData._carPhysWires) {
               for (const { wire, body } of car.userData._carPhysWires) {
@@ -6916,6 +7940,7 @@ let _worldSwitched = false;
             }
           }
           if (physicsStepDt > 0) {
+            wakeKitchenPropsNearCar();
             const realtimePhysics =
               Math.abs(carState.speed) > 0.05 ||
               carState.velY !== 0 ||
@@ -6924,7 +7949,8 @@ let _worldSwitched = false;
               keys.reverse ||
               keys.left ||
               keys.right ||
-              keys.brake;
+              keys.brake ||
+              kitchenPropsMoving();
             if (realtimePhysics) {
               _kitchenIdlePhysicsAccumulator = 0;
               physicsWorld.step(1 / 60, physicsStepDt, 3);
@@ -6939,6 +7965,7 @@ let _worldSwitched = false;
                 _kitchenIdlePhysicsAccumulator = 0;
               }
             }
+            syncKitchenProps();
           }
 
           let carOnTable = false;
@@ -6962,6 +7989,7 @@ let _worldSwitched = false;
               }
             }
           }
+          if (_carTumbling) carOnTable = false;
           if (carOnTable && carState.velY <= 0) carState.velY = 0;
           const speedFactor = Math.min(
             1,
@@ -7047,6 +8075,7 @@ let _worldSwitched = false;
             _quatTilt.setFromAxisAngle(_tiltAxis, tiltAngle);
           }
           car.quaternion.copy(_quatTilt).multiply(_quatY);
+          syncCarFromFallBody();
           if (carOnTable && carState.velY <= 0) {
             if (_carGroundSurfY <= tableSurfaceY + 0.01) {
               car.position.y = tableSpawn.y;
