@@ -3901,6 +3901,1391 @@ function attachTabletSideLight(root) {
   _tabletSideAreaLights.push(light);
 }
 
+// ---------------------------------------------------------------------------
+// Cabled physics objects: the tablet and the table microphone (same code).
+// Each object's parts (separate nodes in the model) are grouped and driven by
+// an invisible compound body (cannon-es, like the rest of the room) built from
+// the parts' own geometry, with a low centre of mass and matching inertia. All
+// objects share one small physics world with the table, the floor and one
+// kinematic box per car (following that car), so cars knock them around (and
+// lose a little speed by the mass ratio) and the objects collide with each
+// other. Each object's cable is a heavy, stiff Verlet power cord: pinned at the
+// table end, the other end rides with the object; it never stretches past its
+// real length — a taut cord pulls the object back, so it hangs and swings off
+// the table. Cords keep out of the table, the floor, the other objects and the
+// other cord. The original cable mesh (a tube of rings) is bent along it.
+// ---------------------------------------------------------------------------
+const CABLED_PHYS_DT = 1 / 120;
+/**
+ * Rigid-body substeps per step (cannon has no continuous collision detection):
+ * at the speed / spin caps no collider corner moves more than ~1.7 cm per
+ * substep, under half the 4 cm tabletop, so nothing can tunnel through it.
+ */
+const CABLED_WORLD_SUBSTEPS = 2;
+/** Penetration into the table / floor left to the solver (resting contact), m. */
+const CABLED_PEN_SLOP = 0.002;
+
+// --- tablet ----------------------------------------------------------------
+const TABLET_PART_NAMES = [
+  "tabletBody",
+  "tabletScreen",
+  "tabletsideLight",
+  "tabletLegs",
+  "tabletLegsTips",
+  "tabletPowerLight", // small light on the tablet: moves with it
+];
+const TABLET_MASS = 2.4; // cars are 1.8
+const TABLET_FRICTION = 0.7;
+const TABLET_RESTITUTION = 0.02; // a heavy thud, no bounce
+const TABLET_LINEAR_DAMPING = 0.6; // also settles the swinging when hanging
+const TABLET_ANGULAR_DAMPING = 0.85;
+const TABLET_MAX_SPEED = 2.5; // world units / s: even a strong hit can't launch it
+const TABLET_MAX_SPIN = 6; // rad / s
+// Compound collider: share of the mass in each part, and how far the centre
+// of mass sits from the slab's centre toward the kickstand (0 = slab, 1 = legs).
+const TABLET_MASS_SHARE = { tabletBody: 0.8, tabletLegs: 0.15, tabletLegsTips: 0.05 };
+/** tabletBody = a thin front panel + a tapered back housing (split by depth). */
+const TABLET_PANEL_THICKNESS = 0.012; // front panel depth, measured from the front face
+const TABLET_PANEL_MASS_SHARE = 0.6; // of tabletBody's mass (rest: the back housing)
+const TABLET_COM_TOWARD_LEGS = 0.45;
+const TABLET_CAR_RESTITUTION = 0.2; // car slow-down on a hit (by mass ratio)
+const TABLET_CABLE_SEGMENTS = 16; // fewer, longer segments: naturally stiffer (drawn smooth)
+const TABLET_CABLE_ITERATIONS = 60; // constraint passes per step (stiffness holds under the weight)
+// Heavy power cord: weight, sag, stiffness, heavy damping, no bounce.
+const TABLET_CABLE_MASS = 0.18; // whole cable (the tablet is 2.4)
+const TABLET_CABLE_GRAVITY_SCALE = 1.6; // × the room's gravity: clear sag under its own weight
+const TABLET_CABLE_DAMPING = 0.94; // Verlet velocity kept per step (lower = heavier, settles sooner)
+const TABLET_CABLE_STIFFNESS = 0.6; // bending resistance per pass (0 = string, 1 = stiff)
+const TABLET_CABLE_MAX_BEND_DEG = 25; // largest bend per joint: wide, smooth curves only
+const TABLET_CABLE_SELF_GAP = 0.75; // non-neighbour points ≥ this × a segment apart (no folds / coils)
+const TABLET_CABLE_FRICTION = 0.6; // sliding damped when it lies on the table / floor
+const TABLET_CABLE_LENGTH_SCALE = 1; // max length = the modelled cable's length × this
+const TABLET_CABLE_PULL = 0.8; // share of a stretch corrected on the tablet per step
+
+// --- table microphone (a flat three-armed puck, ~0.30 × 0.26 × 0.04) ---------
+const MIC_PART_NAMES = ["tableMicBody", "tableMicNets"]; // the grille sits on the arms
+const MIC_MASS = 2; // a little lighter than the tablet (2.4), same footprint, thinner
+// cannon applies the full friction at every contact point: the flat puck rests
+// on ~12–16 points (three arms + hub), so a per-point coefficient of 0.1 is
+// an overall grip of roughly 1.2–1.6 (the tablet rests on a few edges).
+const MIC_FRICTION = 0.1;
+const MIC_RESTITUTION = 0.02;
+const MIC_LINEAR_DAMPING = 0.6;
+const MIC_ANGULAR_DAMPING = 0.85;
+const MIC_MAX_SPEED = 2.5;
+const MIC_MAX_SPIN = 6;
+const MIC_HUB_MASS_SHARE = 0.4; // centre hub; the rest is split over the arms
+const MIC_COM_HEIGHT = 0.35; // centre of mass height, as a share of the puck's height
+const MIC_CAR_RESTITUTION = 0.2;
+const MIC_CABLE_SEGMENTS = 16;
+const MIC_CABLE_ITERATIONS = 60;
+const MIC_CABLE_MASS = 0.15;
+const MIC_CABLE_GRAVITY_SCALE = 1.6;
+const MIC_CABLE_DAMPING = 0.94;
+const MIC_CABLE_STIFFNESS = 0.6;
+const MIC_CABLE_MAX_BEND_DEG = 25;
+const MIC_CABLE_SELF_GAP = 0.75;
+const MIC_CABLE_FRICTION = 0.6;
+const MIC_CABLE_LENGTH_SCALE = 1;
+const MIC_CABLE_PULL = 0.8;
+
+/** Cords keep at least this far from each other (× the sum of their radii). */
+const CABLED_CORD_GAP = 1.6;
+
+const CABLED_OBJECT_CONFIGS = [
+  {
+    name: "tablet",
+    parts: TABLET_PART_NAMES,
+    coreName: "tabletBody",
+    cableName: "tabletCable",
+    mass: TABLET_MASS,
+    friction: TABLET_FRICTION,
+    restitution: TABLET_RESTITUTION,
+    linearDamping: TABLET_LINEAR_DAMPING,
+    angularDamping: TABLET_ANGULAR_DAMPING,
+    maxSpeed: TABLET_MAX_SPEED,
+    maxSpin: TABLET_MAX_SPIN,
+    carRestitution: TABLET_CAR_RESTITUTION,
+    buildPieces: _tabletPieces,
+    centreOfMass: _tabletCentreOfMass,
+    extraChildren: () => _tabletSideAreaLights,
+    cable: {
+      segments: TABLET_CABLE_SEGMENTS,
+      iterations: TABLET_CABLE_ITERATIONS,
+      mass: TABLET_CABLE_MASS,
+      gravityScale: TABLET_CABLE_GRAVITY_SCALE,
+      damping: TABLET_CABLE_DAMPING,
+      stiffness: TABLET_CABLE_STIFFNESS,
+      maxBendDeg: TABLET_CABLE_MAX_BEND_DEG,
+      selfGap: TABLET_CABLE_SELF_GAP,
+      friction: TABLET_CABLE_FRICTION,
+      lengthScale: TABLET_CABLE_LENGTH_SCALE,
+      pull: TABLET_CABLE_PULL,
+    },
+  },
+  {
+    name: "mic",
+    parts: MIC_PART_NAMES,
+    coreName: "tableMicBody",
+    cableName: "micCable",
+    mass: MIC_MASS,
+    friction: MIC_FRICTION,
+    restitution: MIC_RESTITUTION,
+    linearDamping: MIC_LINEAR_DAMPING,
+    angularDamping: MIC_ANGULAR_DAMPING,
+    maxSpeed: MIC_MAX_SPEED,
+    maxSpin: MIC_MAX_SPIN,
+    carRestitution: MIC_CAR_RESTITUTION,
+    buildPieces: _micPieces,
+    centreOfMass: _micCentreOfMass,
+    extraChildren: () => [],
+    cable: {
+      segments: MIC_CABLE_SEGMENTS,
+      iterations: MIC_CABLE_ITERATIONS,
+      mass: MIC_CABLE_MASS,
+      gravityScale: MIC_CABLE_GRAVITY_SCALE,
+      damping: MIC_CABLE_DAMPING,
+      stiffness: MIC_CABLE_STIFFNESS,
+      maxBendDeg: MIC_CABLE_MAX_BEND_DEG,
+      selfGap: MIC_CABLE_SELF_GAP,
+      friction: MIC_CABLE_FRICTION,
+      lengthScale: MIC_CABLE_LENGTH_SCALE,
+      pull: MIC_CABLE_PULL,
+    },
+  },
+];
+
+/** Shared world + all cabled objects (null until the room is set up). */
+let _cabled = null;
+const _cabledObjects = [];
+const _tabV0 = new THREE.Vector3();
+const _tabV1 = new THREE.Vector3();
+const _tabQ = new THREE.Quaternion();
+const _tabCV = new CANNON.Vec3();
+const _tabCV2 = new CANNON.Vec3();
+const _cabledShapeQ = new THREE.Quaternion();
+const _cabledShapeP = new THREE.Vector3();
+
+function _cableRingLayout(mesh) {
+  const pos = mesh.geometry.attributes.position;
+  // Tube of rings in order: the first big jump between consecutive vertices
+  // ends the first ring.
+  let ring = 0;
+  for (let i = 0; i + 1 < pos.count; i++) {
+    _tabV0.fromBufferAttribute(pos, i);
+    _tabV1.fromBufferAttribute(pos, i + 1);
+    if (_tabV0.distanceTo(_tabV1) > 0.012) {
+      ring = i + 1;
+      break;
+    }
+  }
+  if (ring < 3 || pos.count % ring !== 0) return null;
+  return { ring, rings: pos.count / ring };
+}
+
+function _cablePTFrames(points, tangents, normals, binormals, startNormal) {
+  const n = points.length;
+  for (let i = 0; i < n; i++) {
+    const a = points[Math.max(0, i - 1)];
+    const b = points[Math.min(n - 1, i + 1)];
+    tangents[i].subVectors(b, a);
+    if (tangents[i].lengthSq() < 1e-12) tangents[i].set(1, 0, 0);
+    tangents[i].normalize();
+  }
+  normals[0].copy(startNormal).addScaledVector(tangents[0], -startNormal.dot(tangents[0]));
+  if (normals[0].lengthSq() < 1e-10) normals[0].set(0, 1, 0).addScaledVector(tangents[0], -tangents[0].y);
+  normals[0].normalize();
+  for (let i = 1; i < n; i++) {
+    // Parallel transport: rotate the previous normal by the tangent change.
+    _tabQ.setFromUnitVectors(tangents[i - 1], tangents[i]);
+    normals[i].copy(normals[i - 1]).applyQuaternion(_tabQ);
+    normals[i].addScaledVector(tangents[i], -normals[i].dot(tangents[i])).normalize();
+  }
+  for (let i = 0; i < n; i++) binormals[i].crossVectors(tangents[i], normals[i]).normalize();
+}
+
+function _vecs(n) {
+  return Array.from({ length: n }, () => new THREE.Vector3());
+}
+
+/** A collider piece from a box in a mesh's local space (world pose from the mesh). */
+function _cabledBoxPiece(name, mesh, localBox, mass, fit = 1, localYaw = 0) {
+  if (localBox.isEmpty()) return null;
+  const wpos = new THREE.Vector3();
+  const wq = new THREE.Quaternion();
+  const ws = new THREE.Vector3();
+  mesh.matrixWorld.decompose(wpos, wq, ws);
+  const centre = localBox.getCenter(new THREE.Vector3());
+  if (localYaw) centre.applyAxisAngle(new THREE.Vector3(0, 1, 0), localYaw);
+  centre.applyMatrix4(mesh.matrixWorld);
+  const half = localBox.getSize(new THREE.Vector3()).multiply(ws).multiplyScalar(0.5);
+  half.set(Math.abs(half.x), Math.abs(half.y), Math.abs(half.z * fit));
+  half.set(Math.max(0.004, half.x), Math.max(0.004, half.y), Math.max(0.004, half.z));
+  const q = wq.clone();
+  if (localYaw) q.multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), localYaw));
+  return { name, centre, q, half, mass, kind: "box" };
+}
+
+// --- tablet shape -------------------------------------------------------------
+function _tabletPieces(group) {
+  const pieces = [];
+  const addPiece = (name, mesh, gb, mass, fit = 1) => {
+    if (gb.isEmpty()) return;
+    const wpos = new THREE.Vector3();
+    const wq = new THREE.Quaternion();
+    const ws = new THREE.Vector3();
+    mesh.matrixWorld.decompose(wpos, wq, ws);
+    const centre = gb.getCenter(new THREE.Vector3()).applyMatrix4(mesh.matrixWorld);
+    const half = gb.getSize(new THREE.Vector3()).multiply(ws).multiplyScalar(0.5);
+    half.set(Math.abs(half.x) * fit, Math.abs(half.y) * fit, Math.abs(half.z));
+    half.set(Math.max(0.004, half.x), Math.max(0.004, half.y), Math.max(0.004, half.z));
+    pieces.push({ name, centre, q: wq, half, mass, kind: "box" });
+  };
+  for (const name of Object.keys(TABLET_MASS_SHARE)) {
+    const mesh = group.getObjectByName(name);
+    if (!mesh || !mesh.isMesh) continue;
+    mesh.updateWorldMatrix(true, false);
+    if (!mesh.geometry.boundingBox) mesh.geometry.computeBoundingBox();
+    const gb = mesh.geometry.boundingBox;
+    const mass = TABLET_MASS * TABLET_MASS_SHARE[name];
+    if (name !== "tabletBody") {
+      addPiece(name, mesh, gb.clone(), mass);
+      continue;
+    }
+    // Split the body by depth (local z: front face at max z): thin front panel
+    // (with the screen / side light in it) + the back housing behind it.
+    const front = new THREE.Box3();
+    const back = new THREE.Box3();
+    const posAttr = mesh.geometry.attributes.position;
+    const zFront = gb.max.z;
+    for (let i = 0; i < posAttr.count; i++) {
+      _tabV0.fromBufferAttribute(posAttr, i);
+      if (_tabV0.z >= zFront - TABLET_PANEL_THICKNESS) front.expandByPoint(_tabV0);
+      else back.expandByPoint(_tabV0);
+    }
+    if (!back.isEmpty()) back.max.z = Math.min(back.max.z, zFront - TABLET_PANEL_THICKNESS);
+    addPiece("tabletBody", mesh, front, mass * TABLET_PANEL_MASS_SHARE);
+    addPiece("tabletBodyBack", mesh, back, mass * (1 - TABLET_PANEL_MASS_SHARE));
+  }
+  return pieces;
+}
+
+function _tabletCentreOfMass(pieces) {
+  // Low, between the slab and the kickstand (where they meet).
+  const slab = pieces.find((p) => p.name === "tabletBody");
+  const legs = pieces.find((p) => p.name === "tabletLegs");
+  const com = slab.centre.clone();
+  if (legs) com.lerp(legs.centre, TABLET_COM_TOWARD_LEGS);
+  return com;
+}
+
+// --- microphone shape -----------------------------------------------------------
+/**
+ * The mic body is a raised round hub with thin flat arms (measured from its
+ * own vertices, in its local frame): an octagonal hub (two boxes) + one box per
+ * arm (arm directions = clusters of the outermost vertices).
+ */
+function _micPieces(group) {
+  const mesh = group.getObjectByName("tableMicBody");
+  if (!mesh || !mesh.isMesh) return [];
+  mesh.updateWorldMatrix(true, false);
+  if (!mesh.geometry.boundingBox) mesh.geometry.computeBoundingBox();
+  const gb = mesh.geometry.boundingBox;
+  const pos = mesh.geometry.attributes.position;
+  const cx = (gb.min.x + gb.max.x) / 2;
+  const cz = (gb.min.z + gb.max.z) / 2;
+  const yMin = gb.min.y;
+  const yMax = gb.max.y;
+  const verts = [];
+  let rMax = 0;
+  for (let i = 0; i < pos.count; i++) {
+    _tabV0.fromBufferAttribute(pos, i);
+    const dx = _tabV0.x - cx;
+    const dz = _tabV0.z - cz;
+    const r = Math.hypot(dx, dz);
+    rMax = Math.max(rMax, r);
+    verts.push({ x: dx, y: _tabV0.y, z: dz, r, a: Math.atan2(dz, dx) });
+  }
+  // The arms are thin flat plates (their top = the top of the outer vertices);
+  // the hub is the raised round centre (everything taller than the arms).
+  let armTop = yMin;
+  for (const v of verts) if (v.r > 0.75 * rMax) armTop = Math.max(armTop, v.y);
+  let hubR = 0;
+  for (const v of verts) if (v.y > armTop + 0.1 * (yMax - yMin)) hubR = Math.max(hubR, v.r);
+  if (hubR <= 0) hubR = 0.3 * rMax;
+  // Arms: angle clusters of the outermost vertices.
+  const outer = verts.filter((v) => v.r > 0.75 * rMax).map((v) => (v.a + Math.PI * 2) % (Math.PI * 2)).sort((p, q) => p - q);
+  const clusters = [];
+  for (const a of outer) {
+    const last = clusters[clusters.length - 1];
+    if (last && a - last[last.length - 1] < 1) last.push(a);
+    else clusters.push([a]);
+  }
+  if (clusters.length > 1) {
+    const first = clusters[0];
+    const last = clusters[clusters.length - 1];
+    if (first[0] + Math.PI * 2 - last[last.length - 1] < 1) {
+      clusters[0] = last.concat(first.map((a) => a + Math.PI * 2));
+      clusters.pop();
+    }
+  }
+  const armDirs = clusters.map((c) => c.reduce((s, a) => s + a, 0) / c.length);
+  const pieces = [];
+  const ws = new THREE.Vector3();
+  const wq = new THREE.Quaternion();
+  mesh.matrixWorld.decompose(_tabV1, wq, ws);
+  const armMass = (MIC_MASS * (1 - MIC_HUB_MASS_SHARE)) / Math.max(1, armDirs.length);
+  for (const dir of armDirs) {
+    // Arm frame: u along the arm, w across it.
+    const ux = Math.cos(dir);
+    const uz = Math.sin(dir);
+    const box = new THREE.Box3();
+    for (const v of verts) {
+      let da = v.a - dir;
+      while (da > Math.PI) da -= Math.PI * 2;
+      while (da < -Math.PI) da += Math.PI * 2;
+      if (Math.abs(da) > Math.PI / 3 || v.r < hubR * 0.5 || v.y > armTop + 1e-6) continue;
+      const u = v.x * ux + v.z * uz;
+      const w = -v.x * uz + v.z * ux;
+      box.expandByPoint(_tabV0.set(u, v.y, w));
+    }
+    if (box.isEmpty()) continue;
+    box.min.x = 0;
+    // The arm's real thickness (same for every arm).
+    box.min.y = yMin;
+    box.max.y = armTop;
+    // Box centre back in mesh space, then world.
+    const cu = (box.min.x + box.max.x) / 2;
+    const cw = (box.min.z + box.max.z) / 2;
+    const cy = (box.min.y + box.max.y) / 2;
+    const centre = new THREE.Vector3(cx + cu * ux - cw * uz, cy, cz + cu * uz + cw * ux).applyMatrix4(mesh.matrixWorld);
+    // Box axes: x along the arm, z across it (a turn of -dir about local y).
+    const q = wq.clone().multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -dir));
+    const half = new THREE.Vector3(
+      ((box.max.x - box.min.x) / 2) * Math.abs(ws.x),
+      ((box.max.y - box.min.y) / 2) * Math.abs(ws.y),
+      ((box.max.z - box.min.z) / 2) * Math.abs(ws.z),
+    );
+    pieces.push({ name: "micArm", centre, q, half, mass: armMass, kind: "box" });
+  }
+  // Hub: two full-height square boxes, the second turned 45°: an octagon
+  // around the round hub (a cannon cylinder resting on the table turned
+  // sliding into upward kicks; box-box contacts are stable).
+  const hubCentre = new THREE.Vector3(cx, (yMin + yMax) / 2, cz).applyMatrix4(mesh.matrixWorld);
+  for (let k = 0; k < 2; k++) {
+    pieces.push({
+      name: "micHub",
+      centre: hubCentre.clone(),
+      q: wq.clone().multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), (k * Math.PI) / 4)),
+      half: new THREE.Vector3(hubR * Math.abs(ws.x), ((yMax - yMin) / 2) * Math.abs(ws.y), hubR * Math.abs(ws.z)),
+      mass: (MIC_MASS * MIC_HUB_MASS_SHARE) / 2,
+      kind: "box",
+    });
+  }
+  return pieces;
+}
+
+function _micCentreOfMass(pieces) {
+  // On the hub's axis, low in the puck.
+  const hub = pieces.find((p) => p.name === "micHub");
+  const com = hub.centre.clone();
+  com.y = hub.centre.y - hub.half.y + 2 * hub.half.y * MIC_COM_HEIGHT;
+  return com;
+}
+
+// --- shared setup ---------------------------------------------------------------
+/**
+ * Grows the collider pieces so they cover every visible vertex of the object
+ * (each vertex outside all pieces extends the nearest one, in its own frame):
+ * no visible part can sink into the table.
+ */
+function _cabledCoverVisual(group, pieces) {
+  group.updateMatrixWorld(true);
+  const inv = pieces.map((p) => p.q.clone().invert());
+  const lo = pieces.map((p) => p.half.clone().negate());
+  const hi = pieces.map((p) => p.half.clone());
+  const v = new THREE.Vector3();
+  const l = new THREE.Vector3();
+  const outside = (k) => {
+    l.copy(v).sub(pieces[k].centre).applyQuaternion(inv[k]);
+    const ox = Math.max(0, lo[k].x - l.x, l.x - hi[k].x);
+    const oy = Math.max(0, lo[k].y - l.y, l.y - hi[k].y);
+    const oz = Math.max(0, lo[k].z - l.z, l.z - hi[k].z);
+    return Math.hypot(ox, oy, oz);
+  };
+  group.traverse((m) => {
+    if (!m.isMesh || !m.geometry || !m.geometry.attributes.position) return;
+    const pos = m.geometry.attributes.position;
+    for (let i = 0; i < pos.count; i++) {
+      v.fromBufferAttribute(pos, i).applyMatrix4(m.matrixWorld);
+      let best = Infinity;
+      let bi = -1;
+      for (let k = 0; k < pieces.length && best > 0; k++) {
+        const d = outside(k);
+        if (d < best) {
+          best = d;
+          bi = k;
+        }
+      }
+      if (best <= 0 || bi < 0) continue;
+      outside(bi);
+      lo[bi].min(l);
+      hi[bi].max(l);
+    }
+  });
+  for (let k = 0; k < pieces.length; k++) {
+    const p = pieces[k];
+    p.centre.add(l.addVectors(lo[k], hi[k]).multiplyScalar(0.5).applyQuaternion(p.q));
+    p.half.subVectors(hi[k], lo[k]).multiplyScalar(0.5);
+  }
+}
+
+/** World box of the named objects (union), or null. */
+function _cabledMeasure(root, names) {
+  const box = new THREE.Box3();
+  for (const n of names) {
+    const o = root.getObjectByName(n);
+    if (!o) continue;
+    o.updateWorldMatrix(true, true);
+    box.union(new THREE.Box3().setFromObject(o));
+  }
+  return box.isEmpty() ? null : box;
+}
+
+function _cabledBoxFrom(x0, x1, y0, y1, z0, z1) {
+  return {
+    c: new CANNON.Vec3((x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2),
+    h: new CANNON.Vec3((x1 - x0) / 2, Math.max(0.005, (y1 - y0) / 2), (z1 - z0) / 2),
+  };
+}
+
+function setupCabledObjects(root) {
+  _cabled = null;
+  _cabledObjects.length = 0;
+  if (!root || !tablePlateBody) return;
+  const world = new CANNON.World({ gravity: new CANNON.Vec3(0, PHYS_GRAVITY_Y, 0), allowSleep: true });
+  world.solver.iterations = 12;
+  world.defaultContactMaterial.contactEquationStiffness = 1e7;
+  world.defaultContactMaterial.contactEquationRelaxation = 3;
+  // Table / floor / car boxes get an explicit material, so each object's own
+  // friction / restitution (its contact material) applies to them.
+  const staticMaterial = new CANNON.Material("cabledStatic");
+  const addStatic = (box) => {
+    const body = new CANNON.Body({ type: CANNON.Body.STATIC, material: staticMaterial });
+    body.addShape(new CANNON.Box(box.h));
+    body.position.copy(box.c);
+    world.addBody(body);
+    return box;
+  };
+  // The table, measured from its meshes: the tabletop slab at its real
+  // thickness, and under it the wooden frame (walls from the floor up to the
+  // top, with the base inside) as one solid block — nothing gets under the top.
+  const tb = _cabledMeasure(root, ["tablePlate"]);
+  if (!tb) return;
+  const plate = addStatic(_cabledBoxFrom(tb.min.x, tb.max.x, tb.min.y, tb.max.y, tb.min.z, tb.max.z));
+  const fb = _cabledMeasure(root, ["tableWoodFrame", "tableBaseBox"]);
+  let frame = null;
+  if (fb) {
+    frame = addStatic(_cabledBoxFrom(fb.min.x, fb.max.x, fb.min.y, tb.min.y, fb.min.z, fb.max.z));
+    frame.closedY = true; // the tabletop above, the floor below
+    plate.solidBelow = frame; // the tabletop's underside is open only past the frame
+  }
+  const statics = frame ? [plate, frame] : [plate];
+  let floorY = -Infinity;
+  const solids = statics.slice();
+  if (floorPhysBody) {
+    const fh = floorPhysBody.shapes[0].halfExtents;
+    const fp = floorPhysBody.position;
+    solids.push(addStatic({ c: new CANNON.Vec3().copy(fp), h: new CANNON.Vec3().copy(fh) }));
+    floorY = fp.y + fh.y;
+  }
+  _cabled = {
+    world,
+    staticMaterial,
+    acc: 0,
+    proxies: new Map(),
+    tableTop: tb.max.y,
+    tableHe: plate.h,
+    tablePos: plate.c,
+    statics, // what the cords collide with (the floor separately)
+    solids, // what the objects are kept out of (+ the floor)
+    floorY,
+  };
+  for (const cfg of CABLED_OBJECT_CONFIGS) {
+    const O = _createCabledObject(root, cfg);
+    if (O) _cabledObjects.push(O);
+  }
+  // Object ↔ object contacts (e.g. the mic against the tablet).
+  for (let i = 0; i < _cabledObjects.length; i++) {
+    for (let j = i + 1; j < _cabledObjects.length; j++) {
+      const A = _cabledObjects[i];
+      const B = _cabledObjects[j];
+      world.addContactMaterial(
+        new CANNON.ContactMaterial(A.material, B.material, {
+          friction: (A.cfg.friction + B.cfg.friction) / 2,
+          restitution: Math.min(A.cfg.restitution, B.cfg.restitution),
+          contactEquationStiffness: 1e7,
+          contactEquationRelaxation: 3,
+        }),
+      );
+    }
+  }
+}
+
+function _createCabledObject(root, cfg) {
+  const S = _cabled;
+  const parts = cfg.parts.map((n) => root.getObjectByName(n)).filter(Boolean);
+  if (!parts.some((p) => p.name === cfg.coreName)) return null;
+  root.updateMatrixWorld(true);
+  const box = new THREE.Box3();
+  for (const p of parts) box.expandByObject(p);
+  if (box.isEmpty()) return null;
+
+  // Group the parts (world transforms kept), with any attached lights.
+  const group = new THREE.Group();
+  group.name = cfg.name + "Group";
+  box.getCenter(group.position);
+  root.add(group);
+  group.updateMatrixWorld(true);
+  for (const p of parts) group.attach(p);
+  for (const l of cfg.extraChildren()) group.attach(l);
+
+  const size = box.getSize(new THREE.Vector3());
+  // Overall half size (only used for "a car is near" checks).
+  const he = new CANNON.Vec3(size.x / 2, size.y / 2, size.z / 2);
+  const pieces = cfg.buildPieces(group).filter(Boolean);
+  if (!pieces.length) return null;
+  const com = cfg.centreOfMass(pieces);
+  _cabledCoverVisual(group, pieces);
+  // Rest exactly on the table: the lowest collider corner just above the top.
+  let lowest = Infinity;
+  for (const p of pieces) {
+    for (let c = 0; c < 8; c++) {
+      _tabV0.set(c & 1 ? p.half.x : -p.half.x, c & 2 ? p.half.y : -p.half.y, c & 4 ? p.half.z : -p.half.z)
+        .applyQuaternion(p.q).add(p.centre);
+      lowest = Math.min(lowest, _tabV0.y);
+    }
+  }
+  const lift = Number.isFinite(lowest) ? S.tableTop + 0.0005 - lowest : 0;
+  if (lift > 0) {
+    com.y += lift;
+    for (const p of pieces) p.centre.y += lift;
+    group.position.y += lift;
+  }
+
+  const material = new CANNON.Material(cfg.name);
+  S.world.addContactMaterial(
+    new CANNON.ContactMaterial(material, S.staticMaterial, {
+      friction: cfg.friction,
+      restitution: cfg.restitution,
+      contactEquationStiffness: 1e7,
+      contactEquationRelaxation: 3,
+    }),
+  );
+  const body = new CANNON.Body({
+    mass: cfg.mass,
+    material,
+    linearDamping: cfg.linearDamping,
+    angularDamping: cfg.angularDamping,
+    allowSleep: true,
+    sleepSpeedLimit: 0.05,
+    sleepTimeLimit: 0.4,
+  });
+  body.position.set(com.x, com.y, com.z);
+  for (const p of pieces) {
+    const off = p.centre.clone().sub(com);
+    const shape =
+      p.kind === "cylinder"
+        ? new CANNON.Cylinder(p.radius, p.radius, p.height, 12)
+        : new CANNON.Box(new CANNON.Vec3(p.half.x, p.half.y, p.half.z));
+    body.addShape(shape, new CANNON.Vec3(off.x, off.y, off.z), new CANNON.Quaternion(p.q.x, p.q.y, p.q.z, p.q.w));
+  }
+  // Inertia of the compound about the centre of mass (each piece as a box,
+  // rotated into the body frame + parallel axis), not cannon's AABB estimate.
+  const I = new THREE.Vector3();
+  const rot = new THREE.Matrix3();
+  for (const p of pieces) {
+    const m = p.mass;
+    const hx = p.half.x, hy = p.half.y, hz = p.half.z;
+    const ix = (m / 3) * (hy * hy + hz * hz);
+    const iy = (m / 3) * (hx * hx + hz * hz);
+    const iz = (m / 3) * (hx * hx + hy * hy);
+    rot.setFromMatrix4(new THREE.Matrix4().makeRotationFromQuaternion(p.q));
+    const e = rot.elements; // column-major
+    const r = (row, col) => e[col * 3 + row];
+    const d = (row) => r(row, 0) * r(row, 0) * ix + r(row, 1) * r(row, 1) * iy + r(row, 2) * r(row, 2) * iz;
+    const off = p.centre.clone().sub(com);
+    I.x += d(0) + m * (off.y * off.y + off.z * off.z);
+    I.y += d(1) + m * (off.x * off.x + off.z * off.z);
+    I.z += d(2) + m * (off.x * off.x + off.y * off.y);
+  }
+  body.inertia.set(I.x, I.y, I.z);
+  body.invInertia.set(1 / I.x, 1 / I.y, 1 / I.z);
+  body.updateInertiaWorld(true);
+  S.world.addBody(body);
+  body.sleep();
+
+  const O = {
+    cfg,
+    group,
+    body,
+    material,
+    he,
+    radius: Math.hypot(he.x, he.y, he.z),
+    // Group pose relative to the body (identity rotation at rest).
+    offset: new THREE.Vector3().subVectors(group.position, com),
+    contactPrev: new Set(),
+    cable: null,
+  };
+  _setupCabledCable(root, O);
+  return O;
+}
+
+function _setupCabledCable(root, O) {
+  const cc = O.cfg.cable;
+  const mesh = root.getObjectByName(O.cfg.cableName);
+  if (!mesh || !mesh.isMesh) return;
+  const layout = _cableRingLayout(mesh);
+  if (!layout) return;
+  mesh.updateMatrixWorld(true);
+  const pos = mesh.geometry.attributes.position;
+  const nrm = mesh.geometry.attributes.normal;
+  const R = layout.ring;
+  const N = layout.rings;
+  // Ring centres (world) and the cable radius.
+  let centres = _vecs(N);
+  let radius = 0;
+  for (let r = 0; r < N; r++) {
+    for (let k = 0; k < R; k++) centres[r].add(_tabV0.fromBufferAttribute(pos, r * R + k).applyMatrix4(mesh.matrixWorld));
+    centres[r].multiplyScalar(1 / R);
+  }
+  for (let k = 1; k < R; k++) radius += _tabV0.fromBufferAttribute(pos, R + k).applyMatrix4(mesh.matrixWorld).distanceTo(centres[1]);
+  radius /= R - 1;
+  // Order: index 0 = the table end (farther from the object).
+  const objC = new THREE.Vector3(O.body.position.x, O.body.position.y, O.body.position.z);
+  const reversed = centres[0].distanceTo(objC) < centres[N - 1].distanceTo(objC);
+  const ringOf = (r) => (reversed ? N - 1 - r : r);
+  if (reversed) centres = centres.slice().reverse();
+  // Rest arc length per ring.
+  const ringS = new Float32Array(N);
+  for (let r = 1; r < N; r++) ringS[r] = ringS[r - 1] + centres[r].distanceTo(centres[r - 1]);
+  const length = ringS[N - 1] * cc.lengthScale;
+  for (let r = 0; r < N; r++) ringS[r] /= ringS[N - 1];
+  // Rest frames at the ring centres and each vertex's offset in its ring's frame.
+  const tg = _vecs(N), nm = _vecs(N), bn = _vecs(N);
+  _cablePTFrames(centres, tg, nm, bn, new THREE.Vector3(0, 1, 0));
+  const restNormal0 = nm[0].clone();
+  const restTan0 = tg[0].clone();
+  const offs = new Float32Array(pos.count * 3);
+  const nOffs = new Float32Array(pos.count * 3);
+  const ringOfVertex = new Uint16Array(pos.count);
+  const normalMat = new THREE.Matrix3().getNormalMatrix(mesh.matrixWorld);
+  for (let r = 0; r < N; r++) {
+    const src = ringOf(r);
+    for (let k = 0; k < R; k++) {
+      const vi = src * R + k;
+      ringOfVertex[vi] = r;
+      _tabV0.fromBufferAttribute(pos, vi).applyMatrix4(mesh.matrixWorld).sub(centres[r]);
+      offs[vi * 3] = _tabV0.dot(nm[r]);
+      offs[vi * 3 + 1] = _tabV0.dot(bn[r]);
+      offs[vi * 3 + 2] = _tabV0.dot(tg[r]);
+      _tabV1.fromBufferAttribute(nrm, vi).applyMatrix3(normalMat).normalize();
+      nOffs[vi * 3] = _tabV1.dot(nm[r]);
+      nOffs[vi * 3 + 1] = _tabV1.dot(bn[r]);
+      nOffs[vi * 3 + 2] = _tabV1.dot(tg[r]);
+    }
+  }
+  // Rope points: evenly along the rest path.
+  const M = cc.segments + 1;
+  const pts = _vecs(M);
+  const prev = _vecs(M);
+  const restCurve = new THREE.CatmullRomCurve3(centres, false, "centripetal");
+  for (let i = 0; i < M; i++) {
+    restCurve.getPointAt(i / (M - 1), pts[i]);
+    prev[i].copy(pts[i]);
+  }
+  // Object end: the last two points ride with the object (body frame).
+  const inv = new THREE.Matrix4().compose(
+    new THREE.Vector3(O.body.position.x, O.body.position.y, O.body.position.z),
+    new THREE.Quaternion(),
+    new THREE.Vector3(1, 1, 1),
+  ).invert();
+  const attachLocal = [pts[M - 2].clone().applyMatrix4(inv), pts[M - 1].clone().applyMatrix4(inv)];
+  mesh.frustumCulled = false;
+  pos.setUsage(THREE.DynamicDrawUsage);
+  nrm.setUsage(THREE.DynamicDrawUsage);
+  O.cable = {
+    mesh,
+    pts,
+    prev,
+    M,
+    seg: length / (M - 1),
+    length,
+    radius,
+    anchors: [pts[0].clone(), pts[1].clone()],
+    attachLocal,
+    ringS,
+    N,
+    offs,
+    nOffs,
+    ringOfVertex,
+    restNormal0,
+    restTan0,
+    curve: new THREE.CatmullRomCurve3(pts, false, "centripetal"),
+    c: _vecs(N),
+    tg: _vecs(N),
+    nm: _vecs(N),
+    bn: _vecs(N),
+    meshInv: new THREE.Matrix4().copy(mesh.matrixWorld).invert(),
+    normalInv: new THREE.Matrix3().getNormalMatrix(new THREE.Matrix4().copy(mesh.matrixWorld).invert()),
+    active: false,
+    hangForce: 0,
+  };
+}
+
+function _cabledAttachWorld(O, i, out) {
+  const b = O.body;
+  out.copy(O.cable.attachLocal[i]);
+  _tabQ.set(b.quaternion.x, b.quaternion.y, b.quaternion.z, b.quaternion.w);
+  return out.applyQuaternion(_tabQ).add(_tabV1.set(b.position.x, b.position.y, b.position.z));
+}
+
+const _CABLED_AXES = ["x", "y", "z"];
+
+/**
+ * Whether leaving static box B through face (axis, side) leads into another
+ * solid: the frame block is closed at the top (tabletop) and bottom (floor);
+ * the tabletop's underside is open only past the frame.
+ */
+function _cabledFaceBlocked(B, ax, side, px, pz, r) {
+  if (ax !== "y") return false;
+  if (B.closedY) return true;
+  const F = B.solidBelow;
+  return !!F && side < 0 && Math.abs(px - F.c.x) < F.h.x + r && Math.abs(pz - F.c.z) < F.h.z + r;
+}
+
+/**
+ * Keeps a cord point out of the table (tabletop + frame) and above the floor.
+ * A point inside leaves the way it came in (the face its previous position
+ * was outside of), else through the nearest open face. Returns the contact
+ * axis ("x" / "y" / "z") or "" when free.
+ */
+function _cabledCollideStatic(c, p, prev) {
+  const S = _cabled;
+  const r = c.radius;
+  let hit = "";
+  if (p.y < S.floorY + r) {
+    p.y = S.floorY + r;
+    hit = "y";
+  }
+  for (const B of S.statics) {
+    const hx = B.h.x + r;
+    const hy = B.h.y + r;
+    const hz = B.h.z + r;
+    const dx = p.x - B.c.x;
+    const dy = p.y - B.c.y;
+    const dz = p.z - B.c.z;
+    if (Math.abs(dx) >= hx || Math.abs(dy) >= hy || Math.abs(dz) >= hz) {
+      // Resting on the table top counts as contact too (for friction).
+      if (!B.closedY && Math.abs(dx) < hx && Math.abs(dz) < hz && dy >= hy && dy < hy + 0.002) hit = "y";
+      continue;
+    }
+    // Into the frame from above = through the tabletop: back on top of it.
+    if (B.closedY && prev && prev.y >= B.c.y + B.h.y - 1e-4) {
+      p.y = S.tableTop + r;
+      hit = "y";
+      continue;
+    }
+    let ax = "";
+    let side = 0;
+    let best = Infinity;
+    let axPrev = "";
+    let sidePrev = 0;
+    let bestPrev = Infinity;
+    for (let k = 0; k < 3; k++) {
+      const a = _CABLED_AXES[k];
+      const h = B.h[a] + r;
+      const d = p[a] - B.c[a];
+      for (let sd = -1; sd <= 1; sd += 2) {
+        if (_cabledFaceBlocked(B, a, sd, p.x, p.z, r)) continue;
+        const depth = h - sd * d;
+        if (depth < best) {
+          best = depth;
+          ax = a;
+          side = sd;
+        }
+        if (prev && sd * (prev[a] - B.c[a]) >= h - 1e-4 && depth < bestPrev) {
+          bestPrev = depth;
+          axPrev = a;
+          sidePrev = sd;
+        }
+      }
+    }
+    if (axPrev) {
+      ax = axPrev;
+      side = sidePrev;
+    }
+    if (!ax) continue;
+    p[ax] = B.c[ax] + side * (B.h[ax] + r);
+    hit = ax;
+  }
+  return hit;
+}
+
+// --- objects vs the table / floor: separating-axis push-out -----------------------
+const _satU = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()];
+const _satN = new THREE.Vector3();
+const _satBestN = new THREE.Vector3();
+const _satAnyN = new THREE.Vector3();
+const _satC = new THREE.Vector3();
+const _satQ = new THREE.Quaternion();
+const _sat = { dx: 0, dy: 0, dz: 0, h: null, B: null, best: 0, any: 0, depth: 0, anyDepth: 0, cx: 0, cz: 0 };
+
+/** One separating axis (lx, ly, lz); false = separated along it. */
+function _satAxis(lx, ly, lz, bias) {
+  const len = Math.hypot(lx, ly, lz);
+  if (len < 1e-6) return true;
+  lx /= len;
+  ly /= len;
+  lz /= len;
+  const h = _sat.h;
+  const B = _sat.B;
+  const rA =
+    h.x * Math.abs(_satU[0].x * lx + _satU[0].y * ly + _satU[0].z * lz) +
+    h.y * Math.abs(_satU[1].x * lx + _satU[1].y * ly + _satU[1].z * lz) +
+    h.z * Math.abs(_satU[2].x * lx + _satU[2].y * ly + _satU[2].z * lz);
+  const rB = B.h.x * Math.abs(lx) + B.h.y * Math.abs(ly) + B.h.z * Math.abs(lz);
+  const d = _sat.dx * lx + _sat.dy * ly + _sat.dz * lz;
+  const o = rA + rB - Math.abs(d);
+  if (o <= 0) return false;
+  const sg = d < 0 ? -1 : 1;
+  const nx = lx * sg;
+  const ny = ly * sg;
+  const nz = lz * sg;
+  const ob = o * bias;
+  if (ob < _sat.any) {
+    _sat.any = ob;
+    _sat.anyDepth = o;
+    _satAnyN.set(nx, ny, nz);
+  }
+  // Pushing out through a covered face (into the frame / floor) is not a way out.
+  const blocked = Math.abs(ny) > 0.7 && _cabledFaceBlocked(B, "y", ny < 0 ? -1 : 1, _sat.cx, _sat.cz, 0);
+  if (!blocked && ob < _sat.best) {
+    _sat.best = ob;
+    _sat.depth = o;
+    _satBestN.set(nx, ny, nz);
+  }
+  return true;
+}
+
+/**
+ * Penetration of an oriented box (centre c, axes _satU, half extents h) into
+ * static box B: depth (0 when apart) and the push-out direction in _satN.
+ */
+function _cabledBoxPenetration(c, h, B) {
+  _sat.dx = c.x - B.c.x;
+  _sat.dy = c.y - B.c.y;
+  _sat.dz = c.z - B.c.z;
+  _sat.h = h;
+  _sat.B = B;
+  _sat.cx = c.x;
+  _sat.cz = c.z;
+  _sat.best = Infinity;
+  _sat.any = Infinity;
+  if (!_satAxis(1, 0, 0, 1) || !_satAxis(0, 1, 0, 1) || !_satAxis(0, 0, 1, 1)) return 0;
+  for (let k = 0; k < 3; k++) if (!_satAxis(_satU[k].x, _satU[k].y, _satU[k].z, 1)) return 0;
+  // Edge × edge axes (slightly less preferred than face axes).
+  for (let k = 0; k < 3; k++) {
+    const u = _satU[k];
+    if (!_satAxis(0, -u.z, u.y, 1.05) || !_satAxis(u.z, 0, -u.x, 1.05) || !_satAxis(-u.y, u.x, 0, 1.05)) return 0;
+  }
+  if (_sat.best < Infinity) {
+    _satN.copy(_satBestN);
+    return _sat.depth;
+  }
+  _satN.copy(_satAnyN);
+  return _sat.anyDepth;
+}
+
+/**
+ * Collisions get the last word each step: after the cord's pull, any collider
+ * piece still inside the table / floor (beyond the resting slop) moves the
+ * object straight out along the contact normal. Position only (no impulse) and
+ * its velocity into the surface is dropped, so it is never launched.
+ */
+function _cabledDepenetrate(O) {
+  const S = _cabled;
+  const b = O.body;
+  for (let pass = 0; pass < 4; pass++) {
+    _tabQ.set(b.quaternion.x, b.quaternion.y, b.quaternion.z, b.quaternion.w);
+    let worst = 0;
+    for (let s = 0; s < b.shapes.length; s++) {
+      const sh = b.shapes[s];
+      if (!sh.halfExtents) continue;
+      const o = b.shapeOffsets[s];
+      const so = b.shapeOrientations[s];
+      _satQ.set(so.x, so.y, so.z, so.w).premultiply(_tabQ);
+      _satU[0].set(1, 0, 0).applyQuaternion(_satQ);
+      _satU[1].set(0, 1, 0).applyQuaternion(_satQ);
+      _satU[2].set(0, 0, 1).applyQuaternion(_satQ);
+      _satC.set(o.x, o.y, o.z).applyQuaternion(_tabQ);
+      _satC.x += b.position.x;
+      _satC.y += b.position.y;
+      _satC.z += b.position.z;
+      for (const B of S.solids) {
+        const d = _cabledBoxPenetration(_satC, sh.halfExtents, B);
+        if (d > worst) {
+          worst = d;
+          _tabV1.copy(_satN);
+        }
+      }
+    }
+    if (worst <= CABLED_PEN_SLOP) return;
+    const push = worst - CABLED_PEN_SLOP;
+    b.position.x += _tabV1.x * push;
+    b.position.y += _tabV1.y * push;
+    b.position.z += _tabV1.z * push;
+    const v = b.velocity;
+    const vn = v.x * _tabV1.x + v.y * _tabV1.y + v.z * _tabV1.z;
+    if (vn < 0) {
+      v.x -= _tabV1.x * vn;
+      v.y -= _tabV1.y * vn;
+      v.z -= _tabV1.z * vn;
+    }
+  }
+}
+
+/**
+ * A cord segment may not pass through the thin tabletop between its two
+ * points (both outside it, one above and one below). If it would, both free
+ * ends move out past the nearest table edge, so the cord wraps around it.
+ */
+function _cabledSegmentStatic(c, i) {
+  const S = _cabled;
+  const M = c.M;
+  const a = c.pts[i];
+  const b = c.pts[i + 1];
+  const r = c.radius;
+  const top = S.tablePos.y + S.tableHe.y;
+  const bot = S.tablePos.y - S.tableHe.y;
+  if (!((a.y >= top && b.y <= bot) || (b.y >= top && a.y <= bot))) return;
+  const t = (S.tablePos.y - a.y) / (b.y - a.y);
+  const cx = a.x + (b.x - a.x) * t - S.tablePos.x;
+  const cz = a.z + (b.z - a.z) * t - S.tablePos.z;
+  const ox = S.tableHe.x + r - Math.abs(cx);
+  const oz = S.tableHe.z + r - Math.abs(cz);
+  if (ox <= 0 || oz <= 0) return;
+  // Over the frame the lower end is inside it (handled per point).
+  const F = _cabled.statics[1];
+  if (F && Math.abs(cx + S.tablePos.x - F.c.x) < F.h.x && Math.abs(cz + S.tablePos.z - F.c.z) < F.h.z) return;
+  const fixedA = i < 2 || i >= M - 2;
+  const fixedB = i + 1 < 2 || i + 1 >= M - 2;
+  if (ox <= oz) {
+    const d = Math.sign(cx || 1) * ox;
+    if (!fixedA) a.x += d;
+    if (!fixedB) b.x += d;
+  } else {
+    const d = Math.sign(cz || 1) * oz;
+    if (!fixedA) a.z += d;
+    if (!fixedB) b.z += d;
+  }
+}
+
+/** Keeps a cord point out of the other objects' collider pieces. */
+function _cabledCollideObjects(own, c, p) {
+  for (const O of _cabledObjects) {
+    if (O === own) continue;
+    const b = O.body;
+    const dx = p.x - b.position.x;
+    const dy = p.y - b.position.y;
+    const dz = p.z - b.position.z;
+    if (dx * dx + dy * dy + dz * dz > (O.radius + c.radius) * (O.radius + c.radius)) continue;
+    for (let s = 0; s < b.shapes.length; s++) {
+      const sh = b.shapes[s];
+      const o = b.shapeOffsets[s];
+      const so = b.shapeOrientations[s];
+      _tabQ.set(b.quaternion.x, b.quaternion.y, b.quaternion.z, b.quaternion.w);
+      _cabledShapeQ.set(so.x, so.y, so.z, so.w).premultiply(_tabQ);
+      _cabledShapeP.set(o.x, o.y, o.z).applyQuaternion(_tabQ).add(_tabV1.set(b.position.x, b.position.y, b.position.z));
+      const h = sh.halfExtents || new CANNON.Vec3(sh.radiusTop, sh.height / 2, sh.radiusTop);
+      // Point in the piece's frame.
+      _tabV0.copy(p).sub(_cabledShapeP).applyQuaternion(_tabQ.copy(_cabledShapeQ).invert());
+      const ex = h.x + c.radius - Math.abs(_tabV0.x);
+      const ey = h.y + c.radius - Math.abs(_tabV0.y);
+      const ez = h.z + c.radius - Math.abs(_tabV0.z);
+      if (ex <= 0 || ey <= 0 || ez <= 0) continue;
+      if (ey <= ex && ey <= ez) _tabV0.y = Math.sign(_tabV0.y || 1) * (h.y + c.radius);
+      else if (ex <= ez) _tabV0.x = Math.sign(_tabV0.x || 1) * (h.x + c.radius);
+      else _tabV0.z = Math.sign(_tabV0.z || 1) * (h.z + c.radius);
+      p.copy(_tabV0.applyQuaternion(_cabledShapeQ).add(_cabledShapeP));
+    }
+  }
+}
+
+/** Push points i and j apart (only) to at least `minDist`; pinned ends stay put. */
+function _cabledSpreadPair(c, i, j, minDist, k) {
+  const M = c.M;
+  const a = c.pts[i];
+  const b = c.pts[j];
+  _tabV0.subVectors(b, a);
+  const d = _tabV0.length();
+  if (d >= minDist || d < 1e-9) return;
+  const fixedA = i < 2 || i >= M - 2;
+  const fixedB = j < 2 || j >= M - 2;
+  if (fixedA && fixedB) return;
+  const push = ((minDist - d) / d) * k;
+  const wa = fixedA ? 0 : fixedB ? 1 : 0.5;
+  const wb = fixedB ? 0 : fixedA ? 1 : 0.5;
+  a.addScaledVector(_tabV0, -push * wa);
+  b.addScaledVector(_tabV0, push * wb);
+}
+
+/**
+ * Bending constraint over a span of `gap` segments for every point pair. Only
+ * the two plug-in joints are left free (the cord may turn sharply right where
+ * it plugs into the table / object); pairs reaching the inner pinned point
+ * move just their free end.
+ */
+function _cabledSpread(c, gap, minDist, k) {
+  for (let i = 1; i + gap <= c.M - 2; i++) _cabledSpreadPair(c, i, i + gap, minDist, k);
+}
+
+function _cabledCableStep(O, dt) {
+  const S = _cabled;
+  const cc = O.cfg.cable;
+  const c = O.cable;
+  const M = c.M;
+  const g = PHYS_GRAVITY_Y * cc.gravityScale * dt * dt;
+  const a0 = _cabledAttachWorld(O, 0, new THREE.Vector3());
+  const a1 = _cabledAttachWorld(O, 1, new THREE.Vector3());
+  for (let i = 2; i < M - 2; i++) {
+    const p = c.pts[i];
+    const q = c.prev[i];
+    const vx = (p.x - q.x) * cc.damping;
+    const vy = (p.y - q.y) * cc.damping;
+    const vz = (p.z - q.z) * cc.damping;
+    q.copy(p);
+    p.x += vx;
+    p.y += vy + g;
+    p.z += vz;
+  }
+  const pin = () => {
+    c.pts[0].copy(c.anchors[0]);
+    c.pts[1].copy(c.anchors[1]);
+    c.pts[M - 2].copy(a0);
+    c.pts[M - 1].copy(a1);
+  };
+  const bend = (cc.maxBendDeg * Math.PI) / 180;
+  for (let it = 0; it < cc.iterations; it++) {
+    pin();
+    // Bending resistance: points 2 and 3 apart are kept at least as far apart
+    // as a curve bending MAX_BEND per joint allows (pushed apart only), so no
+    // joint folds sharply and longer stretches keep wide curves.
+    _cabledSpread(c, 2, 2 * c.seg * Math.cos(bend / 2), cc.stiffness);
+    _cabledSpread(c, 3, c.seg * (1 + 2 * Math.cos(bend)), cc.stiffness);
+    // No folding onto itself: every non-neighbour pair keeps a minimum gap.
+    for (let i = 0; i < M; i++) {
+      for (let j = i + 4; j < M; j++) _cabledSpreadPair(c, i, j, c.seg * cc.selfGap, 1);
+    }
+    // Length last in each pass, so the cord never stretches.
+    for (let i = 0; i < M - 1; i++) {
+      const a = c.pts[i];
+      const b = c.pts[i + 1];
+      _tabV0.subVectors(b, a);
+      const d = _tabV0.length();
+      if (d < 1e-9) continue;
+      const diff = (d - c.seg) / d;
+      const fixedA = i < 2 || i >= M - 2;
+      const fixedB = i + 1 < 2 || i + 1 >= M - 2;
+      if (fixedA && fixedB) continue;
+      const wa = fixedA ? 0 : fixedB ? 1 : 0.5;
+      const wb = fixedB ? 0 : fixedA ? 1 : 0.5;
+      a.addScaledVector(_tabV0, diff * wa);
+      b.addScaledVector(_tabV0, -diff * wb);
+    }
+    for (let i = 2; i < M - 2; i++) {
+      _cabledCollideStatic(c, c.pts[i], c.prev[i]);
+      _cabledCollideObjects(O, c, c.pts[i]);
+    }
+    for (let i = 1; i < M - 2; i++) _cabledSegmentStatic(c, i);
+  }
+  pin();
+  // Contacts: no bounce (velocity into the surface dropped) and friction along
+  // it, so the cord rests still on the table / floor instead of sliding.
+  let hangingPts = 0;
+  for (let i = 2; i < M - 2; i++) {
+    const p = c.pts[i];
+    const q = c.prev[i];
+    const axis = _cabledCollideStatic(c, p, q);
+    if (axis) {
+      q[axis] = p[axis];
+      for (const t of ["x", "y", "z"]) {
+        if (t !== axis) q[t] += (p[t] - q[t]) * cc.friction;
+      }
+    }
+    const overTable =
+      Math.abs(p.x - S.tablePos.x) < S.tableHe.x && Math.abs(p.z - S.tablePos.z) < S.tableHe.z;
+    if (!overTable && p.y < S.tableTop) hangingPts++;
+  }
+  // The cord's hanging part pulls down on the object (about half its weight;
+  // the table edge carries the rest). Zero while it lies on the table.
+  c.hangForce = hangingPts > 0 ? 0.5 * (cc.mass * hangingPts) / (M - 4) * -PHYS_GRAVITY_Y * cc.gravityScale : 0;
+  // Taut cord: it cannot stretch, so the excess pulls the object back.
+  let len = 0;
+  for (let i = 0; i < M - 1; i++) len += c.pts[i].distanceTo(c.pts[i + 1]);
+  const excess = len - c.length;
+  // A slightly taut cord can't drag a resting (asleep) object against the
+  // table's friction: only a clear stretch wakes it.
+  const minExcess = O.body.sleepState === CANNON.Body.AWAKE ? 0.002 : 0.01;
+  if (excess > c.length * minExcess) {
+    const b = O.body;
+    // On the table the cord lies on it and pulls along it (no lift). An object
+    // that swung in under the table edge is still hanging, not on the table.
+    const onTable =
+      b.position.y > S.tableTop &&
+      Math.abs(b.position.x - S.tablePos.x) < S.tableHe.x &&
+      Math.abs(b.position.z - S.tablePos.z) < S.tableHe.z;
+    let pullFrom = c.pts[M - 3];
+    if (!onTable) {
+      // Hanging: the cord pulls toward where it leaves the table (its last
+      // point still resting on the table top), i.e. up over the edge.
+      for (let i = M - 3; i >= 2; i--) {
+        const p = c.pts[i];
+        const over =
+          Math.abs(p.x - S.tablePos.x) < S.tableHe.x + c.radius * 2 &&
+          Math.abs(p.z - S.tablePos.z) < S.tableHe.z + c.radius * 2;
+        if (over && p.y >= S.tableTop - c.radius * 2) {
+          pullFrom = p;
+          break;
+        }
+      }
+    }
+    const dir = _tabV0.subVectors(pullFrom, a0);
+    if (onTable) dir.y = 0;
+    if (dir.lengthSq() < 1e-10) return;
+    dir.normalize();
+    // Off the table the cord has to catch a falling object: a firmer correction.
+    const corr = Math.min(excess * cc.pull, onTable ? 0.05 : 0.3);
+    b.position.x += dir.x * corr;
+    b.position.y += dir.y * corr;
+    b.position.z += dir.z * corr;
+    // Remove the velocity of the attach point away from the cord (impulse at
+    // the attach point, so the object also swings / turns around it).
+    const rx = a0.x - b.position.x;
+    const ry = a0.y - b.position.y;
+    const rz = a0.z - b.position.z;
+    const w = b.angularVelocity;
+    const vpx = b.velocity.x + (w.y * rz - w.z * ry);
+    const vpy = b.velocity.y + (w.z * rx - w.x * rz);
+    const vpz = b.velocity.z + (w.x * ry - w.y * rx);
+    const vn = vpx * dir.x + vpy * dir.y + vpz * dir.z;
+    if (vn < 0) {
+      const j = -vn * O.cfg.mass * 0.7;
+      _tabCV.set(dir.x * j, dir.y * j, dir.z * j);
+      _tabCV2.set(rx, ry, rz);
+      b.applyImpulse(_tabCV, _tabCV2);
+    }
+    if (b.sleepState !== CANNON.Body.AWAKE) b.wakeUp();
+  }
+}
+
+/** Cords keep apart from each other (once per step, free points only). */
+function _cabledCordsApart() {
+  for (let a = 0; a < _cabledObjects.length; a++) {
+    const A = _cabledObjects[a].cable;
+    if (!A || !A.active) continue;
+    for (let b = a + 1; b < _cabledObjects.length; b++) {
+      const B = _cabledObjects[b].cable;
+      if (!B || !B.active) continue;
+      const minD = (A.radius + B.radius) * CABLED_CORD_GAP;
+      for (let i = 2; i < A.M - 2; i++) {
+        for (let j = 2; j < B.M - 2; j++) {
+          _tabV0.subVectors(B.pts[j], A.pts[i]);
+          const d = _tabV0.length();
+          if (d >= minD || d < 1e-9) continue;
+          const push = (minD - d) / d / 2;
+          A.pts[i].addScaledVector(_tabV0, -push);
+          B.pts[j].addScaledVector(_tabV0, push);
+        }
+      }
+    }
+  }
+}
+
+/** Bends the original cable mesh along the simulated cord, ring by ring. */
+function _cabledCableDraw(O) {
+  const c = O.cable;
+  const curve = c.curve;
+  curve.needsUpdate = true;
+  for (let r = 0; r < c.N; r++) curve.getPointAt(c.ringS[r], c.c[r]);
+  _tabQ.setFromUnitVectors(c.restTan0, _tabV0.subVectors(c.c[1], c.c[0]).normalize());
+  const n0 = _tabV1.copy(c.restNormal0).applyQuaternion(_tabQ);
+  _cablePTFrames(c.c, c.tg, c.nm, c.bn, n0);
+  const pos = c.mesh.geometry.attributes.position;
+  const nrm = c.mesh.geometry.attributes.normal;
+  const pa = pos.array;
+  const na = nrm.array;
+  for (let vi = 0; vi < pos.count; vi++) {
+    const r = c.ringOfVertex[vi];
+    const o = vi * 3;
+    const N_ = c.nm[r], B_ = c.bn[r], T_ = c.tg[r], C_ = c.c[r];
+    _tabV0.set(
+      C_.x + N_.x * c.offs[o] + B_.x * c.offs[o + 1] + T_.x * c.offs[o + 2],
+      C_.y + N_.y * c.offs[o] + B_.y * c.offs[o + 1] + T_.y * c.offs[o + 2],
+      C_.z + N_.z * c.offs[o] + B_.z * c.offs[o + 1] + T_.z * c.offs[o + 2],
+    ).applyMatrix4(c.meshInv);
+    pa[o] = _tabV0.x;
+    pa[o + 1] = _tabV0.y;
+    pa[o + 2] = _tabV0.z;
+    _tabV0.set(
+      N_.x * c.nOffs[o] + B_.x * c.nOffs[o + 1] + T_.x * c.nOffs[o + 2],
+      N_.y * c.nOffs[o] + B_.y * c.nOffs[o + 1] + T_.y * c.nOffs[o + 2],
+      N_.z * c.nOffs[o] + B_.z * c.nOffs[o + 1] + T_.z * c.nOffs[o + 2],
+    ).applyMatrix3(c.normalInv).normalize();
+    na[o] = _tabV0.x;
+    na[o + 1] = _tabV0.y;
+    na[o + 2] = _tabV0.z;
+  }
+  pos.needsUpdate = true;
+  nrm.needsUpdate = true;
+}
+
+/** Kinematic stand-ins for the cars (same boxes as their physics bodies). */
+function _cabledSyncCarProxies(dt) {
+  const S = _cabled;
+  for (const ctx of arenaCars) {
+    if (!ctx.ready) continue;
+    const info = withCar(ctx, () =>
+      carPhysBody
+        ? {
+            p: carPhysBody.position,
+            q: carPhysBody.quaternion,
+            hx: carPhysHalf.x,
+            hy: carPhysHalf.y,
+            hz: carPhysHalf.z,
+          }
+        : null,
+    );
+    if (!info) continue;
+    let px = S.proxies.get(ctx);
+    if (!px) {
+      px = new CANNON.Body({ type: CANNON.Body.KINEMATIC, material: S.staticMaterial });
+      px.addShape(new CANNON.Box(new CANNON.Vec3(info.hx, info.hy, info.hz)));
+      px.position.copy(info.p);
+      S.world.addBody(px);
+      px._prev = new CANNON.Vec3().copy(info.p);
+      S.proxies.set(ctx, px);
+    }
+    // Velocity from this frame's motion, so the kinematic box pushes properly.
+    const inv = dt > 0 ? 1 / dt : 0;
+    px.velocity.set((info.p.x - px._prev.x) * inv, (info.p.y - px._prev.y) * inv, (info.p.z - px._prev.z) * inv);
+    if (px.velocity.length() > 30) px.velocity.scale(30 / px.velocity.length(), px.velocity);
+    px.position.copy(px._prev);
+    px._prev.copy(info.p);
+    px.quaternion.copy(info.q);
+    px.aabbNeedsUpdate = true;
+    // Wake an object when a car comes close.
+    for (const O of _cabledObjects) {
+      if (O.body.sleepState === CANNON.Body.AWAKE) continue;
+      const d = Math.hypot(info.p.x - O.body.position.x, info.p.z - O.body.position.z);
+      if (d < Math.hypot(O.he.x, O.he.z) + Math.hypot(info.hx, info.hz) + 0.05) O.body.wakeUp();
+    }
+  }
+}
+
+/** A car hitting an object loses speed along the hit by the mass ratio. */
+function _cabledCarResponse(O, hits) {
+  for (const [ctx, hit] of hits) {
+    if (O.contactPrev.has(ctx) || hit.closing < 0.15) continue;
+    const dv = ((1 + O.cfg.carRestitution) * O.cfg.mass * hit.closing) / (O.cfg.mass + CAR_MASS);
+    withCar(ctx, () => {
+      if (carPhysState === CAR_PHYS.DRIVING) {
+        const fx = Math.sin(carState.angle);
+        const fz = Math.cos(carState.angle);
+        const fn = fx * hit.nx + fz * hit.nz; // n: car → object
+        if (carState.speed * fn > 0) {
+          const s = Math.abs(carState.speed);
+          carState.speed = Math.sign(carState.speed) * Math.max(0, s - dv * Math.abs(fn));
+        }
+      } else if (carPhysBody && carPhysState === CAR_PHYS.IMPACT) {
+        carPhysBody.velocity.x -= hit.nx * dv;
+        carPhysBody.velocity.z -= hit.nz * dv;
+      }
+    });
+  }
+  O.contactPrev = new Set(hits.keys());
+}
+
+/** Car ↔ object contacts of the last world step (closing speed along the normal). */
+function _cabledCollectCarHits(hits) {
+  const S = _cabled;
+  for (const eq of S.world.contacts) {
+    for (const O of _cabledObjects) {
+      const isA = eq.bi === O.body;
+      if (!isA && eq.bj !== O.body) continue;
+      const other = isA ? eq.bj : eq.bi;
+      for (const [ctx, px] of S.proxies) {
+        if (px !== other) continue;
+        // eq.ni points from bi to bj: make it car → object.
+        const s = isA ? -1 : 1;
+        const nx = eq.ni.x * s;
+        const nz = eq.ni.z * s;
+        const closing = (px.velocity.x - O.body.velocity.x) * nx + (px.velocity.z - O.body.velocity.z) * nz;
+        const h = hits.get(O).get(ctx);
+        if (!h || closing > h.closing) hits.get(O).set(ctx, { closing, nx, nz });
+      }
+    }
+  }
+}
+
+function updateCabledObjects(dt) {
+  const S = _cabled;
+  if (!S || !_cabledObjects.length) return;
+  const frameDt = Math.min(dt, 0.05);
+  _cabledSyncCarProxies(frameDt);
+  const hits = new Map(_cabledObjects.map((O) => [O, new Map()]));
+  S.acc += frameDt;
+  while (S.acc >= CABLED_PHYS_DT) {
+    S.acc -= CABLED_PHYS_DT;
+    for (let sub = 0; sub < CABLED_WORLD_SUBSTEPS; sub++) {
+      for (const O of _cabledObjects) {
+        if (O.cable && O.cable.hangForce > 0 && O.body.sleepState === CANNON.Body.AWAKE) {
+          const a0 = _cabledAttachWorld(O, 0, new THREE.Vector3());
+          _tabCV.set(0, -O.cable.hangForce, 0);
+          _tabCV2.set(a0.x - O.body.position.x, a0.y - O.body.position.y, a0.z - O.body.position.z);
+          O.body.applyForce(_tabCV, _tabCV2);
+        }
+      }
+      S.world.step(CABLED_PHYS_DT / CABLED_WORLD_SUBSTEPS);
+      _cabledCollectCarHits(hits);
+    }
+    // Cords apart first: each cord's own step ends with its collisions.
+    _cabledCordsApart();
+    for (const O of _cabledObjects) {
+      if (O.body.sleepState === CANNON.Body.AWAKE && O.cable) O.cable.active = true;
+      if (O.cable && O.cable.active) _cabledCableStep(O, CABLED_PHYS_DT);
+      // Speed caps (after the cord's pull too): no unrealistic launches.
+      const v = O.body.velocity;
+      const sp = v.length();
+      if (sp > O.cfg.maxSpeed) v.scale(O.cfg.maxSpeed / sp, v);
+      const w = O.body.angularVelocity;
+      const ws = w.length();
+      if (ws > O.cfg.maxSpin) w.scale(O.cfg.maxSpin / ws, w);
+      // The table / floor have the last word (after the cord's pull).
+      if (O.body.sleepState === CANNON.Body.AWAKE) _cabledDepenetrate(O);
+    }
+  }
+  for (const O of _cabledObjects) {
+    _cabledCarResponse(O, hits.get(O));
+    // Visual object follows the body (parts keep their offsets inside it).
+    const b = O.body;
+    _tabQ.set(b.quaternion.x, b.quaternion.y, b.quaternion.z, b.quaternion.w);
+    O.group.position.copy(O.offset).applyQuaternion(_tabQ).add(_tabV0.set(b.position.x, b.position.y, b.position.z));
+    O.group.quaternion.copy(_tabQ);
+    if (O.cable && O.cable.active) _cabledCableDraw(O);
+  }
+}
+
 const FREE_CABLE_HEAD_NAMES = [
   "freeCableYellow",
   "freeCableGreen",
@@ -6622,6 +8007,7 @@ function loadMeetingRoom() {
         attachScreenLights(_model);
         attachTablePlateKeyLight(_model);
         attachTabletSideLight(_model);
+        setupCabledObjects(_model);
         repeatWallPatternAlongX(_model, "wallRightPattern", "wallRight");
         repeatWallPatternAlongX(_model, "wallLeftPattern", "wallLeft");
         repeatWallPatternAlongZ(_model, "wallFrontPattern", "wallFront");
@@ -7805,6 +9191,38 @@ function setupArenaScreens(root) {
   }
 }
 
+// READY / SET / GO! use Wix Madefor Display (Google Fonts; heaviest weight is
+// 800). Loaded once up front; the countdown falls back to Arial Black until it
+// is ready, and any text already on a screen is redrawn when it arrives.
+const COUNTDOWN_FONT_FAMILY = "Wix Madefor Display";
+const COUNTDOWN_FONT_WEIGHT = 800;
+const COUNTDOWN_FONT = `${COUNTDOWN_FONT_WEIGHT} 250px "${COUNTDOWN_FONT_FAMILY}", "Arial Black", Impact, sans-serif`;
+(function loadCountdownFont() {
+  if (typeof document === "undefined" || !document.fonts) return;
+  const redraw = () => {
+    for (const key of ["left", "right"]) {
+      const scr = typeof _screens !== "undefined" ? _screens[key] : null;
+      if (scr && scr.mode === "text") _drawScreenText(scr);
+    }
+  };
+  const load = () =>
+    document.fonts
+      .load(`${COUNTDOWN_FONT_WEIGHT} 250px "${COUNTDOWN_FONT_FAMILY}"`, "READY SET GO!")
+      .then(redraw)
+      .catch(() => {});
+  let link = document.querySelector("link[data-countdown-font]");
+  if (!link) {
+    link = document.createElement("link");
+    link.rel = "stylesheet";
+    link.href = "https://fonts.googleapis.com/css2?family=Wix+Madefor+Display:wght@800&display=swap";
+    link.dataset.countdownFont = "1";
+    link.addEventListener("load", load);
+    document.head.appendChild(link);
+  } else {
+    load();
+  }
+})();
+
 function _drawScreenText(s) {
   const c = s.ctx2d;
   const w = SCREEN_CANVAS_W;
@@ -7838,15 +9256,22 @@ function _drawScreenText(s) {
   c.scale(scale, scale);
   c.textAlign = "center";
   c.textBaseline = "middle";
-  c.font = '900 250px "Arial Black", Impact, "Helvetica Neue", sans-serif';
+  c.font = COUNTDOWN_FONT;
+  const label = String(s.text).toUpperCase();
+  // 1) Coloured glow.
   c.shadowColor = s.color;
   c.shadowBlur = 70;
   c.fillStyle = s.color;
-  c.fillText(s.text, 0, 0);
+  c.fillText(label, 0, 0);
   c.shadowBlur = 0;
-  c.lineWidth = 6;
+  // 2) White outline, then 3) the letters filled again on top: the font's
+  // letters are built from overlapping shapes, so a stroke drawn over the fill
+  // also traced the seams inside them. Filling last leaves only the outer edge.
+  c.lineJoin = "round";
+  c.lineWidth = 12;
   c.strokeStyle = "rgba(255,255,255,0.85)";
-  c.strokeText(s.text, 0, 0);
+  c.strokeText(label, 0, 0);
+  c.fillText(label, 0, 0);
   c.restore();
   s.tex.needsUpdate = true;
 }
@@ -8654,6 +10079,355 @@ function updateMeetingRoomAirPlane(dt) {
 }
 
 // ---------------------------------------------------------------------------
+// Paper airplane tail trail: small glowing green dust that drops from the
+// plane's tail in random bursts and floats down. The plane is one mesh with no
+// tail part, so the tail point is the +X end of its bounding box (its local +X
+// points backward: the wide trailing edge), on the centre line, taken to world
+// space every frame. Particles live in world space: a small push backward from
+// the tail, then soft gravity with air drag and a slow sideways drift. Most fade
+// out in the air; some (the "landers") last until they reach the table top
+// (measured from tablePlate at runtime), rest there a moment and fade out —
+// over the floor instead they fade before getting low.
+// ---------------------------------------------------------------------------
+const PLANE_TRAIL_MAX = 600; // particle pool size
+/** Random bursts: pause between bursts (seconds) and particles per burst. */
+const PLANE_TRAIL_BURST_GAP_MIN = 0.3;
+const PLANE_TRAIL_BURST_GAP_MAX = 2;
+const PLANE_TRAIL_BURST_MIN = 8;
+const PLANE_TRAIL_BURST_MAX = 30;
+/** A burst streams out over this long (seconds, random per burst). */
+const PLANE_TRAIL_BURST_DURATION_MIN = 0.5;
+const PLANE_TRAIL_BURST_DURATION_MAX = 1.5;
+const PLANE_TRAIL_BURST_RATE_WOBBLE = 0.4; // ± emission-rate variation within a burst
+const PLANE_TRAIL_SINGLE_CHANCE = 0.07; // chance a "burst" is one lone particle
+/** Particle size range, as fractions of the plane's length. */
+const PLANE_TRAIL_SIZE_MIN = 0.035;
+const PLANE_TRAIL_SIZE_MAX = 0.085;
+/** Lifetime of particles that fade in the air (seconds). */
+const PLANE_TRAIL_LIFE_MIN = 0.8;
+const PLANE_TRAIL_LIFE_MAX = 2.8;
+/** Initial push backward from the tail, in plane lengths per second (min..max). */
+const PLANE_TRAIL_PUSH_MIN = 0.08;
+const PLANE_TRAIL_PUSH_MAX = 0.4;
+const PLANE_TRAIL_CONE = 0.5; // half-angle of the spread cone behind the tail (radians)
+/** Soft fall: gravity (world units / s²), air drag (per second; terminal speed = g / drag). */
+const PLANE_TRAIL_GRAVITY = 0.9;
+const PLANE_TRAIL_DRAG = 1.6;
+const PLANE_TRAIL_FALL_VARIATION = 0.4; // ± per-particle gravity variation
+const PLANE_TRAIL_SIDE_DRIFT = 0.12; // slow sideways drift (world units / s²)
+/** Share of particles that last until they reach the table. */
+const PLANE_TRAIL_LAND_SHARE = 0.34; // about half fall past the table's edge: ~15–25% actually land
+const PLANE_TRAIL_LAND_HOLD = 0.45; // seconds resting on the table before fading
+const PLANE_TRAIL_LAND_FADE = 0.7; // seconds to fade out on the table
+const PLANE_TRAIL_LAND_LIFT = 0.004; // rests this far above the table top
+const PLANE_TRAIL_OFF_TABLE_FADE = 0.35; // landers past the table edge fade this fast
+const PLANE_TRAIL_COLOR = 0x39ff6a; // glowing green
+const PLANE_TRAIL_CORE_COLOR = 0xd8ffe4; // brighter, whiter centre
+const PLANE_TRAIL_GLOW = 1.6; // overall glow intensity
+const PLANE_TRAIL_BRIGHTNESS_MIN = 0.65; // per-particle random brightness (× glow)
+
+let _planeTrail = null;
+const _planeTailWorld = new THREE.Vector3();
+const _planeBackWorld = new THREE.Vector3();
+const _planeTrailVp = new THREE.Vector2();
+
+function createAirPlaneTrail() {
+  const P = PLANE_TRAIL_MAX;
+  const geo = new THREE.BufferGeometry();
+  const attr = (n, size, fill = 0) => {
+    const a = new THREE.BufferAttribute(new Float32Array(P * size).fill(fill), size);
+    a.setUsage(THREE.DynamicDrawUsage);
+    geo.setAttribute(n, a);
+  };
+  attr("position", 3);
+  attr("aBirth", 1, -1e6);
+  attr("aFadeStart", 1, -1e6); // fade-out runs from aFadeStart to aEnd (time)
+  attr("aEnd", 1, -1e6);
+  attr("aSize", 1);
+  attr("aBright", 1);
+  const mat = new THREE.ShaderMaterial({
+    uniforms: {
+      uTime: { value: 0 },
+      uHalfHeight: { value: 400 },
+      uColor: { value: new THREE.Color(PLANE_TRAIL_COLOR) },
+      uCore: { value: new THREE.Color(PLANE_TRAIL_CORE_COLOR) },
+      uGlow: { value: PLANE_TRAIL_GLOW },
+    },
+    vertexShader: `
+      attribute float aBirth;
+      attribute float aFadeStart;
+      attribute float aEnd;
+      attribute float aSize;
+      attribute float aBright;
+      uniform float uTime;
+      uniform float uHalfHeight;
+      varying float vAlpha;
+      void main() {
+        if (uTime < aBirth || uTime > aEnd) { gl_Position = vec4(0.0, 0.0, -2.0, 1.0); gl_PointSize = 0.0; vAlpha = 0.0; return; }
+        float fadeIn = smoothstep(0.0, 0.12, uTime - aBirth);
+        float out_ = clamp((uTime - aFadeStart) / max(0.001, aEnd - aFadeStart), 0.0, 1.0);
+        float fadeOut = 1.0 - out_ * out_ * (3.0 - 2.0 * out_);
+        vAlpha = fadeIn * fadeOut * aBright;
+        vec4 mv = modelViewMatrix * vec4(position, 1.0);
+        gl_Position = projectionMatrix * mv;
+        // Shrinks while it fades; world size → pixels with the rendering camera / target.
+        float shrink = 1.0 - 0.6 * out_;
+        gl_PointSize = aSize * shrink * projectionMatrix[1][1] * uHalfHeight / max(0.05, -mv.z);
+      }
+    `,
+    fragmentShader: `
+      uniform vec3 uColor;
+      uniform vec3 uCore;
+      uniform float uGlow;
+      varying float vAlpha;
+      void main() {
+        // Soft round glow: gaussian falloff reaching zero at the edge (no rim, no square).
+        vec2 d = gl_PointCoord - 0.5;
+        float r2 = dot(d, d) * 4.0; // 0 at the centre, 1 at the edge
+        float edge = 1.0 - smoothstep(0.35, 1.0, r2);
+        float glow = exp(-r2 * 4.0) * edge;
+        float centre = exp(-r2 * 14.0); // slightly brighter middle
+        float a = (glow * 0.75 + centre * 0.5) * vAlpha * uGlow;
+        if (a < 0.004) discard;
+        vec3 col = mix(uColor, uCore, centre / max(0.001, glow + centre));
+        gl_FragColor = vec4(col * a, a);
+      }
+    `,
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    toneMapped: false,
+  });
+  const points = new THREE.Points(geo, mat);
+  points.name = "airPlaneTrailParticles";
+  points.frustumCulled = false; // positions change in place: no stale culling
+  points.renderOrder = 5;
+  points.onBeforeRender = (r) => {
+    const rt = r.getRenderTarget();
+    const h = rt ? rt.height : r.getDrawingBufferSize(_planeTrailVp).y;
+    mat.uniforms.uHalfHeight.value = h * 0.5;
+  };
+  scene.add(points);
+  _planeTrail = {
+    points,
+    time: 0,
+    next: 0,
+    vel: new Float32Array(P * 3),
+    drift: new Float32Array(P * 2), // sideways drift acceleration (x, z)
+    grav: new Float32Array(P), // per-particle gravity
+    lander: new Uint8Array(P), // 1: lasts until the table, 2: landed
+    prevTail: new THREE.Vector3(),
+    hasPrev: false,
+    burstT: 0.4, // pause left before the next burst
+    burstLeft: 0, // particles still to come in the current burst
+    burstRate: 0,
+    burstAcc: 0,
+    burstAge: 0,
+    burstPhase: 0,
+    tailLocal: null,
+    length: 1,
+    table: null,
+  };
+}
+
+/** The plane's tail point and backward direction in world space. */
+function _airPlaneTail(T) {
+  if (!T.tailLocal) {
+    // Bounding box of the plane in its own (group) frame: +X end = tail.
+    airPlaneModel.updateMatrixWorld(true);
+    const inv = new THREE.Matrix4().copy(airPlaneModel.matrixWorld).invert();
+    const box = new THREE.Box3();
+    const v = new THREE.Vector3();
+    airPlaneModel.traverse((o) => {
+      if (!o.isMesh) return;
+      const p = o.geometry.attributes.position;
+      for (let i = 0; i < p.count; i++) {
+        v.fromBufferAttribute(p, i).applyMatrix4(o.matrixWorld).applyMatrix4(inv);
+        box.expandByPoint(v);
+      }
+    });
+    T.tailLocal = new THREE.Vector3(box.max.x, (box.min.y + box.max.y) * 0.5, (box.min.z + box.max.z) * 0.5);
+    T.lengthLocal = box.max.x - box.min.x;
+  }
+  _planeTailWorld.copy(T.tailLocal);
+  airPlaneModel.localToWorld(_planeTailWorld);
+  _planeBackWorld.set(1, 0, 0).transformDirection(airPlaneModel.matrixWorld);
+  T.length = T.lengthLocal * airPlaneModel.scale.x;
+}
+
+/** Table top height and area (from tablePlate's bounding box), measured once. */
+function _airPlaneTrailTable(T) {
+  if (T.table) return T.table;
+  const mesh = _model && _model.getObjectByName("tablePlate");
+  if (!mesh) return null;
+  mesh.updateMatrixWorld(true);
+  const box = new THREE.Box3().setFromObject(mesh);
+  T.table = { top: box.max.y, minX: box.min.x, maxX: box.max.x, minZ: box.min.z, maxZ: box.max.z };
+  return T.table;
+}
+
+function _emitAirPlaneTrailParticle(T) {
+  const i = T.next;
+  T.next = (T.next + 1) % PLANE_TRAIL_MAX;
+  const g = T.points.geometry;
+  const L = T.length;
+  const pos = g.attributes.position.array;
+  pos[i * 3] = _planeTailWorld.x + (Math.random() - 0.5) * L * 0.06;
+  pos[i * 3 + 1] = _planeTailWorld.y + (Math.random() - 0.5) * L * 0.06;
+  pos[i * 3 + 2] = _planeTailWorld.z + (Math.random() - 0.5) * L * 0.06;
+  // Initial push: backward, randomly tilted inside a small cone.
+  const b = _planeBackWorld;
+  let ax = -b.z;
+  let az = b.x;
+  const al = Math.hypot(ax, az) || 1;
+  ax /= al;
+  az /= al;
+  const ux = b.y * az;
+  const uy = b.z * ax - b.x * az;
+  const uz = -b.y * ax;
+  const ang = Math.random() * Math.PI * 2;
+  const spread = Math.tan(PLANE_TRAIL_CONE) * Math.sqrt(Math.random());
+  const sa = Math.cos(ang) * spread;
+  const sb = Math.sin(ang) * spread;
+  const dx = b.x + ax * sa + ux * sb;
+  const dy = b.y + uy * sb;
+  const dz = b.z + az * sa + uz * sb;
+  const dl = Math.hypot(dx, dy, dz) || 1;
+  const speed = L * (PLANE_TRAIL_PUSH_MIN + Math.random() * (PLANE_TRAIL_PUSH_MAX - PLANE_TRAIL_PUSH_MIN));
+  T.vel[i * 3] = (dx / dl) * speed;
+  T.vel[i * 3 + 1] = (dy / dl) * speed;
+  T.vel[i * 3 + 2] = (dz / dl) * speed;
+  const da = Math.random() * Math.PI * 2;
+  T.drift[i * 2] = Math.cos(da) * PLANE_TRAIL_SIDE_DRIFT * (0.4 + Math.random() * 0.6);
+  T.drift[i * 2 + 1] = Math.sin(da) * PLANE_TRAIL_SIDE_DRIFT * (0.4 + Math.random() * 0.6);
+  // Landers are the ones that fall the fastest (they reach the lowest).
+  const lander = Math.random() < PLANE_TRAIL_LAND_SHARE;
+  const f = lander
+    ? 1 + Math.random() * PLANE_TRAIL_FALL_VARIATION
+    : 1 + (Math.random() * 2 - 1) * PLANE_TRAIL_FALL_VARIATION;
+  T.grav[i] = PLANE_TRAIL_GRAVITY * f;
+  T.lander[i] = lander ? 1 : 0;
+  g.attributes.aBirth.array[i] = T.time;
+  if (lander) {
+    // No fade until it lands (or leaves the table's area low down).
+    g.attributes.aFadeStart.array[i] = T.time + 1e5;
+    g.attributes.aEnd.array[i] = T.time + 2e5;
+  } else {
+    const life = PLANE_TRAIL_LIFE_MIN + Math.random() * (PLANE_TRAIL_LIFE_MAX - PLANE_TRAIL_LIFE_MIN);
+    g.attributes.aFadeStart.array[i] = T.time + life * 0.35;
+    g.attributes.aEnd.array[i] = T.time + life;
+  }
+  g.attributes.aSize.array[i] = L * (PLANE_TRAIL_SIZE_MIN + Math.random() * (PLANE_TRAIL_SIZE_MAX - PLANE_TRAIL_SIZE_MIN));
+  g.attributes.aBright.array[i] = PLANE_TRAIL_BRIGHTNESS_MIN + Math.random() * (1 - PLANE_TRAIL_BRIGHTNESS_MIN);
+  for (const n of ["aBirth", "aFadeStart", "aEnd", "aSize", "aBright"]) g.attributes[n].needsUpdate = true;
+}
+
+/** Per frame (after the plane moved): random bursts from the tail, fall + land. */
+function updateAirPlaneTrail(dt) {
+  if (!airPlaneModel) return;
+  if (!_planeTrail) createAirPlaneTrail();
+  const T = _planeTrail;
+  T.time += dt;
+  T.points.material.uniforms.uTime.value = T.time;
+  const table = _airPlaneTrailTable(T);
+  const g = T.points.geometry;
+  const pos = g.attributes.position.array;
+  const birth = g.attributes.aBirth.array;
+  const fadeStart = g.attributes.aFadeStart.array;
+  const end = g.attributes.aEnd.array;
+  const drag = Math.exp(-PLANE_TRAIL_DRAG * dt);
+  let alive = false;
+  let fadeChanged = false;
+  for (let i = 0; i < PLANE_TRAIL_MAX; i++) {
+    if (T.time > end[i] || T.time < birth[i]) continue;
+    alive = true;
+    if (T.lander[i] === 2) continue; // resting on the table
+    const k3 = i * 3;
+    // Soft fall: gravity + slow sideways drift, damped by air drag.
+    T.vel[k3] = (T.vel[k3] + T.drift[i * 2] * dt) * drag;
+    T.vel[k3 + 1] = (T.vel[k3 + 1] - T.grav[i] * dt) * drag;
+    T.vel[k3 + 2] = (T.vel[k3 + 2] + T.drift[i * 2 + 1] * dt) * drag;
+    pos[k3] += T.vel[k3] * dt;
+    pos[k3 + 1] += T.vel[k3 + 1] * dt;
+    pos[k3 + 2] += T.vel[k3 + 2] * dt;
+    if (!table) continue;
+    const overTable =
+      pos[k3] >= table.minX && pos[k3] <= table.maxX && pos[k3 + 2] >= table.minZ && pos[k3 + 2] <= table.maxZ;
+    const floorY = table.top + PLANE_TRAIL_LAND_LIFT;
+    if (overTable && pos[k3 + 1] <= floorY) {
+      // Reached the table: never through it. Landers rest, then fade.
+      pos[k3 + 1] = floorY;
+      T.vel[k3] = T.vel[k3 + 1] = T.vel[k3 + 2] = 0;
+      if (T.lander[i] === 1) {
+        T.lander[i] = 2;
+        fadeStart[i] = T.time + PLANE_TRAIL_LAND_HOLD;
+        end[i] = fadeStart[i] + PLANE_TRAIL_LAND_FADE;
+      } else {
+        end[i] = Math.min(end[i], T.time + 0.25);
+        fadeStart[i] = Math.min(fadeStart[i], T.time);
+      }
+      fadeChanged = true;
+    } else if (!overTable && pos[k3 + 1] < table.top + T.length * 0.5 && end[i] > T.time + PLANE_TRAIL_OFF_TABLE_FADE) {
+      // Past the table's edge and getting low: fade out well above the floor.
+      T.lander[i] = 0;
+      fadeStart[i] = Math.min(fadeStart[i], T.time);
+      end[i] = T.time + PLANE_TRAIL_OFF_TABLE_FADE;
+      fadeChanged = true;
+    }
+  }
+  if (alive) g.attributes.position.needsUpdate = true;
+  if (fadeChanged) {
+    g.attributes.aFadeStart.needsUpdate = true;
+    g.attributes.aEnd.needsUpdate = true;
+  }
+
+  airPlaneModel.updateMatrixWorld(true);
+  _airPlaneTail(T);
+  const moving = T.hasPrev && T.prevTail.distanceTo(_planeTailWorld) > 1e-5;
+  T.prevTail.copy(_planeTailWorld);
+  T.hasPrev = true;
+  if (!moving) return; // the plane stopped: no new particles
+  // Random bursts (timers on dt): a pause, then a short stream of dust from the
+  // tail (its particles spread over the burst's duration at a wobbling rate),
+  // or now and then a single lone particle.
+  if (T.burstLeft > 0) {
+    T.burstAge += dt;
+    const wobble = 1 + PLANE_TRAIL_BURST_RATE_WOBBLE * Math.sin(T.burstPhase + T.burstAge * 9.0) * Math.sin(T.burstPhase * 1.7 + T.burstAge * 4.3);
+    T.burstAcc += T.burstRate * Math.max(0.2, wobble) * dt;
+    while (T.burstAcc >= 1 && T.burstLeft > 0) {
+      T.burstAcc -= 1;
+      T.burstLeft--;
+      _emitAirPlaneTrailParticle(T);
+    }
+    // Rate wobble can leave a remainder at the end: finish the burst on time.
+    if (T.burstAge >= T.burstDuration && T.burstLeft > 0) {
+      while (T.burstLeft > 0) {
+        T.burstLeft--;
+        _emitAirPlaneTrailParticle(T);
+      }
+    }
+    if (T.burstLeft === 0) {
+      T.burstT = PLANE_TRAIL_BURST_GAP_MIN + Math.random() * (PLANE_TRAIL_BURST_GAP_MAX - PLANE_TRAIL_BURST_GAP_MIN);
+    }
+    return;
+  }
+  T.burstT -= dt;
+  if (T.burstT > 0) return;
+  if (Math.random() < PLANE_TRAIL_SINGLE_CHANCE) {
+    _emitAirPlaneTrailParticle(T);
+    T.burstT = PLANE_TRAIL_BURST_GAP_MIN + Math.random() * (PLANE_TRAIL_BURST_GAP_MAX - PLANE_TRAIL_BURST_GAP_MIN);
+    return;
+  }
+  const n = PLANE_TRAIL_BURST_MIN + Math.floor(Math.random() * (PLANE_TRAIL_BURST_MAX - PLANE_TRAIL_BURST_MIN + 1));
+  T.burstDuration = PLANE_TRAIL_BURST_DURATION_MIN + Math.random() * (PLANE_TRAIL_BURST_DURATION_MAX - PLANE_TRAIL_BURST_DURATION_MIN);
+  T.burstLeft = n;
+  T.burstRate = n / T.burstDuration;
+  T.burstAcc = 1; // the first particle comes out right away
+  T.burstAge = 0;
+  T.burstPhase = Math.random() * Math.PI * 2;
+}
+
+// ---------------------------------------------------------------------------
 // Collision camera shake (render-only offset; never touches the orbit)
 // ---------------------------------------------------------------------------
 /** Closing speeds below this are resting contact / scraping: no shake. */
@@ -8888,6 +10662,8 @@ function animate() {
   updateArenaCable(dt);
   updateArenaCarEffects(dt);
   updateMeetingRoomAirPlane(dt);
+  updateAirPlaneTrail(dt);
+  updateCabledObjects(dt);
   if (_fireSensorLightMat) {
     const pulse =
       0.16 + 0.84 * (0.5 + 0.5 * Math.sin(clock.elapsedTime * 1.65));
