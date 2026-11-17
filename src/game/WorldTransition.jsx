@@ -21,7 +21,30 @@ const TRANSITION_STRIPS = Array.from({ length: 120 }, (_, index) => {
   };
 });
 
-export default function WorldTransition({ onComplete }) {
+/** Level description under the car: the game's loader status style (dark pill, white caps). */
+const descriptionStyle = {
+  position: "absolute",
+  left: "50%",
+  bottom: "clamp(28px, 10vh, 88px)",
+  transform: "translateX(-50%)",
+  zIndex: 2,
+  width: "max-content",
+  maxWidth: "min(34rem, calc(100% - 32px))",
+  boxSizing: "border-box",
+  margin: 0,
+  padding: "0.6rem 0.9rem",
+  color: "#fff",
+  background: "rgba(8, 8, 8, 0.8)",
+  borderRadius: "8px",
+  font: "800 13px/1.45 system-ui, sans-serif",
+  letterSpacing: "0.055em",
+  textTransform: "uppercase",
+  textAlign: "center",
+  pointerEvents: "none",
+  animation: "world-transition-caption-in 600ms ease 200ms both",
+};
+
+export default function WorldTransition({ onComplete, description }) {
   const stageRef = useRef(null);
   const onCompleteRef = useRef(onComplete);
   onCompleteRef.current = onComplete;
@@ -453,6 +476,12 @@ export default function WorldTransition({ onComplete }) {
         ))}
       </div>
       <div ref={stageRef} className="world-transition-car" />
+      {description && (
+        <>
+          <style>{`@keyframes world-transition-caption-in { from { opacity: 0; transform: translate(-50%, 8px); } to { opacity: 1; transform: translate(-50%, 0); } }`}</style>
+          <p style={descriptionStyle}>{description}</p>
+        </>
+      )}
     </section>
   );
 }

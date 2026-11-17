@@ -5025,15 +5025,27 @@ let _worldSwitched = false;
       //   3. track run — fast and low along the track's centre line through a turn
       //   4. arrival — back over the infield onto the gameplay camera
       // The race is held meanwhile (phase "intro": no input, AI paused, no timer /
-      // laps, HUD hidden). A click or any key skips straight to the race view. Every shot is built from the race track and the cars' positions.
+      // laps, HUD hidden). It can't be skipped, and input does nothing while it
+      // plays. Every shot is built from the race track and the cars' positions.
       // ---------------------------------------------------------------------------
-      /** Shots, in order (seconds). `blendIn` > 0 glides in from the previous shot; 0 = a cut. */
+      /**
+       * Shots, in order (seconds). `blendIn` > 0 glides in from the previous shot;
+       * 0 = a cut. `fade`: the cut is hidden by a short fade to black (out at the
+       * end of the previous shot, the camera moves while the screen is black, in
+       * at the start of this one). The arrival is one continuous move.
+       */
       const KITCHEN_INTRO_SHOTS = [
-        { name: "overview", sec: 2.2, blendIn: 0 },
-        { name: "carBeauty", sec: 2.2, blendIn: 1.6 }, // glides down onto the car
-        { name: "trackRun", sec: 3.2, blendIn: 0 }, // the one cut
-        { name: "arrival", sec: 2.4, blendIn: 0 }, // continues from the run's last pose
+        { name: "overview", sec: 3.6, blendIn: 0 },
+        { name: "carBeauty", sec: 3.6, blendIn: 0, fade: true },
+        { name: "trackRun", sec: 3.4, blendIn: 0, fade: true },
+        { name: "arrival", sec: 3.2, blendIn: 0 }, // continues from the run's last pose
       ];
+      /** Fade to black between shots (seconds): out, fully black, in. Within the shots' times. */
+      const KITCHEN_INTRO_FADE_OUT_SEC = 0.35;
+      const KITCHEN_INTRO_FADE_HOLD_SEC = 0.06;
+      const KITCHEN_INTRO_FADE_IN_SEC = 0.38;
+      /** Track run start: 0 = fast out of the cut (as before), 1 = fully eased in. */
+      const KITCHEN_INTRO_RUN_EASE_IN = 0.6;
       /** 1. Overview: along the table (from its left half toward the grid), descending. */
       const KITCHEN_INTRO_OVERVIEW = {
         alongFrom: -28, // along the start straight from the track centre
@@ -5083,11 +5095,12 @@ let _worldSwitched = false;
       const KITCHEN_INTRO_LETTERBOX_OUT_SEC = 0.7;
       const KITCHEN_INTRO_TOTAL_SEC = KITCHEN_INTRO_SHOTS.reduce((t, s) => t + s.sec, 0);
       /** Arrow wave before the ramp during the overview (the ramp is in its view). */
-      const KITCHEN_INTRO_RAMP_WAVE_AT_SEC = 1.0;
+      const KITCHEN_INTRO_RAMP_WAVE_AT_SEC = KITCHEN_INTRO_SHOTS[0].sec * 0.45;
       /** Arrow wave on the run's turn: starts this long before the camera reaches the turn. */
       const KITCHEN_INTRO_RUN_WAVE_LEAD = 0.3;
       /** One arrow wave along both turns as the camera arrives on the gameplay view. */
-      const KITCHEN_INTRO_WAVE_AT_SEC = KITCHEN_INTRO_TOTAL_SEC - 0.9;
+      const KITCHEN_INTRO_WAVE_AT_SEC =
+        KITCHEN_INTRO_TOTAL_SEC - KITCHEN_INTRO_SHOTS[KITCHEN_INTRO_SHOTS.length - 1].sec * 0.375;
 
       const _kIntro = {
         state: "pending", // pending (under the loader) | playing | done
@@ -5214,7 +5227,10 @@ let _worldSwitched = false;
           o.roll = 0;
         } else if (name === "trackRun") {
           const W = KITCHEN_INTRO_RUN;
-          const e = Math.sin((Math.PI / 2) * u) * R.runFracEnd; // fast in (out of the cut), slowing through the turn to rest
+          // Quick along the straight, slowing through the turn to rest; eased in
+          // at the start (it comes out of a fade).
+          const eFast = Math.sin((Math.PI / 2) * u);
+          const e = _kIntroLerp(eFast, _kIntroEaseSine(u), KITCHEN_INTRO_RUN_EASE_IN * (1 - u)) * R.runFracEnd;
           const la = Math.min(1, e + W.lookAhead / R.runLen);
           R.run.getPointAt(e, _kIntroV);
           R.run.getPointAt(la, _kIntroV2);
@@ -5283,21 +5299,15 @@ let _worldSwitched = false;
         controls.enabled = false;
       }
 
-      /** Dark mode, race camera, HUD and the countdown (end of the intro, or a skip). */
+      /** Race camera, HUD and the countdown (end of the intro). */
       function finishKitchenIntro() {
         if (_kIntro.state === "done") return;
         const wasPlaying = _kIntro.state === "playing";
         _kIntro.state = "done";
-        if (wasPlaying) {
-          controls.enabled = _kIntro.controlsWereEnabled;
-          // Skipped: stop the intro's waves (lit arrows fade out); normal triggers take over.
-          if (_kIntro.t < KITCHEN_INTRO_TOTAL_SEC && _raceArrows) {
-            for (const U of _raceArrows.turns) {
-              U.waveT = -1;
-              U.cooldown = 0;
-            }
-          }
-        }
+        updateKitchenIntroFade(); // no fade left over
+        if (wasPlaying) controls.enabled = _kIntro.controlsWereEnabled;
+        // Nothing pressed during the intro carries into the race.
+        for (const k in keys) if (typeof keys[k] === "boolean") keys[k] = false;
         if (_racePhase === "intro") {
           _racePhase = "countdown";
           _raceTimer = RACE_COUNTDOWN_SEC;
@@ -5305,28 +5315,17 @@ let _worldSwitched = false;
         }
       }
 
-      // Skip: a click or any key (modifiers alone don't count). The skipping
-      // event stops here, so it doesn't also act as a game key.
-      window.addEventListener(
-        "keydown",
-        (e) => {
-          if (_kIntro.state !== "playing" || !_kitchenSceneRendering) return;
-          if (["Shift", "Control", "Alt", "Meta"].includes(e.key)) return;
-          e.preventDefault();
-          e.stopImmediatePropagation();
-          finishKitchenIntro();
-        },
-        true,
-      );
-      window.addEventListener(
-        "pointerdown",
-        (e) => {
-          if (_kIntro.state !== "playing" || !_kitchenSceneRendering) return;
-          e.stopImmediatePropagation();
-          finishKitchenIntro();
-        },
-        true,
-      );
+      // During the intro (and under the loader before it) input does nothing:
+      // keys and clicks stop here, before any game handler (driving, cameras,
+      // light modes, level keys) sees them. Browser shortcuts still work.
+      const _blockKitchenIntroInput = (e) => {
+        if (_kIntro.state === "done" || !_kitchenSceneRendering) return;
+        e.stopImmediatePropagation();
+        if (e.type === "keydown" && !e.metaKey && !e.ctrlKey && !e.altKey) e.preventDefault();
+      };
+      for (const type of ["keydown", "pointerdown", "wheel"]) {
+        window.addEventListener(type, _blockKitchenIntroInput, { capture: true, passive: false });
+      }
 
       /** The intro's arrow waves, timed with the shots. */
       function _kIntroWaves(t) {
@@ -5399,6 +5398,56 @@ let _worldSwitched = false;
         }
       }
 
+      /** Fade-to-black level (0..1) at intro time t: around each `fade` cut. */
+      function _kIntroFadeAt(t) {
+        let start = 0;
+        let a = 0;
+        for (let i = 0; i < KITCHEN_INTRO_SHOTS.length; i++) {
+          const sh = KITCHEN_INTRO_SHOTS[i];
+          if (i > 0 && sh.fade) {
+            const cut = start; // the camera switches shots here
+            const blackFrom = cut - KITCHEN_INTRO_FADE_HOLD_SEC / 2;
+            const blackTo = cut + KITCHEN_INTRO_FADE_HOLD_SEC / 2;
+            let k = 0;
+            if (t >= blackFrom && t <= blackTo) k = 1;
+            else if (t < blackFrom && t > blackFrom - KITCHEN_INTRO_FADE_OUT_SEC) k = 1 - (blackFrom - t) / KITCHEN_INTRO_FADE_OUT_SEC;
+            else if (t > blackTo && t < blackTo + KITCHEN_INTRO_FADE_IN_SEC) k = 1 - (t - blackTo) / KITCHEN_INTRO_FADE_IN_SEC;
+            a = Math.max(a, _kIntroEaseSine(Math.max(0, Math.min(1, k))));
+          }
+          start += sh.sec;
+        }
+        return a;
+      }
+
+      /** Full-screen black overlay for the fades (under the letterbox bars); gone once the intro ends. */
+      function updateKitchenIntroFade() {
+        const playing = _kIntro.state === "playing";
+        const a = playing ? _kIntroFadeAt(_kIntro.t) : 0;
+        if (!playing || a <= 0) {
+          if (_kIntro.fadeEl) {
+            _kIntro.fadeEl.remove();
+            _kIntro.fadeEl = null;
+          }
+          return;
+        }
+        const mount = getKitchenSceneMount();
+        if (!mount) return;
+        if (!_kIntro.fadeEl) {
+          const el = document.createElement("div");
+          Object.assign(el.style, {
+            position: "absolute",
+            inset: "0",
+            background: "#000",
+            zIndex: "3",
+            pointerEvents: "none",
+            opacity: "0",
+          });
+          mount.appendChild(el);
+          _kIntro.fadeEl = el;
+        }
+        _kIntro.fadeEl.style.opacity = a.toFixed(3);
+      }
+
       /**
        * Per frame, after the normal camera update: moves the active camera to the
        * intro pose for this frame's render (restored right after, so the race
@@ -5420,6 +5469,7 @@ let _worldSwitched = false;
             return false;
           }
         }
+        updateKitchenIntroFade();
         const o = _kIntroPoseAt(_kIntro.t, _kIntroPose);
         _kIntro.savedPos.copy(camera.position);
         _kIntro.savedQuat.copy(camera.quaternion);

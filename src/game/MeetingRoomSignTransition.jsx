@@ -265,6 +265,10 @@ function loadSignFont() {
 const SIGN_TITLE_LINES = ["Meeting", "Room", "Madness"];
 /** The title's widest line stays within this width (face units); wider → scaled down. */
 const SIGN_TITLE_MAX_WIDTH = 0.72;
+/** What the level is about: a subtitle under the title (wrapped, not shrunk). */
+const SIGN_DESCRIPTION = "Push your rivals off the table. Last car standing wins!";
+/** The description wraps within this width (face units). */
+const SIGN_DESCRIPTION_MAX_WIDTH = 0.76;
 
 const FACE_LAYOUT = {
   marginX: 0.105,
@@ -274,8 +278,12 @@ const FACE_LAYOUT = {
   titleGap: 0.06, // from the small line's baseline to the title's cap top
   titleCapEm: 0.73, // cap height of the typeface (× size)
   titlePitchEm: 1.013, // baseline to baseline (× size)
-  loaderGapEm: 0.7, // last title baseline to the loader (× size), in the subtitle's place
-  loaderMaxY: 0.7, // more title lines shrink the title so the loader stays above this
+  loaderGapEm: 0.7, // last title baseline to the loader (× size), when there's no description
+  loaderMaxY: 0.745, // a taller block shrinks the title so the loader stays above this
+  descSize: 0.048, // description: the reference's smaller line style
+  descGapEm: 0.36, // last title baseline to the description's x-height top (× title size)
+  descPitchEm: 1.32, // description baseline to baseline (× its size)
+  loaderAfterDesc: 0.08, // description's last baseline to the loader
   loaderBarW: 0.5,
   loaderBarH: 0.0065,
   loaderSize: 0.05,
@@ -283,19 +291,51 @@ const FACE_LAYOUT = {
   footSize: 0.046,
 };
 
-/**
- * Title block for `lines` lines: size, baselines and the loader's position.
- * Positions depend only on the line count (not on measured widths), so the
- * live loader meshes and the printed artwork always line up.
- */
-function titleBlock(lines) {
+/** Description lines: one per sentence if each fits, else word-wrapped. */
+function wrapDescription(ctx, S, text) {
+  if (!text) return [];
   const L = FACE_LAYOUT;
-  const n = Math.max(1, lines);
-  const fit = (L.loaderMaxY - L.kickerY - L.titleGap) / (L.titleCapEm + (n - 1) * L.titlePitchEm + L.loaderGapEm);
+  ctx.font = `400 ${L.descSize * S}px ${signFontStack()}`;
+  const maxW = SIGN_DESCRIPTION_MAX_WIDTH * S;
+  const fits = (t) => ctx.measureText(t).width <= maxW;
+  if (fits(text)) return [text];
+  const sentences = text.match(/[^.!?]+[.!?]+\s*/g)?.map((t) => t.trim()) || [];
+  if (sentences.length > 1 && sentences.every(fits)) return sentences;
+  const lines = [];
+  let line = "";
+  for (const word of text.split(/\s+/)) {
+    const next = line ? line + " " + word : word;
+    if (line && !fits(next)) {
+      lines.push(line);
+      line = word;
+    } else line = next;
+  }
+  if (line) lines.push(line);
+  return lines;
+}
+
+/**
+ * Face layout: title size and baselines, description lines and baselines, and
+ * the loader's position. The title shrinks (never the description) so the
+ * whole block keeps the loader above loaderMaxY.
+ */
+function faceLayout(ctx, S, content) {
+  const L = FACE_LAYOUT;
+  const n = Math.max(1, content.title.length);
+  const desc = wrapDescription(ctx, S, content.description);
+  const m = desc.length;
+  // Fixed part (face units) and the part that scales with the title size.
+  const fixed = m ? L.descSize + (m - 1) * L.descSize * L.descPitchEm + L.loaderAfterDesc : 0;
+  const perSize = L.titleCapEm + (n - 1) * L.titlePitchEm + (m ? L.descGapEm : L.loaderGapEm);
+  const fit = (L.loaderMaxY - L.kickerY - L.titleGap - fixed) / perSize;
   const size = Math.min(L.titleSize, fit);
   const first = L.kickerY + L.titleGap + L.titleCapEm * size;
   const baselines = Array.from({ length: n }, (_, i) => first + i * L.titlePitchEm * size);
-  return { size, baselines, loaderY: baselines[n - 1] + L.loaderGapEm * size };
+  const lastTitle = baselines[n - 1];
+  const descFirst = lastTitle + L.descGapEm * size + L.descSize;
+  const descBaselines = desc.map((_, i) => descFirst + i * L.descSize * L.descPitchEm);
+  const loaderY = m ? descBaselines[m - 1] + L.loaderAfterDesc : lastTitle + L.loaderGapEm * size;
+  return { size, baselines, desc, descBaselines, loaderY };
 }
 
 function drawFace(ctx, S, bands, content) {
@@ -336,13 +376,16 @@ function drawFace(ctx, S, bands, content) {
   ctx.fillText(content.kicker, x0, L.kickerY * S);
   // Title: sized for its line count, and smaller still if its widest line
   // would crowd the right margin.
-  const block = titleBlock(content.title.length);
+  const block = faceLayout(ctx, S, content);
   ctx.font = `400 ${block.size * S}px ${signFontStack()}`;
   const widest = Math.max(...content.title.map((t) => ctx.measureText(t).width));
   const titleSize = block.size * Math.min(1, (SIGN_TITLE_MAX_WIDTH * S) / Math.max(1, widest));
   ctx.font = `400 ${titleSize * S}px ${signFontStack()}`;
   const tx = x0 - titleSize * S * 0.05; // optical alignment of the big letters
   content.title.forEach((line, i) => ctx.fillText(line, tx, block.baselines[i] * S));
+  // Description: the smaller subtitle line(s), left-aligned with the title.
+  ctx.font = `400 ${L.descSize * S}px ${signFontStack()}`;
+  block.desc.forEach((line, i) => ctx.fillText(line, x0, block.descBaselines[i] * S));
   // Loader track (the fill and the percentage are live meshes on top).
   ctx.globalAlpha = 0.22;
   ctx.fillRect(x0, block.loaderY * S - L.loaderBarH * S * 0.5, L.loaderBarW * S, L.loaderBarH * S);
@@ -357,6 +400,7 @@ function drawFace(ctx, S, bands, content) {
     ctx.fillText(value, fx, L.footY * S);
     fx += ctx.measureText(value).width + ctx.measureText(" ").width;
   }
+  return block;
 }
 
 function drawPercent(ctx, w, h, text) {
@@ -371,6 +415,7 @@ function signContent() {
   const index = LEVEL_ORDER.indexOf(SCENE_ROUTES.meetingRoom);
   return {
     kicker: "Next stop",
+    description: SIGN_DESCRIPTION,
     title: SIGN_TITLE_LINES,
     foot: [
       ["Level", String(index + 1)],
@@ -581,11 +626,16 @@ export default function MeetingRoomSignTransition({ ready, onFinished }) {
       faceTex.generateMipmaps = true;
       faceTex.minFilter = THREE.LinearMipmapLinearFilter;
       let faceRes = 0;
+      // The loader meshes follow the printed layout (it depends on how the
+      // description wraps in the loaded font).
+      let placeLoader = () => {};
+      let faceLoaderY = FACE_LAYOUT.loaderMaxY;
       const drawFaceAt = (S) => {
         faceRes = S;
         faceCanvas.width = faceCanvas.height = S;
-        drawFace(faceCtx, S, bands, content);
+        faceLoaderY = drawFace(faceCtx, S, bands, content).loaderY;
         faceTex.needsUpdate = true;
+        placeLoader();
       };
       const faceMat = track(new THREE.MeshBasicMaterial({ map: faceTex, color: 0x000000 }));
       const face = new THREE.Group();
@@ -602,9 +652,6 @@ export default function MeetingRoomSignTransition({ ready, onFinished }) {
       const barGeo = track(new THREE.PlaneGeometry(1, 1));
       barGeo.translate(0.5, 0, 0); // grows from its left end
       const bar = new THREE.Mesh(barGeo, inkMat);
-      const loaderY = titleBlock(content.title.length).loaderY;
-      const barLeft = toFace(L.marginX, loaderY);
-      bar.position.set(barLeft.x, barLeft.y, 0.0006);
       bar.scale.set(1e-4, L.loaderBarH * faceH, 1);
       face.add(bar);
       const pctCanvas = document.createElement("canvas");
@@ -618,9 +665,14 @@ export default function MeetingRoomSignTransition({ ready, onFinished }) {
       const pctH = L.loaderSize * faceH * 1.6;
       const pctW = pctH * 4;
       const pct = new THREE.Mesh(track(new THREE.PlaneGeometry(pctW, pctH)), pctMat);
-      const pctAt = toFace(L.marginX + L.loaderBarW + 0.03, loaderY);
-      pct.position.set(pctAt.x + pctW / 2, pctAt.y, 0.0006);
       face.add(pct);
+      placeLoader = () => {
+        const barLeft = toFace(L.marginX, faceLoaderY);
+        bar.position.set(barLeft.x, barLeft.y, 0.0006);
+        const pctAt = toFace(L.marginX + L.loaderBarW + 0.03, faceLoaderY);
+        pct.position.set(pctAt.x + pctW / 2, pctAt.y, 0.0006);
+      };
+      placeLoader();
       let pctShown = "";
       const setPercent = (p) => {
         const text = `${Math.round(p * 100)}%`;

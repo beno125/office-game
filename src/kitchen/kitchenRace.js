@@ -423,6 +423,121 @@ export class RaceHud {
   }
 }
 
+/**
+ * Knock-off counter for the meeting room arena, in the race HUD's style (same
+ * panel, font and colours): "Knocked off N · Remaining M", the changed number
+ * pops when a car falls, plus a big centre message (e.g. "You're out!").
+ */
+export class KnockoutHud {
+  constructor() {
+    const root = document.createElement("div");
+    root.className = "arena-knockout-hud";
+    Object.assign(root.style, {
+      position: "absolute",
+      inset: "0",
+      pointerEvents: "none",
+      zIndex: "5",
+      font: "800 16px/1.2 system-ui, sans-serif",
+      color: "#fff",
+      letterSpacing: "0.04em",
+      textTransform: "uppercase",
+      display: "none",
+    });
+    const panel = document.createElement("div");
+    Object.assign(panel.style, {
+      position: "absolute",
+      top: "16px",
+      left: "16px",
+      padding: "10px 14px",
+      borderRadius: "10px",
+      background: "rgba(9, 9, 20, 0.62)",
+      display: "flex",
+      alignItems: "baseline",
+      flexWrap: "wrap",
+      gap: "6px 10px",
+      maxWidth: "calc(100% - 32px)",
+      boxSizing: "border-box",
+    });
+    const stat = (label) => {
+      const wrap = document.createElement("span");
+      wrap.style.whiteSpace = "nowrap";
+      const l = document.createElement("span");
+      l.textContent = label + " ";
+      l.style.opacity = "0.8";
+      const n = document.createElement("span");
+      Object.assign(n.style, {
+        display: "inline-block",
+        fontSize: "24px",
+        minWidth: "0.7em",
+        textAlign: "center",
+        transformOrigin: "50% 60%",
+      });
+      wrap.append(l, n);
+      return { wrap, n };
+    };
+    this.out = stat("Knocked off");
+    this.left = stat("Remaining");
+    const dot = document.createElement("span");
+    dot.textContent = "·";
+    dot.style.opacity = "0.6";
+    panel.append(this.out.wrap, dot, this.left.wrap);
+
+    this.bigEl = document.createElement("div");
+    Object.assign(this.bigEl.style, {
+      position: "absolute",
+      left: "50%",
+      top: "38%",
+      transform: "translate(-50%, -50%)",
+      fontSize: "min(14vw, 96px)",
+      fontWeight: "900",
+      whiteSpace: "nowrap",
+      textShadow: "0 4px 24px rgba(0,0,0,0.6)",
+      display: "none",
+    });
+    root.append(panel, this.bigEl);
+    this.root = root;
+    this._vals = [null, null];
+  }
+
+  attach(mount) {
+    if (mount && this.root.parentNode !== mount) mount.appendChild(this.root);
+  }
+
+  setVisible(v) {
+    this.root.style.display = v ? "" : "none";
+  }
+
+  _pop(el, color) {
+    el.style.transition = "none";
+    el.style.transform = "scale(1.7)";
+    el.style.color = color;
+    void el.offsetWidth; // restart the transition
+    el.style.transition = "transform 420ms cubic-bezier(0.2, 0.9, 0.3, 1.3), color 900ms ease";
+    el.style.transform = "scale(1)";
+    el.style.color = "#fff";
+  }
+
+  /** Counts; the number that changed pops (unless `quiet`, e.g. on a reset). */
+  setCounts(knockedOff, remaining, quiet = false) {
+    const [o, r] = this._vals;
+    this.out.n.textContent = String(knockedOff);
+    this.left.n.textContent = String(remaining);
+    if (!quiet && o !== null && knockedOff !== o) this._pop(this.out.n, "#ffd23f");
+    if (!quiet && r !== null && remaining !== r) this._pop(this.left.n, "#ff3b6b");
+    this._vals = [knockedOff, remaining];
+  }
+
+  setBig(text, color) {
+    if (!text) {
+      this.bigEl.style.display = "none";
+      return;
+    }
+    this.bigEl.style.display = "";
+    this.bigEl.textContent = text;
+    this.bigEl.style.color = color || "#fff";
+  }
+}
+
 /** Race time as m:ss.t */
 export function formatRaceTime(sec) {
   if (!(sec >= 0)) return "—";
@@ -440,7 +555,7 @@ const POPUP_FONT_UI = "800 13px/1.4 system-ui, sans-serif";
  * two buttons. Real <button>s, so mouse, Tab and Enter / Space all work.
  */
 export class RaceResultsPopup {
-  constructor({ onRetry, onNext }) {
+  constructor({ onRetry, onNext, retryLabel = "Race again", nextLabel = "Next level" }) {
     this.onRetry = onRetry;
     this.onNext = onNext;
     this.open = false;
@@ -531,8 +646,8 @@ export class RaceResultsPopup {
       gap: "12px",
       marginTop: "4px",
     });
-    this.retryBtn = this._button("Race again", "#f00458");
-    this.nextBtn = this._button("Next level", "#165dff");
+    this.retryBtn = this._button(retryLabel, "#f00458");
+    this.nextBtn = this._button(nextLabel, "#165dff");
     this.retryBtn.addEventListener("click", () => this.open && this.onRetry && this.onRetry());
     this.nextBtn.addEventListener("click", () => this.open && !this.nextBtn.disabled && this.onNext && this.onNext());
     btnRow.append(this.retryBtn, this.nextBtn);

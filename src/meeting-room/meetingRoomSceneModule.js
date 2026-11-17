@@ -14,6 +14,8 @@ import {
   CAR_BUMP_SPIN_DECAY,
   solveCarBump,
 } from "../game/carBumpPhysics.js";
+import { KnockoutHud, RaceResultsPopup, formatRaceTime } from "../kitchen/kitchenRace.js";
+import { SCENE_ROUTES, nextLevelPath, goToLevelWithTransition } from "../game/sceneRoutes.js";
 
 /**
  * Dev-only perf tooling (both false in production builds):
@@ -1443,6 +1445,7 @@ function respawnCarOnTable() {
 function _carUsesPhysicsWorld() {
   return (
     !!carPhysBody &&
+    !_activeCarCtx.parked && // knocked off and lost below the floor: out of the world
     (carPhysState === CAR_PHYS.FALLING ||
       carPhysState === CAR_PHYS.LANDED ||
       carPhysState === CAR_PHYS.IMPACT)
@@ -1523,9 +1526,13 @@ function stepCarPhysicsPost(dt) {
   }
   if (carPhysState === CAR_PHYS.LANDED) {
     carFloorTimer = (performance.now() - carLandedAtMs) / 1000;
-    if (carFloorTimer >= CAR_FLOOR_RESPAWN_SEC) respawnCarOnTable();
+    // A knocked-off car stays on the floor (out of the round); others respawn.
+    if (carFloorTimer >= CAR_FLOOR_RESPAWN_SEC && !_activeCarCtx.out) respawnCarOnTable();
   }
-  if (car.position.y < floorTopY - 4) respawnCarOnTable();
+  if (car.position.y < floorTopY - 4) {
+    if (_activeCarCtx.out) parkKnockedOffCar();
+    else respawnCarOnTable();
+  }
 }
 
 function updateCar(dt) {
@@ -8578,7 +8585,7 @@ function updateArenaAi(dt) {
   _syncActiveCarCtx();
   for (let i = 0; i < arenaCars.length; i++) {
     const c = arenaCars[i];
-    if (!c.ready || !c.ai) continue;
+    if (!c.ready || !c.ai || c.out) continue; // knocked-off cars are out of play
     withCar(c, () => _arenaAiThink(c, dt));
   }
 }
@@ -9406,7 +9413,7 @@ function _arenaSetPhase(phase) {
 
 function updateArenaGame(dt) {
   const g = _arenaGame;
-  if (g.live) return;
+  if (g.live || g.phase === "over") return;
   g.t += dt;
   if (g.phase !== "dusk" && g.phase !== "go") {
     // Hold Bright Mode until the fade.
@@ -9491,6 +9498,278 @@ const _rec = {
   acc: 0,
   cars: 0,
 };
+// ---------------------------------------------------------------------------
+// Round: knock-offs, counter, last car standing, results popup, Play again
+// ---------------------------------------------------------------------------
+/** A car is knocked off once it is this far below the tabletop… */
+const ARENA_KNOCKOFF_DROP = 0.18;
+/** …or falling while this far outside the table's area (world units). */
+const ARENA_KNOCKOFF_EDGE = 0.12;
+/** Last knock-off → results popup (the fall can be seen first). */
+const ARENA_ROUND_END_DELAY_SEC = 1.6;
+/** The player is out → "You're out!" for this long, then the results. */
+const ARENA_PLAYER_OUT_DELAY_SEC = 1.8;
+/** Names / colours in the HUD and results (the player's car is the red one). */
+const ARENA_PLAYER_NAME = "Red";
+const ARENA_PLAYER_COLOR = 0xff2d55;
+
+const _round = {
+  hud: null,
+  popup: null,
+  time: 0, // round clock (live time)
+  knocked: 0,
+  endIn: -1, // countdown to the results (< 0: not scheduled)
+  snapshot: null, // movable objects at the start (for Play again)
+  openingView: null,
+};
+
+function _arenaCarName(c) {
+  if (c.isPlayer) return ARENA_PLAYER_NAME;
+  const cfg = ARENA_AI_CARS[arenaCars.indexOf(c) - 1];
+  return cfg ? cfg.name.replace(/^ArenaCar/, "") : "Car";
+}
+
+function _arenaCarColor(c) {
+  if (c.isPlayer) return ARENA_PLAYER_COLOR;
+  const cfg = ARENA_AI_CARS[arenaCars.indexOf(c) - 1];
+  return cfg ? cfg.color : 0xffffff;
+}
+
+function _hex(c) {
+  return "#" + (c >>> 0).toString(16).padStart(6, "0");
+}
+
+/** Every AI car's inputs released (the AI leaves its last inputs held when it stops thinking). */
+function _releaseArenaAiInputs() {
+  for (const c of arenaCars) {
+    if (!c.ai || !c.keys || c.keys === _frozenPlayerKeys) continue;
+    for (const k of Object.keys(c.keys)) if (typeof c.keys[k] === "boolean") c.keys[k] = false;
+  }
+}
+
+/** A knocked-off car that fell past the floor: parked out of the physics world. */
+function parkKnockedOffCar() {
+  const c = _activeCarCtx;
+  if (c.parked) return;
+  c.parked = true;
+  if (carPhysBody) {
+    carPhysBody.velocity.set(0, 0, 0);
+    carPhysBody.angularVelocity.set(0, 0, 0);
+  }
+  car.visible = false;
+}
+
+/** The tablet / mic (and their cords), as they are at the start of a round. */
+function _snapshotArenaObjects() {
+  return _cabledObjects.map((O) => ({
+    O,
+    pos: O.body.position.clone(),
+    quat: O.body.quaternion.clone(),
+    cable: O.cable
+      ? {
+          pts: O.cable.pts.map((v) => v.clone()),
+          prev: O.cable.prev.map((v) => v.clone()),
+          anchors: O.cable.anchors.map((v) => v.clone()),
+        }
+      : null,
+  }));
+}
+
+function _restoreArenaObjects(snap) {
+  if (!snap) return;
+  for (const it of snap) {
+    const { O } = it;
+    const b = O.body;
+    b.position.copy(it.pos);
+    b.previousPosition.copy(it.pos);
+    b.interpolatedPosition.copy(it.pos);
+    b.quaternion.copy(it.quat);
+    b.previousQuaternion.copy(it.quat);
+    b.interpolatedQuaternion.copy(it.quat);
+    b.velocity.set(0, 0, 0);
+    b.angularVelocity.set(0, 0, 0);
+    b.force.set(0, 0, 0);
+    b.torque.set(0, 0, 0);
+    b.sleep();
+    O.contactPrev.clear();
+    _tabQ.set(b.quaternion.x, b.quaternion.y, b.quaternion.z, b.quaternion.w);
+    O.group.position.copy(O.offset).applyQuaternion(_tabQ).add(_tabV0.set(b.position.x, b.position.y, b.position.z));
+    O.group.quaternion.copy(_tabQ);
+    if (O.cable && it.cable) {
+      it.cable.pts.forEach((v, i) => O.cable.pts[i].copy(v));
+      it.cable.prev.forEach((v, i) => O.cable.prev[i].copy(v));
+      it.cable.anchors.forEach((v, i) => O.cable.anchors[i].copy(v));
+      _cabledCableDraw(O);
+      O.cable.active = false;
+      O.cable.hangForce = 0;
+    }
+  }
+  if (_cabled) _cabled.acc = 0;
+}
+
+function _ensureArenaUi() {
+  const mount = getMeetingRoomSceneMount();
+  if (!_round.hud) {
+    _round.hud = new KnockoutHud();
+    _round.popup = new RaceResultsPopup({
+      retryLabel: "Play again",
+      onRetry: () => playArenaAgain(),
+      onNext: () => {
+        const next = nextLevelPath(SCENE_ROUTES.meetingRoom);
+        if (next) goToLevelWithTransition(next);
+      },
+    });
+  }
+  _round.hud.attach(mount);
+  _round.popup.attach(mount);
+}
+
+/** Per frame: knock-offs (live), the counter, and the end of the round. */
+function updateArenaRound(dt) {
+  if (!_carReady || !Number.isFinite(tablePlateHalfX)) return;
+  _ensureArenaUi();
+  const g = _arenaGame;
+  // Snapshot the start (objects at rest, the opening camera) once, before GO.
+  if (!_round.snapshot && g.phase === "intro") {
+    _round.snapshot = _snapshotArenaObjects();
+    _round.openingView = { pos: camera.position.clone(), target: controls.target.clone() };
+  }
+  const ready = arenaCars.filter((c) => c.ready);
+  _round.hud.setVisible(g.phase === "live" || g.phase === "over" || g.phase === "go");
+  if (g.live) {
+    _round.time += dt;
+    _syncActiveCarCtx();
+    for (const c of ready) {
+      if (c.out) continue;
+      const p = c.car.position;
+      const st = c.carPhysState;
+      const below = p.y < tableSurfaceY - ARENA_KNOCKOFF_DROP;
+      const outside =
+        Math.abs(p.x - tablePlateCenter.x) > tablePlateHalfX + ARENA_KNOCKOFF_EDGE ||
+        Math.abs(p.z - tablePlateCenter.z) > tablePlateHalfZ + ARENA_KNOCKOFF_EDGE;
+      const falling = st === CAR_PHYS.FALLING || st === CAR_PHYS.LANDED;
+      if (!(below || (outside && falling))) continue;
+      // Knocked off: counted once, out of play from now on.
+      c.out = true;
+      c.outT = _round.time;
+      c.outOrder = ++_round.knocked;
+      if (c.isPlayer) {
+        _playerCarCtx.keys = _frozenPlayerKeys;
+        if (_activeCarCtx === _playerCarCtx) keys = _frozenPlayerKeys;
+        _round.hud.setBig("You're out!", "#ff3b6b");
+        if (_round.endIn < 0) _round.endIn = ARENA_PLAYER_OUT_DELAY_SEC;
+      }
+    }
+    const remaining = ready.filter((c) => !c.out).length;
+    _round.hud.setCounts(_round.knocked, remaining);
+    if (remaining <= 1 && _round.endIn < 0) _round.endIn = ARENA_ROUND_END_DELAY_SEC;
+    if (_round.endIn >= 0) {
+      _round.endIn -= dt;
+      if (_round.endIn <= 0) endArenaRound();
+    }
+  } else if (g.phase !== "over") {
+    _round.hud.setCounts(0, ready.length, true);
+  }
+}
+
+/** Round over: stop the cars and the AI, and show the results. */
+function endArenaRound() {
+  const g = _arenaGame;
+  g.live = false;
+  _arenaSetPhase("over");
+  _round.endIn = -1;
+  _playerCarCtx.keys = _frozenPlayerKeys;
+  if (_activeCarCtx === _playerCarCtx) keys = _frozenPlayerKeys;
+  _releaseArenaAiInputs(); // the cars coast to a stop
+  _round.hud.setBig("");
+  const ready = arenaCars.filter((c) => c.ready);
+  const standing = ready.filter((c) => !c.out);
+  // Still on the table first, then the last knocked off before the earlier ones.
+  const order = standing.concat(ready.filter((c) => c.out).sort((a, b) => b.outOrder - a.outOrder));
+  const player = _playerCarCtx;
+  const winner = standing.length === 1 ? standing[0] : null;
+  let title;
+  let color;
+  let sub;
+  if (winner && winner.isPlayer) {
+    title = "You win!";
+    color = "#4dff88";
+    sub = `Last car standing · ${formatRaceTime(_round.time)}`;
+  } else if (winner) {
+    title = `${_arenaCarName(winner)} car wins`;
+    color = _hex(_arenaCarColor(winner));
+    sub = player.out ? `You were knocked off at ${formatRaceTime(player.outT)}` : "";
+  } else if (player.out) {
+    title = "You're out!";
+    color = "#ff3b6b";
+    sub = `Knocked off at ${formatRaceTime(player.outT)} · ${standing.length} cars still on the table`;
+  } else {
+    title = "No one left!";
+    color = "#ffd23f";
+    sub = "Every car went over the edge";
+  }
+  _round.popup.show({
+    title,
+    color,
+    sub,
+    nextEnabled: !!nextLevelPath(SCENE_ROUTES.meetingRoom),
+    rows: order.map((c, i) => ({
+      place: i + 1,
+      name: _arenaCarName(c),
+      color: _hex(_arenaCarColor(c)),
+      isPlayer: !!c.isPlayer,
+      time: c.out ? `Out ${formatRaceTime(c.outT)}` : c === winner ? "Winner" : "On the table",
+    })),
+  });
+}
+
+/** "Play again": every car back on its start, objects reset, the counter at 0, then READY / SET / GO. */
+function playArenaAgain() {
+  _round.popup.hide();
+  _round.hud.setBig("");
+  _round.time = 0;
+  _round.knocked = 0;
+  _round.endIn = -1;
+  _syncActiveCarCtx();
+  for (const c of arenaCars) {
+    if (!c.ready) continue;
+    c.out = false;
+    c.outT = 0;
+    c.outOrder = 0;
+    c.parked = false;
+    c.lastBumpT = -Infinity;
+    c.lastCableHitT = -Infinity;
+    c._prevPhysState = CAR_PHYS.DRIVING;
+    withCar(c, () => {
+      car.visible = true;
+      respawnCarOnTable();
+    });
+    if (c.ai) c.ai = createArenaAiBrain();
+  }
+  _playerCarCtx.keys = _frozenPlayerKeys;
+  if (_activeCarCtx === _playerCarCtx) keys = _frozenPlayerKeys;
+  _releaseArenaAiInputs(); // held until GO, like the first round
+  _restoreArenaObjects(_round.snapshot);
+  // No replay carrying over; screens back to their content.
+  _replay.pending = null;
+  if (_replay.active) {
+    _replay.active = false;
+    restoreScreenContent(_replay.screen);
+  }
+  restoreScreenContent("left");
+  restoreScreenContent("right");
+  // The opening view, then the start sequence again (Bright → READY → SET → GO).
+  _camDirector.active = false;
+  if (_round.openingView) {
+    camera.position.copy(_round.openingView.pos);
+    controls.target.copy(_round.openingView.target);
+    controls.update();
+  }
+  _round.hud.setCounts(0, arenaCars.filter((c) => c.ready).length, true);
+  _arenaGame.live = false;
+  _arenaSetPhase("intro");
+}
+
 const _replay = {
   pending: null,
   active: false,
@@ -9772,9 +10051,10 @@ function _startReplay(p) {
 }
 
 function updateArenaReplay(dt) {
-  if (!_arenaGame.live) return;
+  // After the round ends, a replay already under way still plays out.
+  if (!_arenaGame.live && !(_arenaGame.phase === "over" && _replay.active)) return;
   _recordArenaPoses(dt);
-  _detectPushOffFalls();
+  if (_arenaGame.live) _detectPushOffFalls();
   const r = _replay;
   if (!r.active && r.pending && clock.elapsedTime >= r.pending.t1 + 0.05) {
     const p = r.pending;
@@ -10655,6 +10935,7 @@ function animate() {
   }
   stepCarPhysics(dt);
   resolveArenaCarCollisions();
+  updateArenaRound(dt);
   syncCarCamera();
   updateCameraDirector(dt);
   updateTableLightReflections();
