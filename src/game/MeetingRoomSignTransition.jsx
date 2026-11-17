@@ -26,11 +26,13 @@ const SIGN_BACKGROUND = 0x04060d;
 const SIGN_WALL_COLOR = 0x070b18;
 
 /** Timings (ms). */
-const SIGN_MIN_DISPLAY_MS = 3000; // lit time at least this long, even if the room is cached
-const SIGN_LIGHTS_ON_DELAY_MS = 250; // dark first, then the lights come on
-const SIGN_FLICKER_MS = 900; // light-on flicker, then steady
-const SIGN_COMPLETE_HOLD_MS = 500; // bar at 100% before the lights dim
-const SIGN_DIM_MS = 700; // lights dim, then onFinished()
+// Sequence: FADE_IN → LOADING → HOLD → EXIT, each step only after the previous one.
+const SIGN_FADE_IN_MS = 1500; // the whole sign fades in (loader held at 0%)
+const SIGN_LIGHTS_ON_DELAY_MS = 250; // into the fade-in, the lights come on…
+const SIGN_FLICKER_MS = 900; // …with a short flicker, steady before the fade-in ends
+const SIGN_LOADER_MIN_MS = 1800; // the bar takes at least this long from 0% to 100%
+const SIGN_HOLD_MS = 1000; // full sign, bar at 100%, before the exit
+const SIGN_DIM_MS = 700; // exit: lights dim, then onFinished() (the page fades out)
 const SIGN_COLOR_WAIT_MS = 900; // longest wait for the table colour before the lights come on
 
 /** Camera: the sign fills this much of the smaller screen dimension, then pushes in. */
@@ -463,6 +465,7 @@ export default function MeetingRoomSignTransition({ ready, onFinished }) {
       renderer.toneMapping = THREE.NoToneMapping;
       renderer.setClearColor(SIGN_BACKGROUND, 1);
       renderer.domElement.style.display = "block";
+      renderer.domElement.style.opacity = "0"; // until the FADE_IN step
       stage.appendChild(renderer.domElement);
       const scene = new THREE.Scene();
       scene.background = new THREE.Color(SIGN_BACKGROUND);
@@ -744,12 +747,16 @@ export default function MeetingRoomSignTransition({ ready, onFinished }) {
       ]);
       if (disposed) return cleanup();
 
-      // --- Loop ----------------------------------------------------------------
-      const tLights = performance.now();
-      let shown = 0;
+      // --- Loop: FADE_IN → LOADING → HOLD → EXIT -----------------------------
+      const canvasStyle = renderer.domElement.style;
+      let step = "FADE_IN";
+      let stepAt = performance.now();
+      const goTo = (next, now) => {
+        step = next;
+        stepAt = now;
+      };
+      let shown = 0; // bar value (0..1), never goes backward
       let downloadDoneAt = 0;
-      let completeAt = 0;
-      let dimStart = 0;
       let finished = false;
       let last = performance.now();
       const dir = new THREE.Vector3();
@@ -766,6 +773,18 @@ export default function MeetingRoomSignTransition({ ready, onFinished }) {
         return on * (0.55 + 0.45 * u);
       };
 
+      /** Real progress of the meeting room (it loads from the start, in the background). */
+      const realProgress = (now) => {
+        if (readyRef.current) return 1;
+        const dl = progress.fraction();
+        if (dl >= 1 && !downloadDoneAt) downloadDoneAt = now;
+        let p = SIGN_DOWNLOAD_SHARE * dl;
+        if (downloadDoneAt) {
+          p += (1 - SIGN_DOWNLOAD_SHARE) * 0.9 * (1 - Math.exp(-(now - downloadDoneAt) / 1000 / SIGN_PARSE_SEC));
+        }
+        return Math.min(0.999, p);
+      };
+
       const frame = () => {
         if (disposed) return;
         raf = requestAnimationFrame(frame);
@@ -773,32 +792,38 @@ export default function MeetingRoomSignTransition({ ready, onFinished }) {
         const dt = Math.min(0.1, (now - last) / 1000);
         last = now;
         const tSec = (now - t0) / 1000;
+        const inStep = now - stepAt;
+        let power = 1;
+        let opacity = 1;
 
-        // Progress target: download share, then parse share until "ready".
-        const dl = progress.fraction();
-        if (dl >= 1 && !downloadDoneAt) downloadDoneAt = now;
-        let target = SIGN_DOWNLOAD_SHARE * dl;
-        if (downloadDoneAt) {
-          target += (1 - SIGN_DOWNLOAD_SHARE) * 0.9 * (1 - Math.exp(-(now - downloadDoneAt) / 1000 / SIGN_PARSE_SEC));
-        }
-        if (readyRef.current) target = 1;
-        shown += (target - shown) * (1 - Math.exp(-dt * (readyRef.current ? 6 : 3)));
-        if (target >= 1 && 1 - shown < 0.002) shown = 1;
-        bar.scale.x = Math.max(1e-4, shown * L.loaderBarW * faceW);
-        setPercent(shown);
-
-        // End: bar full, minimum time met → hold → dim → finished.
-        if (shown >= 1 && !completeAt && now - tLights >= SIGN_MIN_DISPLAY_MS - SIGN_COMPLETE_HOLD_MS) completeAt = now;
-        if (completeAt && !dimStart && now - completeAt >= SIGN_COMPLETE_HOLD_MS) dimStart = now;
-        let power = flicker(now - tLights - SIGN_LIGHTS_ON_DELAY_MS);
-        if (dimStart) {
-          const u = Math.min(1, (now - dimStart) / SIGN_DIM_MS);
-          power *= 1 - 0.85 * u * u;
+        if (step === "FADE_IN") {
+          // Everything fades in; the loader shows 0% and doesn't move.
+          const u = Math.min(1, inStep / SIGN_FADE_IN_MS);
+          opacity = u * u * (3 - 2 * u);
+          power = flicker(inStep - SIGN_LIGHTS_ON_DELAY_MS);
+          if (u >= 1) goTo("LOADING", now);
+        } else if (step === "LOADING") {
+          // Real progress, but never faster than the minimum duration and never backward.
+          const cap = Math.min(1, inStep / SIGN_LOADER_MIN_MS);
+          const target = Math.min(realProgress(now), cap);
+          shown = Math.max(shown, shown + (target - shown) * (1 - Math.exp(-dt * 10)));
+          // Complete as soon as it reads 100% (the hold starts from there).
+          if (target >= 1 && 1 - shown < 0.005) shown = 1;
+          if (shown >= 1 && readyRef.current) goTo("HOLD", now);
+        } else if (step === "HOLD") {
+          if (inStep >= SIGN_HOLD_MS) goTo("EXIT", now);
+        } else if (step === "EXIT") {
+          // The lights dim; then the page fades this out and shows the room.
+          const u = Math.min(1, inStep / SIGN_DIM_MS);
+          power = 1 - 0.85 * u * u;
           if (u >= 1 && !finished) {
             finished = true;
             onFinishedRef.current?.();
           }
         }
+        canvasStyle.opacity = opacity.toFixed(3);
+        bar.scale.x = Math.max(1e-4, shown * L.loaderBarW * faceW);
+        setPercent(shown);
 
         // Lights.
         faceMat.color.setScalar(power * SIGN_FACE_BRIGHTNESS);
