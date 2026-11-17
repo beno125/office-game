@@ -4316,12 +4316,56 @@ let _worldSwitched = false;
         resetKitchenRace();
         _racePhase = "countdown";
         _raceTimer = RACE_COUNTDOWN_SEC;
-        if (camera === carCamera) {
-          getCarCameraLookAtPoint(_carMatrixLookAt);
-          controls.target.copy(_carMatrixLookAt);
-          syncCarOrbitCamAnglesFromPosition(camera);
-          applyCarOrbitCameraFromAngles();
+        setupKitchenGameplayCamera();
+      }
+
+      /**
+       * The gameplay camera as the first race starts (the pose the intro lands
+       * on), captured once, unchanged. Used at the intro's hand-off and on
+       * "Race again", so every race starts from exactly the same frame.
+       */
+      let _gameplayCamPose = null;
+      function setupKitchenGameplayCamera() {
+        if (!car) return;
+        // Leftovers from the last race: the ramp-jump camera, the slow-motion
+        // camera move, zoom / orbit / FOV, the landing shakes.
+        _rampLeftJumpActive = false;
+        _rampJumpMatrixActive = false;
+        _rampJumpMatrixOrbitProgress = 0;
+        _rampJumpFxBlend = 0;
+        _rampJumpFxIn = 0;
+        _carCam1JumpEffect = 0;
+        _carCam1MatrixReturnActive = false;
+        _carCam1MatrixReturnT = 0;
+        _rampJumpCamRestOffset.set(0, 0, 0);
+        cancelKitchenCameraFx();
+        if (camera !== carCamera) return;
+        if (!_gameplayCamPose) {
+          // The first race: just remember it.
+          _gameplayCamPose = {
+            distance: _carOrbitCamDistance,
+            elev: _carOrbitCamElev,
+            yaw: _carOrbitCamWorldYaw,
+            fov: carCamera.fov,
+          };
+          return;
         }
+        // A new race: the same orbit around the car (now on the grid), the same
+        // lens, no roll, the follow state starting right there.
+        const P = _gameplayCamPose;
+        _carOrbitCamDistance = P.distance;
+        _carOrbitCamElev = P.elev;
+        _carOrbitCamWorldYaw = P.yaw;
+        if (carCamera.fov !== P.fov) {
+          carCamera.fov = P.fov;
+          carCamera.updateProjectionMatrix();
+        }
+        carCamera.up.set(0, 1, 0);
+        car.updateMatrixWorld(true);
+        getCarCameraLookAtPoint(_carMatrixLookAt);
+        controls.target.copy(_carMatrixLookAt);
+        applyCarOrbitCameraFromAngles();
+        carCamera.updateMatrixWorld();
       }
 
       /** "Next level": hand over to the page, which plays the transition and changes level. */
@@ -5287,6 +5331,7 @@ let _worldSwitched = false;
           _raceTimer = RACE_COUNTDOWN_SEC;
           if (_raceHud) _raceHud.setVisible(true);
         }
+        setupKitchenGameplayCamera(); // first call: remembers this pose, changes nothing
       }
 
       // Input during the intro (and under the loader before it) is blocked by
@@ -5370,7 +5415,26 @@ let _worldSwitched = false;
       const JUMP_SLOWMO_MAX_REAL_SEC = 4.2; // a very long jump leaves slow motion after this (a top-speed flight fits)
       const JUMP_CAM_ZOOM = 0.25; // camera distance × this (close to the car)
       const JUMP_CAM_MIN_DIST = 4.2; // never closer than this to the car (whole car in frame)
-      const JUMP_CAM_ORBIT_DEG = 90; // arc around the car (from behind to its side)
+      /**
+       * Slow-motion camera angles, picked at random per jump (never the same
+       * twice in a row), each tried on both sides of the car. Relative to the
+       * car's direction of travel at takeoff: az = degrees round the car (0 =
+       * ahead, 90 = its side, 180 = behind), from → to through the slow motion;
+       * dist = distance; height = above the car, or groundHeight = above the
+       * ground under the camera (the low angle, looking up); fov = lens change.
+       */
+      const JUMP_CAM_ANGLES = [
+        { name: "lowSide", azFrom: 100, azTo: 78, dist: 5.4, height: 0.5, fov: -4 }, // close, following it through the air
+        { name: "frontThreeQuarter", azFrom: 40, azTo: 24, dist: 7, height: 1.6, fov: -6 }, // it flies toward the camera
+        { name: "lowUnder", azFrom: 68, azTo: 50, dist: 5.6, groundHeight: 0.9, fov: 4 }, // below its path, looking up
+        { name: "highThreeQuarter", azFrom: 145, azTo: 122, dist: 7.5, height: 5.5, fov: -2 }, // above, the car over the table
+        { name: "wideOrbit", azFrom: 165, azTo: 55, dist: 8.8, height: 2.2, fov: 0 }, // a wide swing round the car
+      ];
+      /** Background check: rays from the camera through / around the car must hit the kitchen. */
+      const JUMP_CAM_BG_DIST = 90; // how far past the car to look for kitchen geometry
+      const JUMP_CAM_BG_MIN = 0.8; // share of those rays that must hit it (the kitchen fills the background)
+      const JUMP_CAM_BG_SPREAD = 1.6; // the rays pass this far around the car
+      const JUMP_CAM_BG_MAX_BOX = 150; // objects bigger than this (ground / sky) don't count as background
       const JUMP_CAM_FOV_DELTA = -6; // degrees: a slightly tighter lens in slow motion
       const JUMP_CAM_CLEARANCE = 0.5; // keep this far from the ramp / table / rails
       const JUMP_CAM_ORBIT_SEC = 1.8; // real seconds for the whole arc
@@ -5440,10 +5504,7 @@ let _worldSwitched = false;
           F.active = true;
           F.tReal = 0;
           F.orbit = 0;
-          // Arc toward the side the camera already leans to (else the track's outside).
-          _jfxOff.subVectors(camera.position, controls.target);
-          const side = _jfxOff.x * Math.cos(carState.angle) - _jfxOff.z * Math.sin(carState.angle);
-          F.orbitSign = side >= 0 ? 1 : -1;
+          chooseJumpCameraAngle();
         }
         if (F.active) {
           F.tReal += realDt;
@@ -5470,11 +5531,118 @@ let _worldSwitched = false;
         const wTarget = F.active ? 1 : 0;
         const wSec = F.active ? JUMP_CAM_IN_SEC : JUMP_CAM_OUT_SEC;
         F.w = wTarget === 1 ? Math.min(1, F.w + realDt / wSec) : Math.max(0, F.w - realDt / wSec);
-        if (F.active) {
-          const u = Math.min(1, F.tReal / JUMP_CAM_ORBIT_SEC);
-          F.orbit = F.orbitSign * JUMP_CAM_ORBIT_DEG * (Math.PI / 180) * _kIntroEaseSine(u);
-        }
+        if (F.active) F.orbit = _kIntroEaseSine(Math.min(1, F.tReal / JUMP_CAM_ORBIT_SEC)); // the angle's move, 0..1
         if (F.shakeT < LAND_SHAKE_SEC) F.shakeT += realDt;
+      }
+
+      // --- Jump camera angles: the kitchen always in the background ---------
+      let _jfxBgBoxes = null;
+      const _jfxBgRay = new THREE.Ray();
+      const _jfxBgHit = new THREE.Vector3();
+      const _jfxFwd = new THREE.Vector3();
+      const _jfxSide = new THREE.Vector3();
+      const _jfxCand = new THREE.Vector3();
+      const _jfxAim = new THREE.Vector3();
+      let _jfxLastAngle = null;
+
+      /** World boxes of the kitchen's static geometry (not the cars, effects or ground), built once. */
+      function _jfxBackgroundBoxes() {
+        if (_jfxBgBoxes) return _jfxBgBoxes;
+        const skip = new Set([car]);
+        for (const rc of _raceCars) if (rc.root) skip.add(rc.root);
+        if (_raceArrows) {
+          skip.add(_raceArrows.mesh);
+          skip.add(_raceArrows.refl);
+        }
+        const inSkipped = (o) => {
+          for (let p = o; p; p = p.parent) if (skip.has(p)) return true;
+          return false;
+        };
+        _jfxBgBoxes = [];
+        scene.updateMatrixWorld(true);
+        scene.traverse((o) => {
+          if (!o.isMesh || !o.visible || o.userData.noCollision || inSkipped(o)) return;
+          let box;
+          if (o.isInstancedMesh) {
+            if (!o.boundingBox) o.computeBoundingBox();
+            box = o.boundingBox.clone().applyMatrix4(o.matrixWorld);
+          } else {
+            box = new THREE.Box3().setFromObject(o);
+          }
+          if (box.isEmpty()) return;
+          const sz = box.getSize(_jfxCand);
+          if (Math.max(sz.x, sz.y, sz.z) > JUMP_CAM_BG_MAX_BOX) return;
+          _jfxBgBoxes.push(box);
+        });
+        return _jfxBgBoxes;
+      }
+
+      /** Nearest box hit along `_jfxBgRay` beyond `from` (and not containing `skipPt`), or Infinity. */
+      function _jfxNearestBoxHit(from, skipPt) {
+        let best = Infinity;
+        for (const b of _jfxBackgroundBoxes()) {
+          if (skipPt && b.containsPoint(skipPt)) continue;
+          if (!_jfxBgRay.intersectBox(b, _jfxBgHit)) continue;
+          const d = _jfxBgHit.distanceTo(_jfxBgRay.origin);
+          if (d > from && d < best) best = d;
+        }
+        return best;
+      }
+
+      /** Camera position for `A` (side `sign`) at move progress `u`, around the car at `at`. */
+      function _jfxAnglePos(A, sign, u, at, out) {
+        const az = (A.azFrom + (A.azTo - A.azFrom) * u) * (Math.PI / 180);
+        out.copy(at)
+          .addScaledVector(_jfxFwd, Math.cos(az) * A.dist)
+          .addScaledVector(_jfxSide, Math.sin(az) * A.dist * sign);
+        out.y = A.groundHeight !== undefined ? kitchenGroundY(out.x, out.z) + A.groundHeight : at.y + A.height;
+        return out;
+      }
+
+      /**
+       * At takeoff: every angle (both sides) is checked for kitchen behind the
+       * car and a clear view to it; a random valid one (not the last), else the
+       * one with the most kitchen behind.
+       */
+      function chooseJumpCameraAngle() {
+        const F = _jumpFx;
+        _jfxFwd.set(Math.sin(carState.angle), 0, Math.cos(carState.angle));
+        _jfxSide.set(_jfxFwd.z, 0, -_jfxFwd.x);
+        const at = car.position;
+        const cands = [];
+        for (const A of JUMP_CAM_ANGLES) {
+          for (const sign of [1, -1]) {
+            _jfxAnglePos(A, sign, 0.5, at, _jfxCand);
+            // A clear view: nothing between the camera and the car.
+            const toCam = _jfxDir.subVectors(_jfxCand, at);
+            const camDist = toCam.length();
+            _jfxBgRay.set(at, toCam.normalize());
+            const clear = _jfxNearestBoxHit(0.6, at) > camDist;
+            // Background: rays from the camera through and around the car.
+            _jfxRight.crossVectors(toCam, _flatUp).normalize();
+            let hits = 0;
+            const offs = [[0, 0], [1, 0], [-1, 0], [0, 0.6], [0, -0.6]];
+            for (const [r, u] of offs) {
+              _jfxAim.copy(at).addScaledVector(_jfxRight, r * JUMP_CAM_BG_SPREAD);
+              _jfxAim.y += u * JUMP_CAM_BG_SPREAD;
+              const d = _jfxAim.distanceTo(_jfxCand);
+              _jfxBgRay.set(_jfxCand, _jfxDir.subVectors(_jfxAim, _jfxCand).normalize());
+              if (_jfxNearestBoxHit(d + 0.5) < d + JUMP_CAM_BG_DIST) hits++;
+            }
+            cands.push({ A, sign, clear, cover: hits / offs.length });
+          }
+        }
+        const fresh = cands.filter((c) => c.A.name !== _jfxLastAngle);
+        const pool = fresh.length ? fresh : cands;
+        const valid = pool.filter((c) => c.clear && c.cover >= JUMP_CAM_BG_MIN);
+        let pick;
+        if (valid.length) pick = valid[Math.floor(Math.random() * valid.length)];
+        else pick = pool.slice().sort((a, b) => b.clear - a.clear || b.cover - a.cover)[0];
+        F.angle = pick.A;
+        F.angleSign = pick.sign;
+        F.fwd = _jfxFwd.clone();
+        F.side = _jfxSide.clone();
+        _jfxLastAngle = pick.A.name;
       }
 
       /** Smooth noise in [-1, 1] (two detuned sines). */
@@ -5497,12 +5665,21 @@ let _worldSwitched = false;
         let fov = camera.fov;
         if (F.w > 0) {
           const e = _kIntroEaseSine(F.w);
-          // Close to the car and around it (from the gameplay camera's own offset).
+          // The chosen angle round the car (its frame from takeoff), moving
+          // from → to through the slow motion.
           _jfxTarget.copy(car.position);
-          _jfxOff.subVectors(camera.position, controls.target);
-          const dist = Math.max(JUMP_CAM_MIN_DIST, _jfxOff.length() * JUMP_CAM_ZOOM);
-          _jfxOff.setLength(dist).applyAxisAngle(_flatUp, F.orbit);
-          _jfxOff.y += dist * JUMP_CAM_LIFT;
+          if (F.angle) {
+            _jfxFwd.copy(F.fwd);
+            _jfxSide.copy(F.side);
+            _jfxAnglePos(F.angle, F.angleSign, F.orbit, _jfxTarget, _jfxCand);
+            _jfxOff.subVectors(_jfxCand, _jfxTarget);
+            if (_jfxOff.length() < JUMP_CAM_MIN_DIST) _jfxOff.setLength(JUMP_CAM_MIN_DIST);
+          } else {
+            _jfxOff.subVectors(camera.position, controls.target);
+            const dist = Math.max(JUMP_CAM_MIN_DIST, _jfxOff.length() * JUMP_CAM_ZOOM);
+            _jfxOff.setLength(dist);
+            _jfxOff.y += dist * JUMP_CAM_LIFT;
+          }
           // Keep clear of the ramp / table / rails: pull in along the line to the car.
           _jfxDir.copy(_jfxOff).normalize();
           _jfxRay.set(_jfxTarget, _jfxDir);
@@ -5513,7 +5690,7 @@ let _worldSwitched = false;
           _jfxOff.y = Math.max(_jfxOff.y, kitchenGroundY(_jfxOff.x, _jfxOff.z) + JUMP_CAM_CLEARANCE + 0.3);
           _jfxPos.lerp(_jfxOff, e);
           _jfxLook.lerp(_jfxTarget, e);
-          fov += JUMP_CAM_FOV_DELTA * e;
+          fov += (F.angle ? F.angle.fov : JUMP_CAM_FOV_DELTA) * e;
         }
         if (shaking) {
           // The impact's first hit: a quick downward kick and a wider lens, settling fast.
