@@ -29,6 +29,7 @@ import {
   raceAiMaxOutward,
 } from "./kitchenRace.js";
 import { SCENE_ROUTES, nextLevelPath } from "../game/sceneRoutes.js";
+import { createCinematicIntro, introEase, introEaseSine, introLerp } from "../game/cinematicIntro.js";
 import {
   CAR_MASS,
   CAR_BUMP_SLIDE_DECAY,
@@ -5040,10 +5041,7 @@ let _worldSwitched = false;
         { name: "trackRun", sec: 3.4, blendIn: 0, fade: true },
         { name: "arrival", sec: 3.2, blendIn: 0 }, // continues from the run's last pose
       ];
-      /** Fade to black between shots (seconds): out, fully black, in. Within the shots' times. */
-      const KITCHEN_INTRO_FADE_OUT_SEC = 0.35;
-      const KITCHEN_INTRO_FADE_HOLD_SEC = 0.06;
-      const KITCHEN_INTRO_FADE_IN_SEC = 0.38;
+      // Fades to black and letterbox bars: the shared intro defaults (cinematicIntro.js).
       /** Track run start: 0 = fast out of the cut (as before), 1 = fully eased in. */
       const KITCHEN_INTRO_RUN_EASE_IN = 0.6;
       /** 1. Overview: along the table (from its left half toward the grid), descending. */
@@ -5089,10 +5087,6 @@ let _worldSwitched = false;
         fovTo: 66,
         maxRollDeg: 7, // leaning into the turn
       };
-      /** Letterbox bars: height (share of the view, each) and slide in / out times. */
-      const KITCHEN_INTRO_LETTERBOX_HEIGHT = 0.11;
-      const KITCHEN_INTRO_LETTERBOX_IN_SEC = 0.9;
-      const KITCHEN_INTRO_LETTERBOX_OUT_SEC = 0.7;
       const KITCHEN_INTRO_TOTAL_SEC = KITCHEN_INTRO_SHOTS.reduce((t, s) => t + s.sec, 0);
       /** Arrow wave before the ramp during the overview (the ramp is in its view). */
       const KITCHEN_INTRO_RAMP_WAVE_AT_SEC = KITCHEN_INTRO_SHOTS[0].sec * 0.45;
@@ -5102,35 +5096,35 @@ let _worldSwitched = false;
       const KITCHEN_INTRO_WAVE_AT_SEC =
         KITCHEN_INTRO_TOTAL_SEC - KITCHEN_INTRO_SHOTS[KITCHEN_INTRO_SHOTS.length - 1].sec * 0.375;
 
-      const _kIntro = {
-        state: "pending", // pending (under the loader) | playing | done
-        t: 0,
-        rig: null, // track / car frame the shots are built from (at the start)
-        savedPos: new THREE.Vector3(),
-        savedQuat: new THREE.Quaternion(),
-        savedFov: 50,
-        controlsWereEnabled: true,
-        overriding: false,
-        waveDone: false,
-        runWaveDone: false,
-        rampWaveDone: false,
-        bars: null, // letterbox elements
-        barsK: 0, // 0 = out, 1 = in
-      };
+      // Shared intro (timeline, fades, letterbox, camera override, input
+      // blocking) with the kitchen's shots; kitchen state on top.
+      const _kIntro = Object.assign(
+        createCinematicIntro({
+          THREE,
+          getCamera: () => camera,
+          getMount: getKitchenSceneMount,
+          shots: KITCHEN_INTRO_SHOTS,
+          shotPose: (i, u, o) => _kIntroShotPose(i, u, o),
+          arrivalPose: (u, from, o) => _kIntroArrivalPose(u, from, o),
+          blocksInput: () => _kitchenSceneRendering,
+        }),
+        {
+          rig: null, // track / car frame the shots are built from (at the start)
+          controlsWereEnabled: true,
+          waveDone: false,
+          runWaveDone: false,
+          rampWaveDone: false,
+        },
+      );
       const _kIntroPose = { pos: new THREE.Vector3(), look: new THREE.Vector3(), fov: 50, roll: 0 };
-      const _kIntroPrev = { pos: new THREE.Vector3(), look: new THREE.Vector3(), fov: 50, roll: 0 };
       const _kIntroPt = { x: 0, z: 0, heading: 0 };
       const _kIntroPt2 = { x: 0, z: 0, heading: 0 };
       const _kIntroV = new THREE.Vector3();
       const _kIntroV2 = new THREE.Vector3();
 
-      function _kIntroEase(t) {
-        return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
-      }
-      function _kIntroEaseSine(t) {
-        return -(Math.cos(Math.PI * t) - 1) / 2;
-      }
-      const _kIntroLerp = (a, b, t) => a + (b - a) * t;
+      const _kIntroEase = introEase;
+      const _kIntroEaseSine = introEaseSine;
+      const _kIntroLerp = introLerp;
       const _kIntroDeg = Math.PI / 180;
 
       /** Race progress in (-L/2, L/2]: the grid sits just behind the start line (negative). */
@@ -5249,39 +5243,19 @@ let _worldSwitched = false;
         return o;
       }
 
-      /** The intro camera pose at intro time t (shots, blends, the arrival). */
-      function _kIntroPoseAt(time, o) {
-        let t = time;
-        let i = 0;
-        while (i < KITCHEN_INTRO_SHOTS.length - 1 && t >= KITCHEN_INTRO_SHOTS[i].sec) {
-          t -= KITCHEN_INTRO_SHOTS[i].sec;
-          i++;
-        }
-        const shot = KITCHEN_INTRO_SHOTS[i];
-        const u = Math.min(1, Math.max(0, t / shot.sec));
-        if (shot.name === "arrival") {
-          // From the run's last pose up over the infield (height first, clear of
-          // the props and cars) onto the live gameplay camera.
-          _kIntroShotPose(i - 1, 1, _kIntroPrev);
-          const e = _kIntroEaseSine(u);
-          const eUp = Math.sin((Math.PI / 2) * Math.min(1, u * 1.4));
-          o.pos.x = _kIntroLerp(_kIntroPrev.pos.x, camera.position.x, e);
-          o.pos.z = _kIntroLerp(_kIntroPrev.pos.z, camera.position.z, e);
-          o.pos.y = _kIntroLerp(_kIntroPrev.pos.y, camera.position.y, eUp);
-          o.look.lerpVectors(_kIntroPrev.look, controls.target, e);
-          o.fov = _kIntroLerp(_kIntroPrev.fov, camera.fov, e);
-          o.roll = _kIntroLerp(_kIntroPrev.roll, 0, e);
-          return o;
-        }
-        _kIntroShotPose(i, u, o);
-        if (shot.blendIn > 0 && i > 0 && t < shot.blendIn) {
-          _kIntroShotPose(i - 1, 1, _kIntroPrev);
-          const k = 1 - _kIntroEaseSine(t / shot.blendIn);
-          o.pos.lerp(_kIntroPrev.pos, k);
-          o.look.lerp(_kIntroPrev.look, k);
-          o.fov = _kIntroLerp(o.fov, _kIntroPrev.fov, k);
-          o.roll = _kIntroLerp(o.roll, _kIntroPrev.roll, k);
-        }
+      /**
+       * 4. Arrival: from the run's last pose up over the infield (height first,
+       * clear of the props and cars) onto the live gameplay camera.
+       */
+      function _kIntroArrivalPose(u, from, o) {
+        const e = _kIntroEaseSine(u);
+        const eUp = Math.sin((Math.PI / 2) * Math.min(1, u * 1.4));
+        o.pos.x = _kIntroLerp(from.pos.x, camera.position.x, e);
+        o.pos.z = _kIntroLerp(from.pos.z, camera.position.z, e);
+        o.pos.y = _kIntroLerp(from.pos.y, camera.position.y, eUp);
+        o.look.lerpVectors(from.look, controls.target, e);
+        o.fov = _kIntroLerp(from.fov, camera.fov, e);
+        o.roll = _kIntroLerp(from.roll, 0, e);
         return o;
       }
 
@@ -5304,7 +5278,7 @@ let _worldSwitched = false;
         if (_kIntro.state === "done") return;
         const wasPlaying = _kIntro.state === "playing";
         _kIntro.state = "done";
-        updateKitchenIntroFade(); // no fade left over
+        _kIntro.updateFade(); // no fade left over
         if (wasPlaying) controls.enabled = _kIntro.controlsWereEnabled;
         // Nothing pressed during the intro carries into the race.
         for (const k in keys) if (typeof keys[k] === "boolean") keys[k] = false;
@@ -5315,17 +5289,8 @@ let _worldSwitched = false;
         }
       }
 
-      // During the intro (and under the loader before it) input does nothing:
-      // keys and clicks stop here, before any game handler (driving, cameras,
-      // light modes, level keys) sees them. Browser shortcuts still work.
-      const _blockKitchenIntroInput = (e) => {
-        if (_kIntro.state === "done" || !_kitchenSceneRendering) return;
-        e.stopImmediatePropagation();
-        if (e.type === "keydown" && !e.metaKey && !e.ctrlKey && !e.altKey) e.preventDefault();
-      };
-      for (const type of ["keydown", "pointerdown", "wheel"]) {
-        window.addEventListener(type, _blockKitchenIntroInput, { capture: true, passive: false });
-      }
+      // Input during the intro (and under the loader before it) is blocked by
+      // the shared intro (cinematicIntro.js).
 
       /** The intro's arrow waves, timed with the shots. */
       function _kIntroWaves(t) {
@@ -5359,102 +5324,13 @@ let _worldSwitched = false;
         }
       }
 
-      /** Letterbox bars: in while the intro plays, out as the race begins (every frame). */
-      function updateKitchenIntroLetterbox(dt) {
-        const mount = getKitchenSceneMount();
-        if (!_kIntro.bars) {
-          if (_kIntro.state !== "playing" || !mount) return;
-          const bar = (top) => {
-            const el = document.createElement("div");
-            Object.assign(el.style, {
-              position: "absolute",
-              left: "0",
-              right: "0",
-              [top ? "top" : "bottom"]: "0",
-              height: `${KITCHEN_INTRO_LETTERBOX_HEIGHT * 100}%`,
-              background: "#000",
-              zIndex: "4",
-              pointerEvents: "none",
-              transform: `translateY(${top ? -100 : 100}%)`,
-              willChange: "transform",
-            });
-            mount.appendChild(el);
-            return el;
-          };
-          _kIntro.bars = [bar(true), bar(false)];
-        }
-        const target = _kIntro.state === "playing" ? 1 : 0;
-        const sec = target ? KITCHEN_INTRO_LETTERBOX_IN_SEC : KITCHEN_INTRO_LETTERBOX_OUT_SEC;
-        const k0 = _kIntro.barsK;
-        _kIntro.barsK = target > k0 ? Math.min(1, k0 + dt / sec) : Math.max(0, k0 - dt / sec);
-        if (_kIntro.barsK === k0 && (k0 === 0 || k0 === 1) && _kIntro.barsSet === k0) return;
-        const e = _kIntroEaseSine(_kIntro.barsK);
-        _kIntro.bars[0].style.transform = `translateY(${-100 * (1 - e)}%)`;
-        _kIntro.bars[1].style.transform = `translateY(${100 * (1 - e)}%)`;
-        _kIntro.barsSet = _kIntro.barsK;
-        if (_kIntro.barsK === 0 && _kIntro.state === "done") {
-          for (const el of _kIntro.bars) el.remove();
-          _kIntro.bars = null;
-        }
-      }
-
-      /** Fade-to-black level (0..1) at intro time t: around each `fade` cut. */
-      function _kIntroFadeAt(t) {
-        let start = 0;
-        let a = 0;
-        for (let i = 0; i < KITCHEN_INTRO_SHOTS.length; i++) {
-          const sh = KITCHEN_INTRO_SHOTS[i];
-          if (i > 0 && sh.fade) {
-            const cut = start; // the camera switches shots here
-            const blackFrom = cut - KITCHEN_INTRO_FADE_HOLD_SEC / 2;
-            const blackTo = cut + KITCHEN_INTRO_FADE_HOLD_SEC / 2;
-            let k = 0;
-            if (t >= blackFrom && t <= blackTo) k = 1;
-            else if (t < blackFrom && t > blackFrom - KITCHEN_INTRO_FADE_OUT_SEC) k = 1 - (blackFrom - t) / KITCHEN_INTRO_FADE_OUT_SEC;
-            else if (t > blackTo && t < blackTo + KITCHEN_INTRO_FADE_IN_SEC) k = 1 - (t - blackTo) / KITCHEN_INTRO_FADE_IN_SEC;
-            a = Math.max(a, _kIntroEaseSine(Math.max(0, Math.min(1, k))));
-          }
-          start += sh.sec;
-        }
-        return a;
-      }
-
-      /** Full-screen black overlay for the fades (under the letterbox bars); gone once the intro ends. */
-      function updateKitchenIntroFade() {
-        const playing = _kIntro.state === "playing";
-        const a = playing ? _kIntroFadeAt(_kIntro.t) : 0;
-        if (!playing || a <= 0) {
-          if (_kIntro.fadeEl) {
-            _kIntro.fadeEl.remove();
-            _kIntro.fadeEl = null;
-          }
-          return;
-        }
-        const mount = getKitchenSceneMount();
-        if (!mount) return;
-        if (!_kIntro.fadeEl) {
-          const el = document.createElement("div");
-          Object.assign(el.style, {
-            position: "absolute",
-            inset: "0",
-            background: "#000",
-            zIndex: "3",
-            pointerEvents: "none",
-            opacity: "0",
-          });
-          mount.appendChild(el);
-          _kIntro.fadeEl = el;
-        }
-        _kIntro.fadeEl.style.opacity = a.toFixed(3);
-      }
-
       /**
        * Per frame, after the normal camera update: moves the active camera to the
        * intro pose for this frame's render (restored right after, so the race
        * camera keeps its own state and the last move can land on it exactly).
        */
       function applyKitchenIntroCamera(dt) {
-        updateKitchenIntroLetterbox(dt);
+        _kIntro.updateLetterbox(dt);
         if (_kIntro.state === "done") return false;
         if (!_kIntro.rig) {
           if (!_kitchenSceneReady) return false;
@@ -5469,34 +5345,13 @@ let _worldSwitched = false;
             return false;
           }
         }
-        updateKitchenIntroFade();
-        const o = _kIntroPoseAt(_kIntro.t, _kIntroPose);
-        _kIntro.savedPos.copy(camera.position);
-        _kIntro.savedQuat.copy(camera.quaternion);
-        _kIntro.savedFov = camera.fov;
-        camera.position.copy(o.pos);
-        camera.up.set(0, 1, 0);
-        camera.lookAt(o.look);
-        if (o.roll) camera.rotateZ(o.roll);
-        if (Math.abs(camera.fov - o.fov) > 1e-4) {
-          camera.fov = o.fov;
-          camera.updateProjectionMatrix();
-        }
-        camera.updateMatrixWorld();
-        _kIntro.overriding = true;
+        _kIntro.updateFade();
+        _kIntro.applyCamera(_kIntro.poseAt(_kIntro.t, _kIntroPose));
         return true;
       }
 
       function restoreKitchenIntroCamera() {
-        if (!_kIntro.overriding) return;
-        camera.position.copy(_kIntro.savedPos);
-        camera.quaternion.copy(_kIntro.savedQuat);
-        if (camera.fov !== _kIntro.savedFov) {
-          camera.fov = _kIntro.savedFov;
-          camera.updateProjectionMatrix();
-        }
-        camera.updateMatrixWorld();
-        _kIntro.overriding = false;
+        _kIntro.restoreCamera();
       }
 
       // ---------------------------------------------------------------------------

@@ -46,3 +46,9 @@ export function goToLevelWithTransition(path) {
   if (typeof window === "undefined" || !path) return;
   window.location.assign(levelUrl(path));
 }
+
+/**
+ * Level transitions keep their level description fully readable at least this
+ * long (from the moment it's fully shown), even if loading is very fast.
+ */
+export const LEVEL_DESCRIPTION_MIN_READ_MS = 5500;

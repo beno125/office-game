@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { LEVEL_ORDER, SCENE_ROUTES } from "./sceneRoutes.js";
+import { LEVEL_ORDER, SCENE_ROUTES, LEVEL_DESCRIPTION_MIN_READ_MS } from "./sceneRoutes.js";
 
 /**
  * Loader before the meeting room: an illuminated lightbox sign hanging in a
@@ -26,38 +26,91 @@ const SIGN_BACKGROUND = 0x04060d;
 const SIGN_WALL_COLOR = 0x070b18;
 
 /** Timings (ms). */
-// Sequence: FADE_IN → LOADING → HOLD → EXIT, each step only after the previous one.
-const SIGN_FADE_IN_MS = 1500; // the whole sign fades in (loader held at 0%)
-const SIGN_LIGHTS_ON_DELAY_MS = 250; // into the fade-in, the lights come on…
-const SIGN_FLICKER_MS = 900; // …with a short flicker, steady before the fade-in ends
-const SIGN_LOADER_MIN_MS = 1800; // the bar takes at least this long from 0% to 100%
-const SIGN_HOLD_MS = 1000; // full sign, bar at 100%, before the exit
+// Sequence: TURN_ON → LOADING → HOLD → EXIT, each step only after the previous one.
+/**
+ * Fluorescent turn-on: the tubes behind the face (the lights part) are the
+ * sign's only light. Their brightness drives everything, frame by frame: the
+ * face's glow (each band following its own tube, slightly out of sync), so the
+ * printed text and the loader read only as it lights up; the cup's edge; the
+ * halo on the wall; the bloom. The base (frame) lights itself, steadily. Off = a dark face,
+ * just a faint outline from the room's ambient light.
+ * The pattern: a hard flash, a buzzing burst, irregular blinks at different
+ * levels, a false start that holds and fails, then a strong catch with an
+ * overbright flash and a last stutter, settling into steady warm white.
+ * Different every run.
+ */
+const SIGN_TURN_ON_MS = 2600; // total, up to the tubes steady (loader held at 0%)
+const SIGN_FLASH_LEVEL_MIN = 1.3; // blink / flash brightness range (× the steady band)
+const SIGN_FLASH_LEVEL_MAX = 2.6;
+const SIGN_OVERBRIGHT = 4.2; // short overbright peak on some flashes
+const SIGN_OVERBRIGHT_CHANCE = 0.4;
+const SIGN_BUZZ_TOGGLES_MIN = 6; // rapid buzzing flicker
+const SIGN_BUZZ_TOGGLES_MAX = 10;
+const SIGN_BLINKS_MIN = 2; // irregular blinks after the buzz
+const SIGN_BLINKS_MAX = 4;
+const SIGN_FALSE_START_HOLD_MS = 320; // it almost catches and holds this long…
+const SIGN_FALSE_START_DARK_MS = 300; // …then fails to dark for this long
+const SIGN_CATCH_FLASH = 1.9; // the final catch: a flash above steady…
+const SIGN_WARMUP_MS = 480; // …then settles into steady warm white over this long (in the total)
+const SIGN_FLICKER_JITTER = 0.4; // timing randomness (± share of each step's length)
+const SIGN_TUBE_DESYNC_MS = 45; // each tube's timing offset (±), all steady together at the end
+const SIGN_TUBE_LEVEL_SPREAD = 0.25; // each tube's brightness varies by ± this while flickering
+/** Cool tint of the tubes while starting (× the light colour), warming to 1. */
+const SIGN_CATCH_TINT = [0.88, 0.96, 1.12];
+/** Most bands the face shader takes. */
+const SIGN_MAX_BANDS = 12;
+/** The room's faint ambient light (hemisphere): the sign's outline when its lights are off. */
+const SIGN_ROOM_AMBIENT = 0.9;
+/**
+ * The cup as a material: unlit frosted plastic (a dark, neutral base colour,
+ * lit only by the room's faint ambient light), with the glowing face (artwork
+ * and ink) as its emissive map, so all its light comes from the tubes.
+ */
+const SIGN_CUP_BASE_COLOR = 0x141417; // dark, so the light on it never greys the ink (was 0x3a3a40)
+const SIGN_CUP_ROUGHNESS = 0.9;
+const SIGN_CUP_ENV = 0; // no environment reflection on the cup
+const SIGN_LOADER_MIN_MS = 3000; // the bar takes at least this long from 0% to 100%
+const SIGN_HOLD_MS = 2800; // full sign, bar at 100%, before the exit
+/** Fully readable (end of the fade-in → exit) at least this long, however fast the room loads. */
+const SIGN_MIN_READABLE_MS = LEVEL_DESCRIPTION_MIN_READ_MS;
 const SIGN_DIM_MS = 700; // exit: lights dim, then onFinished() (the page fades out)
 const SIGN_COLOR_WAIT_MS = 900; // longest wait for the table colour before the lights come on
 
 /** Camera: the sign fills this much of the smaller screen dimension, then pushes in. */
-const SIGN_FILL = 0.78;
-const SIGN_PUSH_IN = 0.07; // fraction of the distance over SIGN_PUSH_SEC
-const SIGN_PUSH_SEC = 9;
-const SIGN_DRIFT = 0.025; // slow drift amplitude (× sign size)
-const SIGN_DRIFT_RATE = 0.16; // Hz
+const SIGN_FILL = 0.84; // the framing the old push-in ended on, now fixed from the first frame
 
 /** Progress split: download, then parse / scene set-up until "ready". */
-const SIGN_DOWNLOAD_SHARE = 0.86;
+/**
+ * Progress shares: the room's load (download, then parse / set-up until it
+ * reports ready), then its warm-up (texture uploads, shader compiles, probes),
+ * so 100% means it is ready to render smoothly.
+ */
+const SIGN_LOAD_SHARE = 0.6;
+const SIGN_DOWNLOAD_SHARE = 0.85; // of the load share
 const SIGN_PARSE_SEC = 4; // time constant of the parse share while waiting for "ready"
 
 /** Bloom: soft glow of the face, kept low so the ink stays crisp. */
-const SIGN_BLOOM_STRENGTH = 0.32;
-const SIGN_BLOOM_RADIUS = 0.4;
-const SIGN_BLOOM_THRESHOLD = 0.94;
+const SIGN_BLOOM_STRENGTH = 0.12; // a subtle glow only (was 0.32)
+const SIGN_BLOOM_RADIUS = 0.3; // (was 0.4)
+const SIGN_BLOOM_THRESHOLD = 0.82; // only the band peaks glow, the ink stays crisp (was 0.94)
 /** Face brightness when fully lit (the bands just reach the bloom threshold). */
-const SIGN_FACE_BRIGHTNESS = 1.0;
+const SIGN_FACE_BRIGHTNESS = 0.86; // the lights fully on (1): bright, not clipped (was 1.0)
 /** Light intensities at full power. */
-const SIGN_SPILL_INTENSITY = 1.6;
-const SIGN_BACK_INTENSITY = 0.9;
+/**
+ * The base (frame and rod) is lit only by its own emissive, in its own yellow,
+ * which follows the tubes softly: base = min + (max − min) × brightness, the
+ * brightness clamped to 0..1 so overbright flashes never take it above its
+ * steady look. No other light reaches its front, and it stays under the bloom
+ * threshold.
+ */
+const SIGN_BASE_GLOW = 0.6; // max: its steady lit look (the peak before this change)
+const SIGN_BASE_MIN_SHARE = 0.2; // min: 20% of the max while the tubes are off
+const SIGN_BACK_INTENSITY = 0.77; // × 0.86 (was 0.9)
 
 /** Face texture: light bands where the tubes are, a soft fall-off at the edges. */
-const SIGN_BAND_GAIN = 0.11; // band brightness above the even glow
+const SIGN_BAND_BASE = 0.76; // the even glow between the bands (was 0.9)
+const SIGN_BAND_GAIN = 0.25; // band brightness above the even glow: visible, soft stripes (was 0.11)
+const SIGN_BAND_TINT = 2; // the faint cool / warm variation across the face (was 1)
 const SIGN_BAND_WIDTH = 0.3; // gaussian sigma, × tube spacing
 const SIGN_EDGE_FALLOFF = 0.07;
 
@@ -347,7 +400,7 @@ function drawFace(ctx, S, bands, content) {
   const img = ctx.createImageData(S, 1);
   for (let x = 0; x < S; x++) {
     const u = (x + 0.5) / S;
-    let k = 0.9;
+    let k = SIGN_BAND_BASE;
     for (const bd of bands) k += SIGN_BAND_GAIN * Math.exp(-0.5 * ((u - bd.u) / bd.sigma) ** 2);
     const edge = Math.min(u, 1 - u);
     k *= 1 - SIGN_EDGE_FALLOFF * Math.exp(-edge / 0.06);
@@ -355,9 +408,9 @@ function drawFace(ctx, S, bands, content) {
     let cool = 0;
     for (const bd of bands) cool += Math.exp(-0.5 * ((u - bd.u - bd.sigma * 1.6) / bd.sigma) ** 2);
     const i = x * 4;
-    img.data[i] = Math.min(255, warm.r * k - cool * 4);
-    img.data[i + 1] = Math.min(255, warm.g * k - cool * 2);
-    img.data[i + 2] = Math.min(255, warm.b * k + cool * 6);
+    img.data[i] = Math.min(255, warm.r * k - cool * 4 * SIGN_BAND_TINT);
+    img.data[i + 1] = Math.min(255, warm.g * k - cool * 2 * SIGN_BAND_TINT);
+    img.data[i + 2] = Math.min(255, warm.b * k + cool * 6 * SIGN_BAND_TINT);
     img.data[i + 3] = 255;
   }
   for (let y = 0; y < S; y++) ctx.putImageData(img, 0, y);
@@ -428,10 +481,26 @@ function signContent() {
 
 // ---------------------------------------------------------------------------
 
-export default function MeetingRoomSignTransition({ ready, onFinished }) {
+/**
+ * @param {boolean} props.ready        the room is loaded and warmed up (safe to show)
+ * @param {boolean} props.roomLoaded   the room has loaded (warm-up under way)
+ * @param {number}  props.prepProgress warm-up progress 0..1
+ * @param {() => void} props.onLoadingStart the sign is fully shown and the loader starts (warm-up may begin)
+ * @param {() => void} props.onExit    the exit begins (the room may start rendering underneath)
+ * @param {() => void} props.onFinished the exit is done (fade this out)
+ */
+export default function MeetingRoomSignTransition({ ready, roomLoaded, prepProgress, onLoadingStart, onExit, onFinished }) {
   const stageRef = useRef(null);
   const readyRef = useRef(ready);
   readyRef.current = ready;
+  const loadedRef = useRef(roomLoaded);
+  loadedRef.current = roomLoaded;
+  const prepRef = useRef(prepProgress);
+  prepRef.current = prepProgress;
+  const onExitRef = useRef(onExit);
+  onExitRef.current = onExit;
+  const onLoadingStartRef = useRef(onLoadingStart);
+  onLoadingStartRef.current = onLoadingStart;
   const onFinishedRef = useRef(onFinished);
   onFinishedRef.current = onFinished;
   // Installed during the first render, so it is in place before the page
@@ -453,10 +522,8 @@ export default function MeetingRoomSignTransition({ ready, onFinished }) {
       import("three/addons/postprocessing/RenderPass.js"),
       import("three/addons/postprocessing/UnrealBloomPass.js"),
       import("three/addons/postprocessing/OutputPass.js"),
-      import("three/addons/lights/RectAreaLightUniformsLib.js"),
-    ]).then(async ([THREE, { GLTFLoader }, { EffectComposer }, { RenderPass }, { UnrealBloomPass }, { OutputPass }, { RectAreaLightUniformsLib }]) => {
+    ]).then(async ([THREE, { GLTFLoader }, { EffectComposer }, { RenderPass }, { UnrealBloomPass }, { OutputPass }]) => {
       if (disposed) return;
-      RectAreaLightUniformsLib.init();
       const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
       renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
       renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -465,7 +532,7 @@ export default function MeetingRoomSignTransition({ ready, onFinished }) {
       renderer.toneMapping = THREE.NoToneMapping;
       renderer.setClearColor(SIGN_BACKGROUND, 1);
       renderer.domElement.style.display = "block";
-      renderer.domElement.style.opacity = "0"; // until the FADE_IN step
+      // Visible from the first frame: the sign is there, just unlit.
       stage.appendChild(renderer.domElement);
       const scene = new THREE.Scene();
       scene.background = new THREE.Color(SIGN_BACKGROUND);
@@ -546,6 +613,8 @@ export default function MeetingRoomSignTransition({ ready, onFinished }) {
           metalness: 0,
           clearcoat: 0.25,
           clearcoatRoughness: 0.5,
+          emissive: 0x8a6a2a, // = its own colour, steady (set with the colour below)
+          emissiveIntensity: SIGN_BASE_GLOW,
         }),
       );
       if (base) base.material = baseMat;
@@ -553,7 +622,7 @@ export default function MeetingRoomSignTransition({ ready, onFinished }) {
       if (lights) lights.material = tubeMat;
       const cupEdgeMat = track(
         new THREE.MeshStandardMaterial({
-          color: lightColor.clone(),
+          color: SIGN_CUP_BASE_COLOR, // unlit frosted plastic
           emissive: lightColor.clone(),
           emissiveIntensity: 0,
           roughness: 0.9,
@@ -574,14 +643,10 @@ export default function MeetingRoomSignTransition({ ready, onFinished }) {
       wall.rotation.y = Math.PI / 2; // faces +X
       wall.position.set(signBox.min.x - 0.9, center.y, center.z);
       scene.add(wall);
-      scene.add(new THREE.HemisphereLight(0x1a2244, 0x05060a, 0.18));
+      scene.add(new THREE.HemisphereLight(0x1a2244, 0x05060a, SIGN_ROOM_AMBIENT));
 
-      // Light: spill from the face onto the frame (area light in front, facing
-      // the sign) and a halo behind it on the wall (points behind the cup).
-      const spill = new THREE.RectAreaLight(lightColor, 0, faceW, faceH);
-      spill.position.copy(faceCenter).addScaledVector(normal, 0.55);
-      spill.lookAt(faceCenter);
-      scene.add(spill);
+      // Light: a halo behind the sign on the wall (points behind the cup),
+      // following the tubes. (No light in front: the base lights itself.)
       const backLights = [];
       for (const s of [-0.55, 0, 0.55]) {
         const p = new THREE.PointLight(lightColor, 0, 4.5, 1.6);
@@ -640,7 +705,68 @@ export default function MeetingRoomSignTransition({ ready, onFinished }) {
         faceTex.needsUpdate = true;
         placeLoader();
       };
-      const faceMat = track(new THREE.MeshBasicMaterial({ map: faceTex, color: 0x000000 }));
+      // The face: its artwork as printed (steady), with each tube's band
+      // scaled by that tube's level (1 = exactly the printed look).
+      const faceMat = track(
+        new THREE.MeshStandardMaterial({
+          color: SIGN_CUP_BASE_COLOR,
+          roughness: SIGN_CUP_ROUGHNESS,
+          metalness: 0,
+          envMapIntensity: SIGN_CUP_ENV,
+          emissive: 0xffffff,
+          emissiveMap: faceTex,
+          emissiveIntensity: 0, // = the tubes' brightness, every frame
+        }),
+      );
+      const bandUniforms = {
+        uBandCount: { value: Math.min(SIGN_MAX_BANDS, bands.length) },
+        uBandU: { value: new Float32Array(SIGN_MAX_BANDS) },
+        uBandSigma: { value: new Float32Array(SIGN_MAX_BANDS).fill(1) },
+        uBandLevel: { value: new Float32Array(SIGN_MAX_BANDS).fill(1) },
+        uBandGain: { value: SIGN_BAND_GAIN },
+        uBandTint: { value: new THREE.Color(1, 1, 1) },
+        uBaseLevel: { value: 1 }, // the tubes' combined brightness (= emissiveIntensity's level)
+      };
+      bands.slice(0, SIGN_MAX_BANDS).forEach((bd, i) => {
+        bandUniforms.uBandU.value[i] = bd.u;
+        bandUniforms.uBandSigma.value[i] = bd.sigma;
+      });
+      faceMat.onBeforeCompile = (shader) => {
+        Object.assign(shader.uniforms, bandUniforms);
+        shader.fragmentShader = shader.fragmentShader
+          .replace(
+            "#include <common>",
+            `#include <common>
+            #define SIGN_MAX_BANDS ${SIGN_MAX_BANDS}
+            uniform int uBandCount;
+            uniform float uBandU[SIGN_MAX_BANDS];
+            uniform float uBandSigma[SIGN_MAX_BANDS];
+            uniform float uBandLevel[SIGN_MAX_BANDS];
+            uniform float uBandGain;
+            uniform vec3 uBandTint;
+            uniform float uBaseLevel;`,
+          )
+          .replace(
+            "#include <emissivemap_fragment>",
+            `#include <emissivemap_fragment>
+            {
+              // The face's glow (emissive map × emissiveIntensity = the combined
+              // brightness); each band relative to it follows its own tube.
+              float printed = ${SIGN_BAND_BASE.toFixed(4)};
+              float lit = ${SIGN_BAND_BASE.toFixed(4)};
+              float base = max(uBaseLevel, 1e-3);
+              for (int i = 0; i < SIGN_MAX_BANDS; i++) {
+                if (i >= uBandCount) break;
+                float d = (vEmissiveMapUv.x - uBandU[i]) / uBandSigma[i];
+                float g = uBandGain * exp(-0.5 * d * d);
+                printed += g;
+                lit += g * uBandLevel[i] / base;
+              }
+              totalEmissiveRadiance *= (lit / printed) * uBandTint;
+            }`,
+          );
+      };
+      faceMat.customProgramCacheKey = () => "signFaceBands";
       const face = new THREE.Group();
       face.position.copy(faceCenter);
       face.rotation.y = Math.PI / 2; // local +Z = world +X (normal), local +X = world -Z (screen right)
@@ -709,6 +835,9 @@ export default function MeetingRoomSignTransition({ ready, onFinished }) {
         const fitH = signSize.y / 2 / (tanV * SIGN_FILL);
         const fitW = signSize.z / 2 / (tanH * SIGN_FILL);
         baseDist = Math.max(fitH, fitW);
+        // A still camera, straight on (refitted only when the screen changes).
+        camera.position.set(center.x + baseDist, center.y, center.z);
+        camera.lookAt(center);
         // Face texture size: about its on-screen size in device pixels (sharp text).
         const facePx = (faceH / (2 * baseDist * tanV)) * h * renderer.getPixelRatio();
         const want = Math.min(renderer.capabilities.maxTextureSize, 2048, Math.max(1024, 2 ** Math.ceil(Math.log2(facePx))));
@@ -728,6 +857,7 @@ export default function MeetingRoomSignTransition({ ready, onFinished }) {
       })()
         .then(({ color, source }) => {
           baseMat.color.copy(color);
+          baseMat.emissive.copy(color);
           console.info(`[MeetingRoomSign] base colour from ${TABLE_NODE_NAME} (${source}): #${color.getHexString(THREE.SRGBColorSpace)}`);
         })
         .catch((error) => console.warn("[MeetingRoomSign] table colour not read:", error));
@@ -747,42 +877,110 @@ export default function MeetingRoomSignTransition({ ready, onFinished }) {
       ]);
       if (disposed) return cleanup();
 
-      // --- Loop: FADE_IN → LOADING → HOLD → EXIT -----------------------------
-      const canvasStyle = renderer.domElement.style;
-      let step = "FADE_IN";
+      // --- Loop: TURN_ON → LOADING → HOLD → EXIT -----------------------------
+      let step = "TURN_ON";
       let stepAt = performance.now();
       const goTo = (next, now) => {
         step = next;
         stepAt = now;
       };
       let shown = 0; // bar value (0..1), never goes backward
+      let readableFrom = 0; // the light fully on
       let downloadDoneAt = 0;
       let finished = false;
       let last = performance.now();
-      const dir = new THREE.Vector3();
 
-      const flicker = (ms) => {
-        // A few quick blinks rising to steady.
-        if (ms < 0) return 0;
-        if (ms >= SIGN_FLICKER_MS) return 1;
-        const u = ms / SIGN_FLICKER_MS;
-        const blinks = [0.08, 0.16, 0.3, 0.38, 0.55];
-        let on = 1;
-        for (let i = 0; i < blinks.length; i++) if (u > blinks[i]) on = i % 2 ? 1 : 0.15;
-        if (u < blinks[0]) on = 0;
-        return on * (0.55 + 0.45 * u);
+      // The turn-on pattern: [start ms, end ms, level] steps up to the catch
+      // (dark between them), then the catch and warm-up; scaled to
+      // SIGN_TURN_ON_MS. Different every run.
+      const rnd = (lo, hi) => lo + Math.random() * (hi - lo);
+      const jit = (ms) => ms * (1 + rnd(-SIGN_FLICKER_JITTER, SIGN_FLICKER_JITTER));
+      const flash = () =>
+        Math.random() < SIGN_OVERBRIGHT_CHANCE ? SIGN_OVERBRIGHT : rnd(SIGN_FLASH_LEVEL_MIN, SIGN_FLASH_LEVEL_MAX);
+      const turnOn = (() => {
+        const steps = [];
+        let t = jit(140); // dark first
+        const on = (ms, level) => {
+          const d = Math.max(12, jit(ms));
+          steps.push([t, t + d, level]);
+          t += d;
+        };
+        const dark = (ms) => (t += Math.max(12, jit(ms)));
+        on(45, SIGN_OVERBRIGHT); // a hard first flash
+        dark(230);
+        // A buzzing burst.
+        const toggles = SIGN_BUZZ_TOGGLES_MIN + Math.floor(Math.random() * (SIGN_BUZZ_TOGGLES_MAX - SIGN_BUZZ_TOGGLES_MIN + 1));
+        for (let i = 0; i < toggles; i++) {
+          on(rnd(14, 30), rnd(0.7, 2.0));
+          dark(rnd(12, 34));
+        }
+        dark(170);
+        // Irregular blinks at different levels, with pauses of darkness.
+        const blinks = SIGN_BLINKS_MIN + Math.floor(Math.random() * (SIGN_BLINKS_MAX - SIGN_BLINKS_MIN + 1));
+        for (let i = 0; i < blinks; i++) {
+          on(rnd(30, 80), flash());
+          dark(rnd(60, 190));
+        }
+        // The false start: almost catches, holds (a slight buzz), then fails.
+        on(SIGN_FALSE_START_HOLD_MS * 0.55, rnd(0.85, 1.0));
+        on(25, rnd(0.45, 0.6));
+        on(SIGN_FALSE_START_HOLD_MS * 0.45, rnd(0.9, 1.05));
+        dark(SIGN_FALSE_START_DARK_MS);
+        on(30, flash());
+        dark(rnd(70, 120));
+        // The final catch: an overbright flash and a last quick stutter.
+        on(70, SIGN_CATCH_FLASH);
+        on(30, rnd(0.2, 0.35));
+        const k = (SIGN_TURN_ON_MS - SIGN_WARMUP_MS) / t; // to the total length
+        for (const st of steps) {
+          st[0] *= k;
+          st[1] *= k;
+        }
+        return { steps, catchAt: SIGN_TURN_ON_MS - SIGN_WARMUP_MS };
+      })();
+      // Each tube: a small timing offset and its own brightness while flickering.
+      const tubeOffsets = bands.map(() => rnd(-SIGN_TUBE_DESYNC_MS, SIGN_TUBE_DESYNC_MS));
+      const tubeScales = bands.map(() => 1 + rnd(-SIGN_TUBE_LEVEL_SPREAD, SIGN_TUBE_LEVEL_SPREAD));
+      const tint = new THREE.Color();
+      /** A tube's level at `ms` into the turn-on (1 = steady). */
+      const turnOnLevel = (ms) => {
+        if (ms >= SIGN_TURN_ON_MS) return 1;
+        if (ms >= turnOn.catchAt) {
+          // From just above steady down into it, smoothly.
+          const w = (ms - turnOn.catchAt) / SIGN_WARMUP_MS;
+          const e = 1 - (1 - w) * (1 - w);
+          return 1.25 + (1 - 1.25) * e;
+        }
+        for (const [t0, t1, level] of turnOn.steps) if (ms >= t0 && ms < t1) return level;
+        return 0;
       };
+      /** The tubes' tint at `ms`: cool while starting, warming to white during the settle. */
+      const turnOnTint = (ms, out) => {
+        const w = ms >= turnOn.catchAt ? Math.min(1, (ms - turnOn.catchAt) / SIGN_WARMUP_MS) : 0;
+        const e = 1 - (1 - w) * (1 - w);
+        return out.setRGB(
+          SIGN_CATCH_TINT[0] + (1 - SIGN_CATCH_TINT[0]) * e,
+          SIGN_CATCH_TINT[1] + (1 - SIGN_CATCH_TINT[1]) * e,
+          SIGN_CATCH_TINT[2] + (1 - SIGN_CATCH_TINT[2]) * e,
+        );
+      };
+      const tubeLevels = bandUniforms.uBandLevel.value;
 
       /** Real progress of the meeting room (it loads from the start, in the background). */
       const realProgress = (now) => {
         if (readyRef.current) return 1;
+        // Loaded: the warm-up share.
+        if (loadedRef.current) {
+          return Math.min(0.999, SIGN_LOAD_SHARE + (1 - SIGN_LOAD_SHARE) * Math.max(0, prepRef.current || 0));
+        }
+        // Loading: download, then parse / set-up.
         const dl = progress.fraction();
         if (dl >= 1 && !downloadDoneAt) downloadDoneAt = now;
         let p = SIGN_DOWNLOAD_SHARE * dl;
         if (downloadDoneAt) {
           p += (1 - SIGN_DOWNLOAD_SHARE) * 0.9 * (1 - Math.exp(-(now - downloadDoneAt) / 1000 / SIGN_PARSE_SEC));
         }
-        return Math.min(0.999, p);
+        return SIGN_LOAD_SHARE * Math.min(0.999, p);
       };
 
       const frame = () => {
@@ -791,17 +989,29 @@ export default function MeetingRoomSignTransition({ ready, onFinished }) {
         const now = performance.now();
         const dt = Math.min(0.1, (now - last) / 1000);
         last = now;
-        const tSec = (now - t0) / 1000;
         const inStep = now - stepAt;
-        let power = 1;
-        let opacity = 1;
+        let power = 1; // the whole sign (only the exit dims it)
+        let tubes = 1; // the lights part's average level (the hidden tube meshes)
+        tint.setRGB(1, 1, 1);
 
-        if (step === "FADE_IN") {
-          // Everything fades in; the loader shows 0% and doesn't move.
-          const u = Math.min(1, inStep / SIGN_FADE_IN_MS);
-          opacity = u * u * (3 - 2 * u);
-          power = flicker(inStep - SIGN_LIGHTS_ON_DELAY_MS);
-          if (u >= 1) goTo("LOADING", now);
+        if (step === "TURN_ON") {
+          // Only the tubes start up (their bands on the face); the loader shows 0%.
+          turnOnTint(inStep, tint);
+          let sum = 0;
+          for (let i = 0; i < tubeOffsets.length && i < SIGN_MAX_BANDS; i++) {
+            const ms = inStep + tubeOffsets[i];
+            const level = turnOnLevel(Math.min(ms, SIGN_TURN_ON_MS - 1));
+            tubeLevels[i] = ms >= turnOn.catchAt ? level : level * tubeScales[i];
+            sum += tubeLevels[i];
+          }
+          tubes = sum / Math.max(1, tubeOffsets.length);
+          if (inStep >= SIGN_TURN_ON_MS + SIGN_TUBE_DESYNC_MS) {
+            tubeLevels.fill(1);
+            tint.setRGB(1, 1, 1);
+            readableFrom = now;
+            goTo("LOADING", now);
+            onLoadingStartRef.current?.();
+          }
         } else if (step === "LOADING") {
           // Real progress, but never faster than the minimum duration and never backward.
           const cap = Math.min(1, inStep / SIGN_LOADER_MIN_MS);
@@ -811,7 +1021,11 @@ export default function MeetingRoomSignTransition({ ready, onFinished }) {
           if (target >= 1 && 1 - shown < 0.005) shown = 1;
           if (shown >= 1 && readyRef.current) goTo("HOLD", now);
         } else if (step === "HOLD") {
-          if (inStep >= SIGN_HOLD_MS) goTo("EXIT", now);
+          // The full hold, and the sign readable for the minimum time in all.
+          if (inStep >= SIGN_HOLD_MS && now - readableFrom >= SIGN_MIN_READABLE_MS) {
+            goTo("EXIT", now);
+            onExitRef.current?.(); // the room starts underneath while the lights dim
+          }
         } else if (step === "EXIT") {
           // The lights dim; then the page fades this out and shows the room.
           const u = Math.min(1, inStep / SIGN_DIM_MS);
@@ -821,30 +1035,32 @@ export default function MeetingRoomSignTransition({ ready, onFinished }) {
             onFinishedRef.current?.();
           }
         }
-        canvasStyle.opacity = opacity.toFixed(3);
         bar.scale.x = Math.max(1e-4, shown * L.loaderBarW * faceW);
         setPercent(shown);
 
-        // Lights.
-        faceMat.color.setScalar(power * SIGN_FACE_BRIGHTNESS);
-        cupEdgeMat.emissiveIntensity = power * 0.9;
-        tubeMat.color.copy(lightColor).multiplyScalar(power);
-        spill.intensity = power * SIGN_SPILL_INTENSITY;
-        for (const p of backLights) p.intensity = power * SIGN_BACK_INTENSITY;
-        bloom.strength = SIGN_BLOOM_STRENGTH * power;
+        // Everything follows the tubes' brightness (glow), in sync: the tube meshes,
+        // the face (even glow × it, each band × its tube), the cup's edge, the
+        // light on the frame and the wall, the bloom. `power` is the exit's dim.
+        const glow = tubes;
+        const lit = Math.min(1, glow);
+        tubeMat.color.copy(lightColor).multiply(tint).multiplyScalar(glow * power);
+        bandUniforms.uBandTint.value.copy(tint);
+        bandUniforms.uBaseLevel.value = glow;
+        faceMat.emissiveIntensity = power * SIGN_FACE_BRIGHTNESS * glow;
+        cupEdgeMat.emissive.copy(lightColor).multiply(tint);
+        cupEdgeMat.emissiveIntensity = power * 0.9 * glow;
+        for (const p of backLights) {
+          p.color.copy(lightColor).multiply(tint);
+          p.intensity = power * SIGN_BACK_INTENSITY * glow;
+        }
+        bloom.strength = SIGN_BLOOM_STRENGTH * power * glow;
+        // The base: a soft echo of the tubes, never dark, never above its steady look.
+        baseMat.emissiveIntensity =
+          SIGN_BASE_GLOW * (SIGN_BASE_MIN_SHARE + (1 - SIGN_BASE_MIN_SHARE) * Math.min(1, Math.max(0, glow)));
+        // The loader's live ink sits on the face: seen only as much as the face is lit.
+        inkMat.color.set(SIGN_INK).multiplyScalar(Math.min(1, power * lit));
+        pctMat.color.setScalar(Math.min(1, power * lit));
 
-        // Camera: straight on, slow push-in and drift.
-        const push = 1 - SIGN_PUSH_IN * (1 - Math.exp(-tSec / (SIGN_PUSH_SEC / 3)));
-        const dist = baseDist * push;
-        const amp = SIGN_DRIFT * Math.max(signSize.y, signSize.z);
-        const w = 2 * Math.PI * SIGN_DRIFT_RATE;
-        camera.position.set(
-          center.x + dist,
-          center.y + Math.sin(tSec * w * 0.8) * amp * 0.6,
-          center.z + Math.sin(tSec * w + 1.1) * amp,
-        );
-        dir.set(center.x, center.y + Math.sin(tSec * w * 0.8 + 0.6) * amp * 0.25, center.z + Math.sin(tSec * w + 1.7) * amp * 0.3);
-        camera.lookAt(dir);
         composer.render();
       };
       frame();
@@ -853,7 +1069,11 @@ export default function MeetingRoomSignTransition({ ready, onFinished }) {
       // No sign: still hand over once the room is ready.
       const wait = () => {
         if (disposed) return;
-        if (readyRef.current) onFinishedRef.current?.();
+        onLoadingStartRef.current?.();
+        if (readyRef.current) {
+          onExitRef.current?.();
+          onFinishedRef.current?.();
+        }
         else raf = requestAnimationFrame(wait);
       };
       wait();

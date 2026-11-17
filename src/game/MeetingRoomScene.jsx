@@ -26,6 +26,42 @@ export default function MeetingRoomScene() {
   // ready, then fades out and is removed.
   const [signFading, setSignFading] = useState(false);
   const [signGone, setSignGone] = useState(false);
+  // Warm-up under the sign (texture uploads, shader compiles): the room only
+  // starts rendering once it's done and the sign begins its exit.
+  const [prepProgress, setPrepProgress] = useState(0);
+  const [prepared, setPrepared] = useState(false);
+  const moduleRef = useRef(null);
+  const startedRef = useRef(false);
+  // The warm-up starts once the sign is fully shown (its loader step) and the
+  // module is in, whichever comes last; the room keeps loading meanwhile.
+  const prepRef = useRef({ requested: false, started: false, disposed: false });
+  const startPrep = () => {
+    const P = prepRef.current;
+    const module = moduleRef.current;
+    if (P.started || P.disposed || !P.requested || !module) return;
+    P.started = true;
+    if (!module.prepareMeetingRoomForReveal) {
+      setPrepared(true);
+      return;
+    }
+    module
+      .prepareMeetingRoomForReveal((p) => {
+        if (!prepRef.current.disposed) setPrepProgress(p);
+      })
+      .catch((error) => console.warn("[MeetingRoomScene] warm-up failed:", error))
+      .finally(() => {
+        if (!prepRef.current.disposed) setPrepared(true);
+      });
+  };
+  const requestPrep = () => {
+    prepRef.current.requested = true;
+    startPrep();
+  };
+  const startRoom = () => {
+    if (startedRef.current) return;
+    startedRef.current = true;
+    moduleRef.current?.setMeetingRoomSceneRendering(true);
+  };
   useLevelHotkeys(SCENE_ROUTES.meetingRoom);
 
   useEffect(() => {
@@ -33,6 +69,11 @@ export default function MeetingRoomScene() {
     const timer = window.setTimeout(() => setSignGone(true), SIGN_FADE_MS);
     return () => window.clearTimeout(timer);
   }, [signFading]);
+
+  // The sign has fully finished: the room's cinematic intro starts.
+  useEffect(() => {
+    if (signGone) moduleRef.current?.startMeetingRoomIntro?.();
+  }, [signGone]);
 
   useEffect(() => {
     const root = rootRef.current;
@@ -54,7 +95,14 @@ export default function MeetingRoomScene() {
     import("../meeting-room/meetingRoomSceneModule.js")
       .then((module) => {
         sceneModule = module;
-        module.setMeetingRoomSceneRendering(!disposed);
+        moduleRef.current = module;
+        // The warm-up runs under the sign (prepareMeetingRoomForReveal), not on load.
+        module.deferMeetingRoomWarmup?.();
+        // The cinematic intro plays once the sign has fully gone.
+        module.enableMeetingRoomIntro?.();
+        // Held until the sign's exit (or straight away if there's no warm-up).
+        module.setMeetingRoomSceneRendering(!disposed && (startedRef.current || !module.prepareMeetingRoomForReveal));
+        if (!disposed) startPrep();
         if (disposed || !module.isMeetingRoomSceneReady()) return;
         setSceneReady(true);
         setPhase("ready");
@@ -67,6 +115,7 @@ export default function MeetingRoomScene() {
 
     return () => {
       disposed = true;
+      prepRef.current.disposed = true;
       unsubscribeReady();
       unsubscribeError();
       sceneModule?.setMeetingRoomSceneRendering(false);
@@ -100,7 +149,17 @@ export default function MeetingRoomScene() {
             pointerEvents: signFading ? "none" : "auto",
           }}
         >
-          <MeetingRoomSignTransition ready={sceneReady} onFinished={() => setSignFading(true)} />
+          <MeetingRoomSignTransition
+            ready={sceneReady && prepared}
+            roomLoaded={sceneReady}
+            prepProgress={prepProgress}
+            onLoadingStart={requestPrep}
+            onExit={startRoom}
+            onFinished={() => {
+              startRoom();
+              setSignFading(true);
+            }}
+          />
         </div>
       )}
       <div

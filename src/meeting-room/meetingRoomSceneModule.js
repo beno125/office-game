@@ -16,6 +16,7 @@ import {
 } from "../game/carBumpPhysics.js";
 import { KnockoutHud, RaceResultsPopup, formatRaceTime } from "../kitchen/kitchenRace.js";
 import { SCENE_ROUTES, nextLevelPath, goToLevelWithTransition } from "../game/sceneRoutes.js";
+import { createCinematicIntro, introEaseSine, introLerp } from "../game/cinematicIntro.js";
 
 /**
  * Dev-only perf tooling (both false in production builds):
@@ -724,6 +725,8 @@ let wheelFR = null;
 let wheelRL = null;
 let wheelRR = null;
 let airInParts = [];
+/** The intro opens / closes the player car's intake flaps (null = normal: open while driving). */
+let _introAirInTarget = null;
 let _carFollowCam = true;
 let _carReady = false;
 const _quatWheelSteer = new THREE.Quaternion();
@@ -1670,7 +1673,12 @@ function updateCar(dt) {
     wheelRR.quaternion.copy(wheelRR.baseQuat).multiply(_quatWheelRoll);
   }
   if (airInParts.length) {
-    const airInTarget = driven && keys.forward ? 1 : 0;
+    const airInTarget =
+      _introAirInTarget !== null && _activeCarCtx === _playerCarCtx
+        ? _introAirInTarget
+        : driven && keys.forward
+          ? 1
+          : 0;
     for (const part of airInParts) {
       if (!part?.baseQuat || !part?.openQuat) continue;
       if (part._airInTarget !== airInTarget) {
@@ -6447,7 +6455,11 @@ function setupCarHitSparks() {
     active: false,
     age: -1,
   };
-  group.visible = false;
+  // The group (and its light, at intensity 0 when idle) stays in the scene;
+  // only the bolts are shown / hidden. Toggling the light would change the
+  // scene's light count and recompile every material on each hit.
+  group.visible = true;
+  bolts.visible = false;
   _sparkClear(_carHitSpark);
   _sparkSyncResolution();
 }
@@ -6467,7 +6479,7 @@ function triggerCarHitSparks() {
   spark.flashPeak = 1;
   spark.nextFlash = 0.04;
   spark.leaders.length = 0;
-  spark.group.visible = true;
+  spark.bolts.visible = true;
   spark.group.userData.carSparkAge = 0;
   spark.group.userData.carSparkActive = true;
 }
@@ -6479,7 +6491,8 @@ function stopCarHitSparks() {
   spark.age = -1;
   spark.leaders.length = 0;
   _sparkClear(spark);
-  spark.group.visible = false;
+  spark.bolts.visible = false;
+  spark.light.intensity = 0;
   spark.group.userData.carSparkAge = -1;
   spark.group.userData.carSparkActive = false;
 }
@@ -7914,6 +7927,280 @@ const ARENA_CAM_RADIUS = 3.8;
 const ARENA_CAM_HEIGHT = 1.0;
 const ARENA_CAM_AIM_LIFT = 0.55;
 
+/**
+ * GLTFLoader.load, but the large .gltf JSON (with its embedded base64 buffers)
+ * is decoded and parsed in a Web Worker instead of on the main thread. The
+ * file is still fetched here (so its download progress can be followed).
+ * Falls back to loader.load if workers aren't available.
+ */
+function loadGltfOffMainThread(loader, url, onLoad, onProgress, onError) {
+  let worker;
+  try {
+    worker = new Worker(new URL("./gltfParseWorker.js", import.meta.url), { type: "module" });
+  } catch (error) {
+    loader.load(url, onLoad, onProgress, onError);
+    return;
+  }
+  const blobUrls = [];
+  const done = () => {
+    worker.terminate();
+    for (const u of blobUrls) URL.revokeObjectURL(u);
+  };
+  fetch(url)
+    .then((res) => {
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText} (${url})`);
+      return res.arrayBuffer();
+    })
+    .then(
+      (buffer) =>
+        new Promise((resolve, reject) => {
+          worker.onmessage = (event) => (event.data.error ? reject(new Error(event.data.error)) : resolve(event.data));
+          worker.onerror = (event) => reject(event.error || new Error("glTF parse worker failed"));
+          worker.postMessage({ id: 1, buffer }, [buffer]);
+        }),
+    )
+    .then(({ json, buffers }) => {
+      for (const b of buffers) {
+        const u = URL.createObjectURL(new Blob([b.data]));
+        blobUrls.push(u);
+        json.buffers[b.index].uri = u;
+      }
+      loader.parse(
+        json,
+        loader.resourcePath || "",
+        (gltf) => {
+          done();
+          onLoad(gltf);
+        },
+        (error) => {
+          done();
+          onError(error);
+        },
+      );
+    })
+    .catch((error) => {
+      done();
+      onError(error);
+    });
+}
+
+/**
+ * Warm-up before the room is shown (driven by the page's loader): textures are
+ * uploaded a few per frame, then every shader is compiled (bright and dark
+ * lighting, on screen and for off-screen targets like the table mirror and the
+ * replay), then the reflection probe runs. The first visible frame then has
+ * nothing heavy left to do. onProgress(0..1) follows the steps.
+ */
+const REVEAL_PREP_FRAME_BUDGET_MS = 8; // texture uploads per frame stay within this
+const REVEAL_PREP_BATCH_VERTS = 120000; // geometry warm-up: vertices drawn per frame…
+const REVEAL_PREP_BATCH_OBJECTS = 24; // …and objects per frame
+const REVEAL_PREP_WAIT_MS = 20000; // longest wait for the room and its cars
+const _revealPrep = { managed: false, promise: null };
+
+const _nextFrame = () => new Promise((r) => requestAnimationFrame(() => r()));
+
+function _collectSceneTextures() {
+  const set = new Set();
+  const addMat = (m) => {
+    if (!m) return;
+    for (const k of Object.keys(m)) {
+      const v = m[k];
+      if (v && v.isTexture) set.add(v);
+    }
+    if (m.uniforms) {
+      for (const u of Object.values(m.uniforms)) if (u && u.value && u.value.isTexture) set.add(u.value);
+    }
+  };
+  scene.traverse((o) => {
+    if (!o.material) return;
+    (Array.isArray(o.material) ? o.material : [o.material]).forEach(addMat);
+  });
+  if (scene.environment && scene.environment.isTexture) set.add(scene.environment);
+  if (scene.background && scene.background.isTexture) set.add(scene.background);
+  // Render-target textures are filled by rendering, not uploaded.
+  return [...set].filter((t) => !t.isRenderTargetTexture && (t.image || t.isDataTexture || t.isCompressedTexture));
+}
+
+/** Everything drawable in the scene (meshes, points, lines, sprites). */
+function _sceneDrawables() {
+  const list = [];
+  scene.traverse((o) => {
+    if (o.isMesh || o.isPoints || o.isLine || o.isSprite) list.push(o);
+  });
+  return list;
+}
+
+/** The page will run the warm-up (prepareMeetingRoomForReveal): don't do it on load. */
+export function deferMeetingRoomWarmup() {
+  _revealPrep.managed = true;
+}
+
+export function prepareMeetingRoomForReveal(onProgress = () => {}) {
+  _revealPrep.managed = true;
+  if (_revealPrep.promise) return _revealPrep.promise;
+  _revealPrep.promise = (async () => {
+    onProgress(0);
+    const t0 = performance.now();
+    const allReady = () =>
+      _meetingRoomSceneReady &&
+      arenaCars.length === 1 + ARENA_AI_CARS.length &&
+      arenaCars.every((c) => c.ready);
+    while (!allReady() && performance.now() - t0 < REVEAL_PREP_WAIT_MS) await _nextFrame();
+    if (!_meetingRoomSceneReady) return;
+    resize();
+    _ensureReplayResources(); // its stand-in cars are part of the scene to warm up
+    scene.updateMatrixWorld(true);
+
+    // 1. Textures (0 → 0.35): decoded off the main thread, then uploaded
+    //    within a small time budget per frame.
+    const textures = _collectSceneTextures();
+    await Promise.all(
+      textures.map((t) => {
+        const img = t.image;
+        return img && typeof img.decode === "function" && img.complete !== false ? img.decode().catch(() => {}) : null;
+      }),
+    );
+    for (let i = 0; i < textures.length; ) {
+      const frameStart = performance.now();
+      while (i < textures.length && performance.now() - frameStart < REVEAL_PREP_FRAME_BUDGET_MS) {
+        try {
+          renderer.initTexture(textures[i]);
+        } catch (e) {}
+        i++;
+      }
+      onProgress(0.35 * (i / Math.max(1, textures.length)));
+      await _nextFrame();
+    }
+
+    // 2. Reflection probe (0.35 → 0.45), before the shaders: it replaces the
+    //    room's environment map, which is part of every material's program.
+    const pm = new THREE.PMREMGenerator(renderer);
+    pm.compileCubemapShader();
+    pm.dispose();
+    onProgress(0.4);
+    await _nextFrame();
+    try {
+      captureRoomReflections(_model);
+      applyLightBlend(lightBlend);
+    } catch (error) {
+      console.warn("[MeetingRoom] reflection probe failed", error);
+    }
+    await _nextFrame();
+    onProgress(0.45);
+
+    // Everything drawable shown for the warm-up (hidden effects too), lights untouched.
+    const all = [];
+    scene.traverse((o) => {
+      if (!o.isLight && o !== scene) all.push([o, o.visible, o.frustumCulled]);
+    });
+    const restoreVisibility = () => {
+      for (const [o, v, fc] of all) {
+        o.visible = v;
+        o.frustumCulled = fc;
+      }
+      for (const [l, v] of hiddenLights) l.visible = v;
+    };
+    // Lights stay exactly as they are live (a light count change would give
+    // every material a different program): any light that isn't shown now is
+    // kept hidden while its parents are forced visible.
+    const liveLights = new Set();
+    scene.traverseVisible((o) => {
+      if (o.isLight) liveLights.add(o);
+    });
+    const hiddenLights = [];
+    scene.traverse((o) => {
+      if (o.isLight && !liveLights.has(o)) hiddenLights.push([o, o.visible]);
+    });
+    for (const [o] of all) o.visible = true;
+    for (const [l] of hiddenLights) l.visible = false;
+
+    // 3. Shader programs (0.45 → 0.6): bright and dark lighting, on screen and
+    //    for off-screen targets (table mirror, replay, probe), compiled async.
+    const offscreen = new THREE.WebGLRenderTarget(4, 4, { type: THREE.HalfFloatType });
+    const savedBlend = lightBlend;
+    // [light blend, target, shadows]: the table mirror renders its reflection
+    // off screen with the shadow light's castShadow off, so that variant too.
+    const passes = [
+      [1, null, true],
+      [1, offscreen, true],
+      [1, offscreen, false],
+      [0, null, true],
+      [0, offscreen, true],
+      [0, offscreen, false],
+    ];
+    const castShadowWas = carShadowLight.castShadow;
+    for (let i = 0; i < passes.length; i++) {
+      const [blend, target, shadows] = passes[i];
+      applyLightBlend(blend);
+      carShadowLight.castShadow = shadows;
+      const prevTarget = renderer.getRenderTarget();
+      renderer.setRenderTarget(target);
+      try {
+        await renderer.compileAsync(scene, camera);
+      } catch (e) {
+        renderer.compile(scene, camera);
+      }
+      renderer.setRenderTarget(prevTarget);
+      onProgress(0.45 + 0.15 * ((i + 1) / passes.length));
+      await _nextFrame();
+    }
+    carShadowLight.castShadow = castShadowWas;
+    applyLightBlend(savedBlend);
+    offscreen.dispose();
+
+    // 4. Geometry uploads (0.6 → 1): the room drawn in small batches onto its
+    //    own canvas (hidden under the page's loader), so vertex buffers and any
+    //    remaining state are set up a little per frame, not on the first visible
+    //    frame. The screens' alternate materials (countdown text, replay) too.
+    const drawables = _sceneDrawables();
+    const batches = [];
+    let cur = [];
+    let verts = 0;
+    for (const o of drawables) {
+      const n = (o.geometry && o.geometry.attributes && o.geometry.attributes.position && o.geometry.attributes.position.count) || 0;
+      if (cur.length && (verts + n > REVEAL_PREP_BATCH_VERTS || cur.length >= REVEAL_PREP_BATCH_OBJECTS)) {
+        batches.push(cur);
+        cur = [];
+        verts = 0;
+      }
+      cur.push(o);
+      verts += n;
+    }
+    if (cur.length) batches.push(cur);
+    // The screens as they'll look in play (countdown text, replay), set up
+    // through their own code paths and put back after.
+    for (const key of Object.keys(_screens)) {
+      const sc = _screens[key];
+      if (!sc || !sc.mesh) continue;
+      batches.push({ setup: () => showScreenText(key, "GO!", ARENA_COLOR_GO), mesh: sc.mesh, key });
+      if (_replay.rt) batches.push({ setup: () => showScreenReplay(key, _replay.rt.texture), mesh: sc.mesh, key });
+    }
+    const prevTarget = renderer.getRenderTarget();
+    renderer.setRenderTarget(null);
+    for (let bi = 0; bi < batches.length; bi++) {
+      for (const o of drawables) o.visible = false;
+      const b = batches[bi];
+      const list = Array.isArray(b) ? b : [b.mesh];
+      if (!Array.isArray(b)) b.setup();
+      for (const o of list) {
+        o.visible = true;
+        o.frustumCulled = false;
+      }
+      renderer.render(scene, camera);
+      if (!Array.isArray(b)) restoreScreenContent(b.key);
+      onProgress(0.6 + 0.4 * ((bi + 1) / batches.length));
+      await _nextFrame();
+    }
+    renderer.setRenderTarget(prevTarget);
+    restoreVisibility();
+    // The replay's first frame (its own camera, target and overlay).
+    warmUpArenaReplay();
+
+    onProgress(1);
+  })();
+  return _revealPrep.promise;
+}
+
 function loadMeetingRoom() {
   const screenMap = new THREE.TextureLoader().load(
     meetingRoomAsset(MEETING_ROOM_SCREEN_IMAGE),
@@ -7950,7 +8237,8 @@ function loadMeetingRoom() {
   ]);
   const loader = new GLTFLoader();
   loader.setResourcePath(_MEETING_ROOM_BASE);
-  loader.load(
+  loadGltfOffMainThread(
+    loader,
     meetingRoomAsset(MEETING_ROOM_GLTF),
     (gltf) => {
       woodMapsPromise.then(([wallWoodMaps, floorWoodMaps, plantMaps, plantGroundMap, tablePlasticMaps, columnConcreteMaps]) => {
@@ -8027,14 +8315,18 @@ function loadMeetingRoom() {
         loadMeetingRoomAirPlane();
         _meetingRoomSceneReady = true;
         emitMeetingRoomSceneEvent("ready");
-        requestAnimationFrame(() => {
-          try {
-            captureRoomReflections(_model);
-            applyLightBlend(lightBlend);
-          } catch (error) {
-            console.warn("[MeetingRoom] reflection probe failed", error);
-          }
-        });
+        // With a managed warm-up (prepareMeetingRoomForReveal) the probe
+        // runs there, after the textures and shaders are ready.
+        if (!_revealPrep.managed) {
+          requestAnimationFrame(() => {
+            try {
+              captureRoomReflections(_model);
+              applyLightBlend(lightBlend);
+            } catch (error) {
+              console.warn("[MeetingRoom] reflection probe failed", error);
+            }
+          });
+        }
       } catch (error) {
         console.error("[MeetingRoom] setup failed", error);
         emitMeetingRoomSceneEvent("error", { error });
@@ -9415,8 +9707,8 @@ function updateArenaGame(dt) {
   const g = _arenaGame;
   if (g.live || g.phase === "over") return;
   g.t += dt;
-  if (g.phase !== "dusk" && g.phase !== "go") {
-    // Hold Bright Mode until the fade.
+  if (g.phase !== "dusk" && g.phase !== "go" && !_mrIntro.enabled) {
+    // Hold Bright Mode until the fade (without the cinematic intro, which ends in Dark Mode).
     lightBlendTarget = 1;
   }
   switch (g.phase) {
@@ -9425,7 +9717,8 @@ function updateArenaGame(dt) {
         _meetingRoomSceneReady &&
         arenaCars.length === 1 + ARENA_AI_CARS.length &&
         arenaCars.every((c) => c.ready);
-      if (allReady) _arenaSetPhase("intro");
+      // With the cinematic intro, the countdown waits until it has finished.
+      if (allReady && (!_mrIntro.enabled || _mrIntro.state === "done")) _arenaSetPhase("intro");
       break;
     }
     case "intro":
@@ -9447,6 +9740,13 @@ function updateArenaGame(dt) {
       break;
     case "dusk": {
       // Drive the existing light blend (1 = Bright, 0 = Dark) with an eased curve.
+      // After the cinematic intro the room is already dark: straight to GO!
+      if (_mrIntro.enabled) {
+        showScreenText("left", "GO!", ARENA_COLOR_GO);
+        showScreenText("right", "GO!", ARENA_COLOR_GO);
+        _arenaSetPhase("go");
+        break;
+      }
       const u = Math.min(1, g.t / ARENA_DUSK_TIME);
       const e = u * u * (3 - 2 * u);
       lightBlend = 1 - e;
@@ -9498,6 +9798,411 @@ const _rec = {
   acc: 0,
   cars: 0,
 };
+// ---------------------------------------------------------------------------
+// Cinematic intro (shared system: ../game/cinematicIntro.js), letterboxed,
+// focused on the cars:
+//   1. opening — Bright Mode: a calm, high sweep over the table and the cars
+//   2. room — Bright Mode: a wide view across the room, slowly turning onto the
+//      wood back wall (backWallWood) until it's centred
+//   3. lights out — a still, wide view of the cars while the room switches to
+//      Dark Mode (a short dim moment, then the dark lights and glows come up)
+//   4. rivals — a low angle on the opponents from the front, facing the player
+//   5. air intake — close on the player car's hood blower while its intake
+//      flaps (airIn1–3) open and close
+//   6. player's car — a close, low orbit ending behind it and flowing straight
+//      into the gameplay camera (no fade): the level starts in Dark Mode
+// Meanwhile the round is held (no countdown, cars and AI still, HUD hidden,
+// no knock-offs) and input does nothing. Not replayed on "Play again".
+// Every shot is built from the table and the cars' positions at the start.
+// ---------------------------------------------------------------------------
+/** Shot lengths (seconds). */
+const MR_INTRO_OPENING_SEC = 3.0;
+const MR_INTRO_ROOM_SEC = 3.8;
+const MR_INTRO_LIGHTS_OUT_SEC = 2.7;
+const MR_INTRO_RIVALS_SEC = 2.5;
+const MR_INTRO_AIR_IN_SEC = 3.0;
+const MR_INTRO_PLAYER_SEC = 3.0;
+const MR_INTRO_SHOTS = [
+  { name: "opening", sec: MR_INTRO_OPENING_SEC },
+  { name: "room", sec: MR_INTRO_ROOM_SEC, fade: true },
+  { name: "lightsOut", sec: MR_INTRO_LIGHTS_OUT_SEC, fade: true },
+  { name: "rivals", sec: MR_INTRO_RIVALS_SEC, fade: true },
+  { name: "airIn", sec: MR_INTRO_AIR_IN_SEC, fade: true },
+  { name: "playerOrbit", sec: MR_INTRO_PLAYER_SEC, fade: true }, // ends on the gameplay camera
+];
+/** 1. Opening: around the table centre, angles from the gameplay camera's side. */
+const MR_INTRO_OPENING = {
+  angleFromDeg: 135,
+  angleToDeg: 80,
+  radiusFrom: 1.0, // × the gameplay camera's distance from the table centre
+  radiusTo: 0.9,
+  heightFrom: 2.0, // above the tabletop
+  heightTo: 1.55,
+  fovFrom: 50,
+  fovTo: 46,
+};
+/** 2. Lights out: a wide view of the cars, nearly still. */
+const MR_INTRO_LIGHTS_OUT = {
+  angleDeg: 40, // from the gameplay camera's side
+  angleDriftDeg: 3,
+  radius: 0.8, // × the gameplay camera's distance
+  heightFrom: 1.05,
+  heightTo: 0.98,
+  fov: 48,
+  switchAt: 0.45, // seconds into the shot the switch to Dark Mode starts
+};
+/**
+ * 2. Room: from the far side of the table (opposite the wood back wall), at a
+ * medium-high height, a slow drift while the view turns onto backWallWood.
+ */
+const MR_INTRO_ROOM = {
+  wallName: "backWallWood",
+  back: 0.8, // × the gameplay camera's distance, past the table centre away from the wall
+  sideFrom: 0.42, // start off to one side (× the same distance)…
+  sideTo: 0.06, // …drifting toward the middle
+  heightFrom: 1.0, // above the tabletop
+  heightTo: 1.15,
+  lookFromSide: 0.75, // the view starts turned this far toward the side of the room…
+  lookFromHeight: 0.55, // …a little above the table
+  wallMargin: 1.3, // the whole wall in frame with room around it (lens fitted to the screen)
+  fovStartExtra: 6, // a touch wider at the start
+  fovMin: 44,
+  fovMax: 76,
+};
+/**
+ * 4. Rivals: low and close in front of the opponents' line (on the player's
+ * side), panning from one opponent to the other, each seen head-on.
+ */
+const MR_INTRO_RIVALS = {
+  frontFrom: 0.95, // in front of the line of opponents
+  frontTo: 0.78, // a slow push-in
+  height: 0.12, // above the tabletop: a low angle
+  lookHeight: 0.13,
+  fovFrom: 42,
+  fovTo: 38,
+  rollDeg: 3,
+};
+/**
+ * 5. Air intake: close on the player car's hood blower (airIn1–3), framed on
+ * the three flaps' combined bounds with part of the car around them, a slow
+ * push-in while the flaps open (staggered, as when driving), hold, and close.
+ */
+const MR_INTRO_AIR_IN = {
+  framing: 3.4, // camera distance: × the flaps' bounding radius ÷ tan(fov / 2) (larger = more car)
+  fov: 40,
+  // From the front and low: the flaps (thin discs) face the camera when closed
+  // and turn edge-on when open, so the movement reads clearly.
+  viewSideDeg: 16, // from straight ahead of the car, toward its side
+  viewUpDeg: 14, // a little above the flaps
+  pushFrom: 1.2, // a slow push-in (× the framed distance)
+  pushTo: 1.0,
+  arcDeg: 10, // a gentle slide round the car through the shot
+  openAt: 0.5, // seconds into the shot (after the fade-in): the flaps open…
+  holdSec: 1.4, // …stay open this long, then close before the shot ends
+  carClearance: 0.05, // kept outside the car's bounds
+};
+/** 6. Player's car: a close, low orbit (radius × the car's size) ending behind it, then onto the gameplay camera. */
+const MR_INTRO_PLAYER = {
+  angleFromDeg: 55, // 0 = straight ahead of the car
+  angleToDeg: 180, // behind it
+  radiusFrom: 3.4,
+  radiusTo: 4.4,
+  heightFrom: 0.16,
+  heightTo: 0.42,
+  lookHeight: 0.08,
+  fovFrom: 44,
+  rollDeg: 4,
+  handover: 0.45, // from here the orbit flows into the gameplay camera
+};
+/** The switch to Dark Mode (seconds) and its short dim moment (exposure × (1 − this) at its deepest). */
+const MR_INTRO_DARK_SEC = 1.3;
+const MR_INTRO_DIM = 0.55;
+/** Never lower than this above the tabletop, over the table. */
+const MR_INTRO_MIN_TABLE_CLEARANCE = 0.12;
+
+const _mrIntroDeg = Math.PI / 180;
+const _mrIntroV = new THREE.Vector3();
+const _mrIntroPose = { pos: new THREE.Vector3(), look: new THREE.Vector3(), fov: 50, roll: 0 };
+
+const _mrIntro = Object.assign(
+  createCinematicIntro({
+    THREE,
+    getCamera: () => camera,
+    getMount: getMeetingRoomSceneMount,
+    shots: MR_INTRO_SHOTS,
+    shotPose: (i, u, o) => _mrIntroShotPose(i, u, o),
+    arrivalPose: (u, from, o) => o, // no separate arrival: the orbit hands over itself
+    blocksInput: () => _mrIntro.enabled && _meetingRoomSceneRendering,
+  }),
+  {
+    enabled: false, // the page shows the intro (after its loader)
+    rig: null,
+    lightSet: -1,
+  },
+);
+
+const _wrapAngleMr = (a) => Math.atan2(Math.sin(a), Math.cos(a));
+
+/** The table / cars frame the shots are built from (once the cars are on the table). */
+function _mrIntroBuildRig() {
+  if (!_carReady || !arenaCars.every((c) => c.ready) || !Number.isFinite(tablePlateHalfX)) return null;
+  const centre = tablePlateCenter.clone();
+  centre.y = tableSurfaceY;
+  const gx = camera.position.x - centre.x;
+  const gz = camera.position.z - centre.z;
+  const player = _playerCarCtx.car;
+  const carBox = new THREE.Box3().setFromObject(player);
+  const carSize = carBox.isEmpty() ? 0.25 : Math.max(carBox.max.x - carBox.min.x, carBox.max.z - carBox.min.z) / 2;
+  const cars = arenaCars.filter((c) => c.ready && c.car).map((c) => ({ p: c.car.position.clone(), isPlayer: c === _playerCarCtx }));
+  const rivals = cars.filter((c) => !c.isPlayer).map((c) => c.p);
+  const carsCentre = new THREE.Vector3();
+  for (const c of cars) carsCentre.add(c.p);
+  carsCentre.multiplyScalar(1 / Math.max(1, cars.length));
+  carsCentre.y = tableSurfaceY;
+  const rivalsCentre = new THREE.Vector3();
+  for (const p of rivals) rivalsCentre.add(p);
+  if (rivals.length) rivalsCentre.multiplyScalar(1 / rivals.length);
+  else rivalsCentre.copy(centre);
+  rivalsCentre.y = tableSurfaceY;
+  // The opponents' line (or player → opponent) and its side facing the other cars.
+  const lineCars = rivals.length >= 2 ? rivals.slice(0, 2) : [player.position.clone(), rivals[0] || centre.clone()];
+  const lineDir = new THREE.Vector3(lineCars[1].x - lineCars[0].x, 0, lineCars[1].z - lineCars[0].z);
+  if (lineDir.lengthSq() < 1e-6) lineDir.set(1, 0, 0);
+  lineDir.normalize();
+  const lineMid = lineCars[0].clone().add(lineCars[1]).multiplyScalar(0.5);
+  let inward = new THREE.Vector3(-lineDir.z, 0, lineDir.x);
+  if (inward.x * (carsCentre.x - lineMid.x) + inward.z * (carsCentre.z - lineMid.z) < 0) inward.negate();
+  // Room shot: the wood back wall's centre / width, and a spot past the table
+  // centre on the far side of it.
+  const RM = MR_INTRO_ROOM;
+  const wallObj = _model && _model.getObjectByName(RM.wallName);
+  const wallBox = wallObj ? new THREE.Box3().setFromObject(wallObj) : null;
+  let room = null;
+  if (wallBox && !wallBox.isEmpty()) {
+    const wallC = wallBox.getCenter(new THREE.Vector3());
+    const wallSize = wallBox.getSize(new THREE.Vector3());
+    const toWall = new THREE.Vector3(wallC.x - centre.x, 0, wallC.z - centre.z);
+    if (toWall.lengthSq() < 1e-6) toWall.set(1, 0, 0);
+    toWall.normalize();
+    const across = new THREE.Vector3(-toWall.z, 0, toWall.x);
+    const width = Math.abs(across.x) * wallSize.x + Math.abs(across.z) * wallSize.z;
+    room = { wallC, width, toWall, across };
+  }
+  // Air intake: the three flaps' combined bounds (closed) and the car's.
+  _syncActiveCarCtx();
+  const flaps = (_playerCarCtx.airInParts || []).filter(Boolean);
+  let airIn = null;
+  if (flaps.length) {
+    player.updateMatrixWorld(true);
+    const fb = new THREE.Box3();
+    for (const f of flaps) fb.expandByObject(f);
+    if (!fb.isEmpty()) {
+      const sphere = fb.getBoundingSphere(new THREE.Sphere());
+      airIn = { centre: sphere.center.clone(), radius: Math.max(0.01, sphere.radius), carBox: carBox.clone().expandByScalar(MR_INTRO_AIR_IN.carClearance) };
+    }
+  }
+  return {
+    airIn,
+    room,
+    centre,
+    surf: tableSurfaceY,
+    gAngle: Math.atan2(gx, gz),
+    gRadius: Math.hypot(gx, gz),
+    carSize,
+    carsCentre,
+    rivalsCentre,
+    player: player.position.clone(),
+    heading: _playerCarCtx.carState ? _playerCarCtx.carState.angle : 0,
+    rivals,
+    trackInward: inward,
+  };
+}
+
+/** Pose of shot i at local time u (0..1) into `o`. */
+function _mrIntroShotPose(i, u, o) {
+  const R = _mrIntro.rig;
+  const name = MR_INTRO_SHOTS[i].name;
+  const e = introEaseSine(u);
+  o.roll = 0;
+  if (name === "opening") {
+    const V = MR_INTRO_OPENING;
+    const a = R.gAngle + introLerp(V.angleFromDeg, V.angleToDeg, e) * _mrIntroDeg;
+    const rad = R.gRadius * introLerp(V.radiusFrom, V.radiusTo, e);
+    o.pos.set(R.centre.x + Math.sin(a) * rad, R.surf + introLerp(V.heightFrom, V.heightTo, e), R.centre.z + Math.cos(a) * rad);
+    o.look.copy(R.carsCentre);
+    o.fov = introLerp(V.fovFrom, V.fovTo, e);
+  } else if (name === "lightsOut") {
+    const V = MR_INTRO_LIGHTS_OUT;
+    const a = R.gAngle + (V.angleDeg + V.angleDriftDeg * e) * _mrIntroDeg;
+    const rad = R.gRadius * V.radius;
+    o.pos.set(R.centre.x + Math.sin(a) * rad, R.surf + introLerp(V.heightFrom, V.heightTo, e), R.centre.z + Math.cos(a) * rad);
+    o.look.copy(R.carsCentre);
+    o.fov = V.fov;
+  } else if (name === "room") {
+    const V = MR_INTRO_ROOM;
+    const rm = R.room;
+    if (!rm) {
+      // No wood wall found: a calm, wide view of the table instead.
+      o.pos.set(R.centre.x + Math.sin(R.gAngle + Math.PI) * R.gRadius * 0.8, R.surf + 1.1, R.centre.z + Math.cos(R.gAngle + Math.PI) * R.gRadius * 0.8);
+      o.look.copy(R.centre);
+      o.fov = 60;
+    } else {
+      const back = R.gRadius * V.back;
+      o.pos
+        .copy(R.centre)
+        .addScaledVector(rm.toWall, -back)
+        .addScaledVector(rm.across, R.gRadius * introLerp(V.sideFrom, V.sideTo, e));
+      o.pos.y = R.surf + introLerp(V.heightFrom, V.heightTo, e);
+      // The view turns from the side of the room onto the wall's centre.
+      _mrIntroV
+        .copy(R.centre)
+        .addScaledVector(rm.across, R.gRadius * V.lookFromSide)
+        .setY(R.surf + V.lookFromHeight);
+      o.look.lerpVectors(_mrIntroV, rm.wallC, e);
+      // A lens that shows the whole wall with room around it, on this screen.
+      const dist = Math.max(0.5, (rm.wallC.x - o.pos.x) * rm.toWall.x + (rm.wallC.z - o.pos.z) * rm.toWall.z);
+      const hHalf = Math.atan((rm.width / 2) / dist) * V.wallMargin;
+      const vFov = (2 * Math.atan(Math.tan(Math.min(1.4, hHalf)) / Math.max(0.3, camera.aspect))) / _mrIntroDeg;
+      const fitted = Math.min(V.fovMax, Math.max(V.fovMin, vFov));
+      o.fov = fitted + V.fovStartExtra * (1 - e);
+    }
+  } else if (name === "rivals") {
+    const V = MR_INTRO_RIVALS;
+    const [ra, rb] = R.rivals.length >= 2 ? R.rivals : [R.rivalsCentre, R.rivalsCentre];
+    _mrIntroV.copy(ra).add(rb).multiplyScalar(0.5);
+    o.pos.copy(_mrIntroV).addScaledVector(R.trackInward, introLerp(V.frontFrom, V.frontTo, e));
+    o.pos.y = R.surf + V.height;
+    // The pan: one opponent, across to the other (slow, quick, slow).
+    o.look.lerpVectors(ra, rb, introEaseSine(u));
+    o.look.y = R.surf + V.lookHeight;
+    o.fov = introLerp(V.fovFrom, V.fovTo, e);
+    o.roll = V.rollDeg * _mrIntroDeg * Math.sin(Math.PI * u);
+  } else if (name === "airIn") {
+    const V = MR_INTRO_AIR_IN;
+    const A = R.airIn;
+    if (!A) {
+      // No flaps found: a close look at the car instead.
+      o.pos.set(R.player.x + Math.sin(R.heading) * R.carSize * 4, R.surf + 0.35, R.player.z + Math.cos(R.heading) * R.carSize * 4);
+      o.look.copy(R.player);
+      o.fov = V.fov;
+    } else {
+      // From ahead-and-to-the-side of the car, above the hood, onto the flaps.
+      const yaw = R.heading + (V.viewSideDeg + V.arcDeg * (e - 0.5)) * _mrIntroDeg;
+      const up = V.viewUpDeg * _mrIntroDeg;
+      const dist = (A.radius * V.framing) / Math.tan((V.fov / 2) * _mrIntroDeg) * introLerp(V.pushFrom, V.pushTo, e);
+      _mrIntroV.set(Math.sin(yaw) * Math.cos(up), Math.sin(up), Math.cos(yaw) * Math.cos(up));
+      o.pos.copy(A.centre).addScaledVector(_mrIntroV, dist);
+      // Never inside the car: back out along the view line if needed.
+      for (let k = 0; k < 20 && A.carBox.containsPoint(o.pos); k++) o.pos.addScaledVector(_mrIntroV, A.radius);
+      o.look.copy(A.centre);
+      o.fov = V.fov;
+    }
+  } else if (name === "playerOrbit") {
+    const V = MR_INTRO_PLAYER;
+    // Orbit: from the front-side round to behind the car (the side with the
+    // gameplay camera), close and low, rising.
+    const behind = R.heading + Math.PI;
+    const side = _wrapAngleMr(R.gAngle - behind) >= 0 ? -1 : 1;
+    const ao = introEaseSine(Math.min(1, u / 0.85));
+    const a = R.heading + side * introLerp(V.angleFromDeg, V.angleToDeg, ao) * _mrIntroDeg;
+    const rad = R.carSize * introLerp(V.radiusFrom, V.radiusTo, ao);
+    o.pos.set(R.player.x + Math.sin(a) * rad, R.surf + introLerp(V.heightFrom, V.heightTo, ao), R.player.z + Math.cos(a) * rad);
+    o.look.set(R.player.x, R.surf + V.lookHeight, R.player.z);
+    o.fov = V.fovFrom;
+    o.roll = V.rollDeg * _mrIntroDeg * Math.sin(Math.PI * Math.min(1, u / 0.7));
+    // Hand over: flows into the live gameplay camera, landing exactly on it.
+    const w = introEaseSine(Math.max(0, Math.min(1, (u - V.handover) / (1 - V.handover))));
+    if (w > 0) {
+      o.pos.lerp(camera.position, w);
+      o.look.lerp(controls.target, w);
+      o.fov = introLerp(o.fov, camera.fov, w);
+      o.roll *= 1 - w;
+    }
+  }
+  // Over the table, never into it.
+  if (
+    Math.abs(o.pos.x - tablePlateCenter.x) <= tablePlateHalfX + 0.05 &&
+    Math.abs(o.pos.z - tablePlateCenter.z) <= tablePlateHalfZ + 0.05
+  ) {
+    o.pos.y = Math.max(o.pos.y, R.surf + MR_INTRO_MIN_TABLE_CLEARANCE);
+  }
+  return o;
+}
+
+/** Bright Mode in the opening; the switch to Dark Mode early in "lights out"; dark after. */
+function _mrIntroLighting() {
+  const t = _mrIntro.state === "playing" ? _mrIntro.t : 0;
+  const start = _mrIntro.shotStart("lightsOut") + MR_INTRO_LIGHTS_OUT.switchAt;
+  const u = Math.min(1, Math.max(0, (t - start) / MR_INTRO_DARK_SEC));
+  const blend = 1 - introEaseSine(u);
+  // A short dim moment early in the switch, before the dark lights come up.
+  const dim = u > 0 && u < 0.75 ? 1 - MR_INTRO_DIM * Math.sin(Math.PI * (u / 0.75)) : 1;
+  if (blend === _mrIntro.lightSet && dim === 1) return;
+  lightBlend = blend;
+  lightBlendTarget = blend;
+  applyLightBlend(blend);
+  renderer.toneMappingExposure *= dim;
+  _mrIntro.lightSet = dim === 1 ? blend : -1;
+}
+
+/** Per frame, just before the render: the intro's camera (restored after the render). */
+function applyMeetingRoomIntroCamera(dt) {
+  _mrIntro.updateLetterbox(dt);
+  if (!_mrIntro.enabled || _mrIntro.state === "done") return false;
+  if (!_mrIntro.rig) {
+    _mrIntro.rig = _mrIntroBuildRig();
+    if (!_mrIntro.rig) return false;
+  }
+  if (_mrIntro.state === "playing") {
+    _mrIntro.t += dt;
+    if (_mrIntro.t >= _mrIntro.totalSec) {
+      finishMeetingRoomIntro();
+      return false;
+    }
+  }
+  _mrIntroLighting();
+  _mrIntroAirIn();
+  _mrIntro.updateFade();
+  _mrIntro.applyCamera(_mrIntro.poseAt(_mrIntro.t, _mrIntroPose));
+  return true;
+}
+
+/** The intake flaps during their shot: closed, open (after the fade-in), held, closed again. */
+function _mrIntroAirIn() {
+  const local = (_mrIntro.state === "playing" ? _mrIntro.t : -1) - _mrIntro.shotStart("airIn");
+  if (local < 0 || local >= MR_INTRO_AIR_IN_SEC) {
+    _introAirInTarget = null;
+    return;
+  }
+  const V = MR_INTRO_AIR_IN;
+  _introAirInTarget = local >= V.openAt && local < V.openAt + V.holdSec ? 1 : 0;
+}
+
+function finishMeetingRoomIntro() {
+  if (_mrIntro.state === "done") return;
+  _mrIntro.state = "done";
+  _introAirInTarget = null;
+  _mrIntro.updateFade(); // no fade left over
+  // Dark Mode from here on (the countdown and the game).
+  lightBlend = 0;
+  lightBlendTarget = 0;
+  applyLightBlend(0);
+  // Nothing pressed during the intro carries into the game.
+  for (const k in playerKeys) if (typeof playerKeys[k] === "boolean") playerKeys[k] = false;
+}
+
+/** The page shows the cinematic intro once its loader is gone (call before the room starts). */
+export function enableMeetingRoomIntro() {
+  _mrIntro.enabled = true;
+}
+
+/** The loader has fully finished: the intro plays. */
+export function startMeetingRoomIntro() {
+  if (!_mrIntro.enabled || _mrIntro.state !== "pending") return;
+  _mrIntro.state = "playing";
+  _mrIntro.t = 0;
+}
+
 // ---------------------------------------------------------------------------
 // Round: knock-offs, counter, last car standing, results popup, Play again
 // ---------------------------------------------------------------------------
@@ -10954,7 +11659,9 @@ function animate() {
   updateArenaReplay(dt);
   controls.update();
   applyCameraShake(dt);
+  const introCam = applyMeetingRoomIntroCamera(dt);
   renderer.render(scene, camera);
+  if (introCam) _mrIntro.restoreCamera();
   clearCameraShake();
   if (MR_PERF) _perfEndFrame(dt);
 }

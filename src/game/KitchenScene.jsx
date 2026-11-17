@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { setKitchenSceneMount } from "../kitchen/kitchenSceneMount.js";
 import { onKitchenSceneEvent } from "./kitchenSceneEvents.js";
-import { SCENE_ROUTES, goToLevelWithTransition } from "./sceneRoutes.js";
+import { SCENE_ROUTES, goToLevelWithTransition, LEVEL_DESCRIPTION_MIN_READ_MS } from "./sceneRoutes.js";
 import { useLevelHotkeys } from "./useLevelHotkeys.js";
 import WorldTransition from "./WorldTransition.jsx";
 import { RACE_LAPS } from "../kitchen/kitchenRace.js";
@@ -12,8 +12,10 @@ const LOADER_FADE_MS = 600;
 const LEAVE_FADE_MS = 450;
 /** Shown on the loader: what this level is ({laps} = the race's lap count). */
 const KITCHEN_LEVEL_DESCRIPTION = "Race around the kitchen table. First to finish {laps} laps wins!";
-/** The loader (and its description) stays up at least this long, even if loading is fast. */
-const KITCHEN_DESCRIPTION_MIN_MS = 3500;
+/** The description's fade-in on the loader (its 200 ms delay + 600 ms animation). */
+const KITCHEN_DESCRIPTION_SHOW_MS = 800;
+/** The loader stays up until the description has been readable for the shared minimum. */
+const KITCHEN_DESCRIPTION_MIN_MS = KITCHEN_DESCRIPTION_SHOW_MS + LEVEL_DESCRIPTION_MIN_READ_MS;
 
 if (import.meta.hot) {
   import.meta.hot.accept();
