@@ -11,6 +11,18 @@
 export const RACE_LAPS = 4;
 export const RACE_CHECKPOINTS = 8;
 export const RACE_COUNTDOWN_SEC = 3;
+/** End of race: the popup opens this long after the player crosses the line. */
+export const RACE_RESULTS_DELAY_SEC = 1.2;
+/** Longest wait for the player after the winner finishes before the popup opens anyway. */
+export const RACE_RESULTS_MAX_WAIT_SEC = 6;
+/** Popup fade / scale in and out (ms). */
+export const RACE_RESULTS_ANIM_MS = 260;
+/**
+ * Largest sector jump between two updates still counted as driving (a long
+ * frame or a slow-motion catch-up). Bigger jumps (a teleport) don't move the
+ * tracker, so a lap only counts when every sector is passed in order.
+ */
+export const RACE_MAX_SECTOR_STEP = 2;
 /** AI stuck check: moved less than this (world units) over the window → back out. */
 export const RACE_AI_STUCK_WINDOW = 2;
 export const RACE_AI_STUCK_DIST = 1.5;
@@ -161,8 +173,11 @@ export class LapTracker {
     const p = this.track.progress(x, z);
     const sector = Math.min(N - 1, Math.floor((p / this.track.length) * N));
     const d = (sector - this.sector + N) % N;
-    if (d === 1) this.count++;
-    else if (d === N - 1) this.count--;
+    if (d !== 0) {
+      if (d <= RACE_MAX_SECTOR_STEP) this.count += d;
+      else if (d >= N - RACE_MAX_SECTOR_STEP) this.count -= N - d;
+      else return; // a jump across the track: ignored, sector unchanged
+    }
     this.sector = sector;
     const sectorLen = this.track.length / N;
     const frac = (p - sector * sectorLen) / sectorLen;
@@ -405,5 +420,277 @@ export class RaceHud {
 
   hideResult() {
     this.resultEl.style.display = "none";
+  }
+}
+
+/** Race time as m:ss.t */
+export function formatRaceTime(sec) {
+  if (!(sec >= 0)) return "—";
+  const m = Math.floor(sec / 60);
+  const r = sec - m * 60;
+  return `${m}:${r < 10 ? "0" : ""}${r.toFixed(1)}`;
+}
+
+const POPUP_FONT_DISPLAY = "Impact, Haettenschweiler, 'Arial Narrow Bold', sans-serif";
+const POPUP_FONT_UI = "800 13px/1.4 system-ui, sans-serif";
+
+/**
+ * End-of-race popup in the game's menu style (magenta glass card, thick black
+ * outline, offset shadow, Impact headings): a result title, the standings and
+ * two buttons. Real <button>s, so mouse, Tab and Enter / Space all work.
+ */
+export class RaceResultsPopup {
+  constructor({ onRetry, onNext }) {
+    this.onRetry = onRetry;
+    this.onNext = onNext;
+    this.open = false;
+    this._hideTimer = 0;
+
+    const root = document.createElement("div");
+    root.className = "kitchen-race-results";
+    root.setAttribute("role", "dialog");
+    root.setAttribute("aria-modal", "true");
+    Object.assign(root.style, {
+      position: "absolute",
+      inset: "0",
+      zIndex: "12",
+      display: "none",
+      alignItems: "center",
+      justifyContent: "center",
+      padding: "16px",
+      boxSizing: "border-box",
+      background: "rgba(3, 3, 10, 0.45)",
+      opacity: "0",
+      transition: `opacity ${RACE_RESULTS_ANIM_MS}ms ease`,
+      pointerEvents: "auto",
+    });
+
+    const card = document.createElement("div");
+    Object.assign(card.style, {
+      display: "flex",
+      flexDirection: "column",
+      gap: "16px",
+      width: "min(26rem, 100%)",
+      maxHeight: "calc(100% - 8px)",
+      overflowY: "auto",
+      boxSizing: "border-box",
+      padding: "clamp(1.1rem, 3vw, 1.8rem)",
+      color: "#fff",
+      background: "rgba(226, 0, 78, 0.46)",
+      border: "4px solid #080808",
+      borderRadius: "20px",
+      boxShadow:
+        "10px 12px 0 #080808, 0 24px 60px rgba(4, 7, 20, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.28)",
+      backdropFilter: "blur(12px) saturate(145%)",
+      WebkitBackdropFilter: "blur(12px) saturate(145%)",
+      transform: "scale(0.92) translateY(10px)",
+      transition: `transform ${RACE_RESULTS_ANIM_MS}ms cubic-bezier(0.2, 0.9, 0.3, 1.2)`,
+    });
+
+    this.titleEl = document.createElement("h2");
+    Object.assign(this.titleEl.style, {
+      margin: "0",
+      fontFamily: POPUP_FONT_DISPLAY,
+      fontSize: "clamp(2.3rem, 8vw, 3.6rem)",
+      fontWeight: "900",
+      lineHeight: "0.9",
+      letterSpacing: "0.01em",
+      textTransform: "uppercase",
+      WebkitTextStroke: "2px #080808",
+      paintOrder: "stroke fill",
+      textShadow: "4px 5px 0 #080808",
+    });
+    this.titleEl.id = "kitchen-race-results-title";
+    root.setAttribute("aria-labelledby", this.titleEl.id);
+
+    this.subEl = document.createElement("div");
+    Object.assign(this.subEl.style, {
+      alignSelf: "flex-start",
+      padding: "0.45rem 0.75rem",
+      background: "rgba(8, 8, 8, 0.78)",
+      borderRadius: "8px",
+      font: POPUP_FONT_UI,
+      letterSpacing: "0.055em",
+      textTransform: "uppercase",
+    });
+
+    this.listEl = document.createElement("ol");
+    Object.assign(this.listEl.style, {
+      listStyle: "none",
+      margin: "0",
+      padding: "0",
+      display: "flex",
+      flexDirection: "column",
+      gap: "6px",
+    });
+
+    const btnRow = document.createElement("div");
+    Object.assign(btnRow.style, {
+      display: "flex",
+      flexWrap: "wrap",
+      gap: "12px",
+      marginTop: "4px",
+    });
+    this.retryBtn = this._button("Race again", "#f00458");
+    this.nextBtn = this._button("Next level", "#165dff");
+    this.retryBtn.addEventListener("click", () => this.open && this.onRetry && this.onRetry());
+    this.nextBtn.addEventListener("click", () => this.open && !this.nextBtn.disabled && this.onNext && this.onNext());
+    btnRow.append(this.retryBtn, this.nextBtn);
+
+    card.append(this.titleEl, this.subEl, this.listEl, btnRow);
+    root.append(card);
+    // Keys used here stay here (the game's own key handlers on window don't see them).
+    root.addEventListener("keydown", (e) => {
+      if (e.code === "Tab") {
+        const f = [this.retryBtn, this.nextBtn].filter((b) => !b.disabled);
+        const i = f.indexOf(document.activeElement);
+        e.preventDefault();
+        f[(i + (e.shiftKey ? f.length - 1 : 1)) % f.length]?.focus();
+      } else if (e.code === "ArrowLeft" || e.code === "ArrowRight") {
+        e.preventDefault();
+        const f = [this.retryBtn, this.nextBtn].filter((b) => !b.disabled);
+        const i = f.indexOf(document.activeElement);
+        f[(i + 1 + f.length) % f.length]?.focus();
+      }
+      e.stopPropagation();
+    });
+    root.addEventListener("pointerdown", (e) => e.stopPropagation());
+    this.root = root;
+    this.card = card;
+  }
+
+  _button(label, bg) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.textContent = label;
+    Object.assign(b.style, {
+      flex: "1 1 9rem",
+      padding: "0.7rem 1.1rem",
+      color: "#fff",
+      background: bg,
+      border: "4px solid #080808",
+      borderRadius: "12px",
+      fontFamily: POPUP_FONT_DISPLAY,
+      fontSize: "clamp(1.2rem, 4vw, 1.55rem)",
+      fontWeight: "900",
+      lineHeight: "1",
+      letterSpacing: "0.045em",
+      textTransform: "uppercase",
+      WebkitTextStroke: "1px #080808",
+      paintOrder: "stroke fill",
+      cursor: "pointer",
+      boxShadow: "6px 7px 0 #080808",
+      outline: "none",
+      transition: "transform 120ms ease, box-shadow 120ms ease, filter 120ms ease",
+    });
+    const lift = (on) => {
+      if (b.disabled) return;
+      b.style.transform = on ? "translate(-2px, -2px)" : "";
+      b.style.boxShadow = on ? "8px 9px 0 #080808" : "6px 7px 0 #080808";
+    };
+    b.addEventListener("pointerenter", () => lift(true));
+    b.addEventListener("pointerleave", () => lift(document.activeElement === b));
+    b.addEventListener("focus", () => {
+      lift(true);
+      b.style.filter = "brightness(1.15)";
+      b.style.outline = "3px solid #fff";
+      b.style.outlineOffset = "2px";
+    });
+    b.addEventListener("blur", () => {
+      lift(false);
+      b.style.filter = "";
+      b.style.outline = "none";
+    });
+    b.addEventListener("pointerdown", () => {
+      b.style.transform = "translate(3px, 4px)";
+      b.style.boxShadow = "2px 2px 0 #080808";
+    });
+    return b;
+  }
+
+  attach(mount) {
+    if (mount && this.root.parentNode !== mount) mount.appendChild(this.root);
+  }
+
+  /**
+   * @param {object} r
+   * @param {string} r.title       e.g. "You win!" / "2nd place"
+   * @param {string} r.color       title colour
+   * @param {string} r.sub         one line under the title (e.g. your time)
+   * @param {{place:number,name:string,color:string,time:string,isPlayer:boolean}[]} r.rows
+   * @param {boolean} r.nextEnabled  false when there's no next level
+   */
+  show(r) {
+    window.clearTimeout(this._hideTimer);
+    this.titleEl.textContent = r.title;
+    this.titleEl.style.color = r.color || "#fff";
+    this.subEl.textContent = r.sub || "";
+    this.subEl.style.display = r.sub ? "" : "none";
+    this.listEl.replaceChildren(
+      ...r.rows.map((row) => {
+        const li = document.createElement("li");
+        Object.assign(li.style, {
+          display: "flex",
+          alignItems: "center",
+          gap: "10px",
+          padding: "0.45rem 0.7rem",
+          borderRadius: "8px",
+          background: row.isPlayer ? "rgba(8, 8, 8, 0.92)" : "rgba(8, 8, 8, 0.62)",
+          border: row.isPlayer ? "2px solid #fff" : "2px solid transparent",
+          font: POPUP_FONT_UI,
+          letterSpacing: "0.055em",
+          textTransform: "uppercase",
+        });
+        const place = document.createElement("span");
+        place.textContent = ORDINALS[row.place - 1] || String(row.place);
+        Object.assign(place.style, { width: "2.6em", fontSize: "15px" });
+        const dot = document.createElement("span");
+        Object.assign(dot.style, {
+          width: "14px",
+          height: "14px",
+          borderRadius: "50%",
+          background: row.color,
+          boxShadow: `0 0 10px ${row.color}`,
+          border: "2px solid #080808",
+          flex: "0 0 auto",
+        });
+        const name = document.createElement("span");
+        name.textContent = row.isPlayer ? `${row.name} (you)` : row.name;
+        name.style.flex = "1";
+        const time = document.createElement("span");
+        time.textContent = row.time;
+        time.style.opacity = "0.85";
+        li.append(place, dot, name, time);
+        return li;
+      }),
+    );
+    this.nextBtn.disabled = !r.nextEnabled;
+    this.nextBtn.style.display = r.nextEnabled ? "" : "none";
+    this.retryBtn.style.transform = "";
+    this.nextBtn.style.transform = "";
+    this.root.style.display = "flex";
+    this.open = true;
+    // Next frame: animate in, focus the first button.
+    requestAnimationFrame(() => {
+      this.root.style.opacity = "1";
+      this.card.style.transform = "scale(1) translateY(0)";
+      this.retryBtn.focus({ preventScroll: true });
+    });
+  }
+
+  hide(immediate = false) {
+    if (!this.open && this.root.style.display === "none") return;
+    this.open = false;
+    if (document.activeElement && this.root.contains(document.activeElement)) document.activeElement.blur();
+    this.root.style.opacity = "0";
+    this.card.style.transform = "scale(0.92) translateY(10px)";
+    window.clearTimeout(this._hideTimer);
+    if (immediate) {
+      this.root.style.display = "none";
+      return;
+    }
+    this._hideTimer = window.setTimeout(() => {
+      if (!this.open) this.root.style.display = "none";
+    }, RACE_RESULTS_ANIM_MS);
   }
 }

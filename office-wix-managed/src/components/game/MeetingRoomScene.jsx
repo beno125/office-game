@@ -1,14 +1,29 @@
 import { useEffect, useRef, useState } from "react";
 import { setMeetingRoomSceneMount } from "../meeting-room/meetingRoomSceneMount.js";
 import { onMeetingRoomSceneEvent } from "./meetingRoomSceneEvents.js";
-import { SCENE_ROUTES } from "./sceneRoutes.js";
+import { SCENE_ROUTES, consumeLevelTransition } from "./sceneRoutes.js";
 import { useLevelHotkeys } from "./useLevelHotkeys.js";
+import WorldTransition from "./WorldTransition.jsx";
+
+/** World-transition loader fade-out (when arriving from the previous level). */
+const TRANSITION_FADE_MS = 600;
 
 export default function MeetingRoomScene() {
   const rootRef = useRef(null);
   const [phase, setPhase] = useState("loading");
   const [sceneReady, setSceneReady] = useState(false);
+  // Arrived through "Next level": the world transition is the loader, as for the kitchen.
+  const [withTransition] = useState(() => consumeLevelTransition(SCENE_ROUTES.meetingRoom));
+  const [transitionDone, setTransitionDone] = useState(false);
+  const [transitionGone, setTransitionGone] = useState(false);
+  const transitionReveal = sceneReady && transitionDone;
   useLevelHotkeys(SCENE_ROUTES.meetingRoom);
+
+  useEffect(() => {
+    if (!withTransition || !transitionReveal) return;
+    const timer = window.setTimeout(() => setTransitionGone(true), TRANSITION_FADE_MS);
+    return () => window.clearTimeout(timer);
+  }, [withTransition, transitionReveal]);
 
   useEffect(() => {
     const root = rootRef.current;
@@ -65,6 +80,21 @@ export default function MeetingRoomScene() {
       }}
     >
       <div id="perfBadge" aria-hidden="true" />
+      {withTransition && !transitionGone && (
+        <div
+          aria-busy={!transitionReveal}
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 30,
+            opacity: transitionReveal ? 0 : 1,
+            transition: `opacity ${TRANSITION_FADE_MS}ms ease`,
+            pointerEvents: transitionReveal ? "none" : "auto",
+          }}
+        >
+          <WorldTransition onComplete={() => setTransitionDone(true)} />
+        </div>
+      )}
       <div
         aria-live="polite"
         aria-busy={!sceneReady}

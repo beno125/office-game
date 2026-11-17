@@ -1,12 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import { setKitchenSceneMount } from "../kitchen/kitchenSceneMount.js";
 import { onKitchenSceneEvent } from "./kitchenSceneEvents.js";
-import { SCENE_ROUTES } from "./sceneRoutes.js";
+import { SCENE_ROUTES, goToLevelWithTransition } from "./sceneRoutes.js";
 import { useLevelHotkeys } from "./useLevelHotkeys.js";
 import WorldTransition from "./WorldTransition.jsx";
 
 /** Loader fade-out once the kitchen is drawn (the intro plays under it). */
 const LOADER_FADE_MS = 600;
+/** Fade to dark before leaving for the next level. */
+const LEAVE_FADE_MS = 450;
 
 /**
  * The kitchen with the world-transition loader over it while it loads. With
@@ -20,6 +22,7 @@ export default function KitchenScene({ waitForTransition = false }) {
   const [sceneReady, setSceneReady] = useState(false);
   const [transitionDone, setTransitionDone] = useState(!waitForTransition);
   const [loaderGone, setLoaderGone] = useState(false);
+  const [leaving, setLeaving] = useState(false);
   const reveal = sceneReady && transitionDone;
   useLevelHotkeys(SCENE_ROUTES.kitchen);
 
@@ -29,6 +32,24 @@ export default function KitchenScene({ waitForTransition = false }) {
     const timer = window.setTimeout(() => setLoaderGone(true), LOADER_FADE_MS);
     return () => window.clearTimeout(timer);
   }, [reveal]);
+
+  // "Next level" from the race results: fade out, stop the kitchen, change level.
+  useEffect(() => {
+    let timer = 0;
+    const unsubscribe = onKitchenSceneEvent("next-level", (detail) => {
+      const path = detail && detail.path;
+      if (!path || timer) return;
+      setLeaving(true);
+      timer = window.setTimeout(() => {
+        moduleRef.current?.setKitchenSceneRendering?.(false);
+        goToLevelWithTransition(path);
+      }, LEAVE_FADE_MS);
+    });
+    return () => {
+      unsubscribe();
+      window.clearTimeout(timer);
+    };
+  }, []);
 
   useEffect(() => {
     const root = rootRef.current;
@@ -78,6 +99,18 @@ export default function KitchenScene({ waitForTransition = false }) {
       }}
     >
       <div id="perfBadge" aria-hidden="true" />
+      <div
+        aria-hidden="true"
+        style={{
+          position: "fixed",
+          inset: 0,
+          zIndex: 40,
+          background: "#03030a",
+          opacity: leaving ? 1 : 0,
+          transition: `opacity ${LEAVE_FADE_MS}ms ease`,
+          pointerEvents: leaving ? "auto" : "none",
+        }}
+      />
       {!loaderGone && (
         <div
           aria-busy={!reveal}

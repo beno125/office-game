@@ -15,7 +15,20 @@
       import { RectAreaLightUniformsLib } from "three/addons/lights/RectAreaLightUniformsLib.js";
 import { getKitchenSceneMount } from "./kitchenSceneMount.js";
 import { emitKitchenSceneEvent } from "../game/kitchenSceneEvents.js";
-import { StadiumTrack, LapTracker, RaceAIDriver, RaceHud, RACE_LAPS, RACE_COUNTDOWN_SEC, raceAiMaxOutward } from "./kitchenRace.js";
+import {
+  StadiumTrack,
+  LapTracker,
+  RaceAIDriver,
+  RaceHud,
+  RaceResultsPopup,
+  RACE_LAPS,
+  RACE_COUNTDOWN_SEC,
+  RACE_RESULTS_DELAY_SEC,
+  RACE_RESULTS_MAX_WAIT_SEC,
+  formatRaceTime,
+  raceAiMaxOutward,
+} from "./kitchenRace.js";
+import { SCENE_ROUTES, nextLevelPath } from "../game/sceneRoutes.js";
 import {
   CAR_MASS,
   CAR_BUMP_SLIDE_DECAY,
@@ -2137,6 +2150,21 @@ let _worldSwitched = false;
        */
       const KITCHEN_NISH_CHUNK = 8;
       const _kitchenNishChunks = [];
+      /**
+       * Wall plates are masked behind these parts: each part's silhouette, seen
+       * straight on along the wall normal, is rendered once into a mask texture,
+       * and the plate shader discards fragments that fall inside it.
+       */
+      const KITCHEN_NISH_MASK_PARTS = ["paperDispencer"];
+      /** Mask texture size in pixels (square). */
+      const KITCHEN_NISH_MASK_RES = 1024;
+      /** MSAA samples for the mask render, for a clean anti-aliased outline. */
+      const KITCHEN_NISH_MASK_MSAA = 4;
+      /** Mask grown by this many pixels, to clean up sub-pixel slivers at the edge. */
+      const KITCHEN_NISH_MASK_DILATE_PX = 1;
+      /** Empty border around the silhouette inside the mask texture (fraction of size). */
+      const KITCHEN_NISH_MASK_PAD = 0.04;
+      let _kitchenNishMaskRT = null;
 
       function disposeKitchenNishInstanced() {
         for (const inst of _kitchenNishChunks) {
@@ -2147,6 +2175,139 @@ let _worldSwitched = false;
         }
         _kitchenNishChunks.length = 0;
         _kitchenNishInstanced = null;
+      }
+
+      /**
+       * Renders the silhouettes of `parts` (world-space meshes) as white on black,
+       * from an orthographic camera looking at them along -wallNormal. Returns
+       * { texture, matrix } where matrix maps world space to the mask's NDC.
+       */
+      function renderKitchenNishMask(parts, wallNormal) {
+        if (_kitchenNishMaskRT) {
+          _kitchenNishMaskRT.dispose();
+          _kitchenNishMaskRT = null;
+        }
+        if (!parts.length) return null;
+        const box = new THREE.Box3();
+        for (const p of parts) {
+          p.updateWorldMatrix(true, false);
+          box.expandByObject(p);
+        }
+        const center = box.getCenter(new THREE.Vector3());
+        const radius = box.getSize(new THREE.Vector3()).length();
+        const cam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.01, radius * 4);
+        cam.position.copy(center).addScaledVector(wallNormal, radius * 2);
+        cam.up.set(0, 1, 0);
+        if (Math.abs(wallNormal.y) > 0.9) cam.up.set(0, 0, -1);
+        cam.lookAt(center);
+        cam.updateMatrixWorld(true);
+        // Fit a square frustum around the silhouette, with a small border.
+        const inv = cam.matrixWorldInverse;
+        const c = new THREE.Vector3();
+        let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+        for (let i = 0; i < 8; i++) {
+          c.set(i & 1 ? box.max.x : box.min.x, i & 2 ? box.max.y : box.min.y, i & 4 ? box.max.z : box.min.z);
+          c.applyMatrix4(inv);
+          minX = Math.min(minX, c.x); maxX = Math.max(maxX, c.x);
+          minY = Math.min(minY, c.y); maxY = Math.max(maxY, c.y);
+        }
+        const half = Math.max(maxX - minX, maxY - minY) * (0.5 + KITCHEN_NISH_MASK_PAD);
+        const cx = (minX + maxX) * 0.5;
+        const cy = (minY + maxY) * 0.5;
+        cam.left = cx - half; cam.right = cx + half;
+        cam.bottom = cy - half; cam.top = cy + half;
+        cam.updateProjectionMatrix();
+
+        const maskScene = new THREE.Scene();
+        const white = new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.DoubleSide });
+        for (const p of parts) {
+          if (!p.geometry) continue;
+          const m = new THREE.Mesh(p.geometry, white);
+          m.matrixAutoUpdate = false;
+          m.matrix.copy(p.matrixWorld);
+          m.matrixWorld.copy(p.matrixWorld);
+          m.frustumCulled = false;
+          maskScene.add(m);
+        }
+        const rt = new THREE.WebGLRenderTarget(KITCHEN_NISH_MASK_RES, KITCHEN_NISH_MASK_RES, {
+          samples: KITCHEN_NISH_MASK_MSAA,
+          depthBuffer: false,
+          generateMipmaps: false,
+          minFilter: THREE.LinearFilter,
+          magFilter: THREE.LinearFilter,
+        });
+        const prevRT = renderer.getRenderTarget();
+        const prevClear = renderer.getClearColor(new THREE.Color());
+        const prevAlpha = renderer.getClearAlpha();
+        const prevAutoClear = renderer.autoClear;
+        const prevShadowAuto = renderer.shadowMap.autoUpdate;
+        renderer.shadowMap.autoUpdate = false;
+        renderer.setRenderTarget(rt);
+        renderer.setClearColor(0x000000, 1);
+        renderer.autoClear = true;
+        renderer.clear(true, true, true);
+        renderer.render(maskScene, cam);
+        renderer.setRenderTarget(prevRT);
+        renderer.setClearColor(prevClear, prevAlpha);
+        renderer.autoClear = prevAutoClear;
+        renderer.shadowMap.autoUpdate = prevShadowAuto;
+        white.dispose();
+        _kitchenNishMaskRT = rt;
+        const matrix = new THREE.Matrix4().multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse);
+        return { texture: rt.texture, matrix };
+      }
+
+      /** Patches a plate material to discard fragments inside the silhouette mask. */
+      function applyKitchenNishMask(material, mask) {
+        if (!material || !mask) return;
+        const uniforms = {
+          uNishMask: { value: mask.texture },
+          uNishMaskMat: { value: mask.matrix },
+          uNishMaskTexel: { value: KITCHEN_NISH_MASK_DILATE_PX / KITCHEN_NISH_MASK_RES },
+        };
+        material.userData.nishMaskUniforms = uniforms;
+        material.onBeforeCompile = (shader) => {
+          Object.assign(shader.uniforms, uniforms);
+          shader.vertexShader = shader.vertexShader
+            .replace(
+              "#include <common>",
+              "#include <common>\nuniform mat4 uNishMaskMat;\nvarying vec2 vNishMaskPos;",
+            )
+            .replace(
+              "#include <project_vertex>",
+              `#include <project_vertex>
+              {
+                vec4 nishWp = vec4(transformed, 1.0);
+                #ifdef USE_INSTANCING
+                nishWp = instanceMatrix * nishWp;
+                #endif
+                vNishMaskPos = (uNishMaskMat * (modelMatrix * nishWp)).xy;
+              }`,
+            );
+          shader.fragmentShader = shader.fragmentShader
+            .replace(
+              "#include <common>",
+              "#include <common>\nuniform sampler2D uNishMask;\nuniform float uNishMaskTexel;\nvarying vec2 vNishMaskPos;",
+            )
+            .replace(
+              "#include <clipping_planes_fragment>",
+              `#include <clipping_planes_fragment>
+              {
+                vec2 nuv = vNishMaskPos * 0.5 + 0.5;
+                if (nuv.x > 0.0 && nuv.x < 1.0 && nuv.y > 0.0 && nuv.y < 1.0) {
+                  float t = uNishMaskTexel;
+                  float mk = texture2D(uNishMask, nuv).r;
+                  mk = max(mk, texture2D(uNishMask, nuv + vec2(t, 0.0)).r);
+                  mk = max(mk, texture2D(uNishMask, nuv - vec2(t, 0.0)).r);
+                  mk = max(mk, texture2D(uNishMask, nuv + vec2(0.0, t)).r);
+                  mk = max(mk, texture2D(uNishMask, nuv - vec2(0.0, t)).r);
+                  if (mk > 0.5) discard;
+                }
+              }`,
+            );
+        };
+        material.customProgramCacheKey = () => "kitchenNishMask";
+        material.needsUpdate = true;
       }
 
       function buildKitchenNishPlateInstances(mesh, parent, stepX, cloneCount, material) {
@@ -2727,6 +2888,7 @@ let _worldSwitched = false;
           }
           body._propHalfHeight = height / 2;
           body.position.set(center.x, center.y, center.z);
+          body._home = { pos: body.position.clone(), quat: body.quaternion.clone() };
           physicsWorld.addBody(body);
           if (isCup) {
             body._propCup = true;
@@ -2808,9 +2970,9 @@ let _worldSwitched = false;
       // from the car's speed and the ramp's angle.
       const RAMP_MESH_NAME = "ramp";
       /** Takeoff: vertical speed off the edge = climb speed (speed × slope) × this… */
-      const RAMP_TAKEOFF_SCALE = 1.25;
-      /** …capped here (top speed: ≈ 4.4 natural → ≈ 5.5). */
-      const RAMP_TAKEOFF_MAX_VY = 6.9;
+      const RAMP_TAKEOFF_SCALE = 1.8;
+      /** …capped here (top speed: ≈ 4.4 natural → ≈ 7.9). */
+      const RAMP_TAKEOFF_MAX_VY = 10;
       /** Below this climb speed a car just drops off the edge (no launch). */
       const RAMP_LAUNCH_MIN_VY = 1;
       /** The ground under a car fell away by more than this → airborne. */
@@ -2818,7 +2980,7 @@ let _worldSwitched = false;
       /** Gravity while airborne off the ramp (the cars' normal 75 is a hop, not a jump). */
       const RAMP_AIR_GRAVITY = 26;
       /** Extra gravity while falling (after the apex): a firm, not floaty, landing. */
-      const RAMP_AIR_EXTRA_GRAVITY_DOWN = 8;
+      const RAMP_AIR_EXTRA_GRAVITY_DOWN = 6;
       /** How fast a car's measured climb speed fades on flat ground (1/s). */
       const RAMP_CLIMB_DECAY = 3;
       let _rampMesh = null;
@@ -3063,12 +3225,19 @@ let _worldSwitched = false;
        */
       function rampGroundStep(state, curY, restY, dt) {
         state._rampAir = false; // on the ground
+        curY -= state._groundOffset || 0; // the car's own settle lift / dip isn't the ground dropping
         if (state._lastRestY === undefined) state._lastRestY = restY;
         if (curY - restY > RAMP_LEAVE_DROP && Math.abs(state.speed) > 0.3) {
           const climb = state._climbVy || 0;
           state._climbVy = 0;
           state._lastRestY = undefined;
           state._rampAir = true;
+          // Leaves with the slope's pitch (nose up), not the short flat top's.
+          if (climb > RAMP_LAUNCH_MIN_VY) {
+            const slope = Math.atan2(climb, Math.max(1, Math.abs(state.speed)));
+            state.tiltPitch = Math.max(state.tiltPitch || 0, Math.min(slope, AIR_PITCH_MAX_UP_DEG * _TILT_DEG));
+            state.pitchVel = 0;
+          }
           return climb > RAMP_LAUNCH_MIN_VY ? Math.min(RAMP_TAKEOFF_MAX_VY, climb * RAMP_TAKEOFF_SCALE) : -0.01;
         }
         const vy = dt > 0 ? (restY - state._lastRestY) / dt : 0;
@@ -3084,50 +3253,146 @@ let _worldSwitched = false;
         return RAMP_AIR_GRAVITY + (state.velY < 0 ? RAMP_AIR_EXTRA_GRAVITY_DOWN : 0);
       }
 
-      // Wheel positions in the car's own frame (for sampling the ground under each wheel).
-      const _carWheelLocal = [];
+      // ── Car tilt (every car): pitch / roll follow the ground under the wheels
+      // (table: level; ramp: its slope), blended smoothly; in the air the pitch
+      // arcs with the flight (nose up at takeoff, level at the top, a little
+      // nose down falling), lightly damped and clamped; on landing the low end
+      // touches first, the car settles onto the ground's angle and dips briefly.
+      const CAR_SURFACE_ALIGN_RATE = 12; // 1/s: toward the surface's pitch / roll
+      const CAR_SURFACE_MAX_TILT_DEG = 35; // ground pitch / roll clamp
+      const AIR_PITCH_FOLLOW = 0.6; // the nose follows this share of the flight path's angle
+      const AIR_PITCH_STIFFNESS = 32; // pull toward that angle (1/s²)
+      const AIR_PITCH_DAMPING = 9; // airborne angular damping (1/s): light, the arc shows
+      const AIR_PITCH_MAX_UP_DEG = 28;
+      const AIR_PITCH_MAX_DOWN_DEG = 10;
+      const AIR_ROLL_DAMPING = 2; // roll fades in the air (1/s)
+      const AIR_ROLL_MAX_DEG = 10;
+      const LANDING_SETTLE_RATE = 16; // 1/s: landing pitch → the ground's
+      const LANDING_SETTLE_SEC = 0.3;
+      const LANDING_COMPRESS = 0.09; // suspension dip at full impact (world units)
+      const LANDING_COMPRESS_SEC = 0.22;
+      const LANDING_COMPRESS_REF_VY = 14; // landing speed (down) for the full dip
+      const _TILT_DEG = Math.PI / 180;
+      const _carGround = { pitch: 0, roll: 0 };
 
-      /** The player's ground under each wheel: table or ramp. */
-      function sampleCarWheelGround() {
-        const ws = [wheelFL, wheelFR, wheelRL, wheelRR];
-        if (!_carWheelLocal.length) {
-          car.updateMatrixWorld(true);
-          const inv = new THREE.Matrix4().copy(car.matrixWorld).invert();
-          for (let i = 0; i < 4; i++) {
-            const v = new THREE.Vector3();
-            if (ws[i]) ws[i].getWorldPosition(v).applyMatrix4(inv);
-            _carWheelLocal.push(v);
+      /** Wheel sample offsets (forward / right half distances) from the car's footprint. */
+      function carWheelOffsets() {
+        const F = _carRailFoot;
+        return F.ok ? { lf: F.hf * 0.7, lr: F.hr * 0.75 } : { lf: 1, lr: 0.8 };
+      }
+
+      /** Pitch (nose up +) and roll (right side up +) of the ground under the four wheels [FL, FR, RL, RR]. */
+      function carGroundAngles(s, lf, lr, out) {
+        const m = CAR_SURFACE_MAX_TILT_DEG * _TILT_DEG;
+        const front = (s[0] + s[1]) * 0.5, rear = (s[2] + s[3]) * 0.5;
+        const left = (s[0] + s[2]) * 0.5, right = (s[1] + s[3]) * 0.5;
+        out.pitch = Math.max(-m, Math.min(m, Math.atan2(front - rear, 2 * lf)));
+        out.roll = Math.max(-m, Math.min(m, Math.atan2(right - left, 2 * lr)));
+        return out;
+      }
+
+      /** A car's tilt for this frame (grounded: follow the ground; airborne: the pitch arc). */
+      function updateCarTilt(st, grounded, g, dt) {
+        if (st.tiltPitch === undefined) {
+          st.tiltPitch = 0;
+          st.tiltRoll = 0;
+          st.pitchVel = 0;
+        }
+        if (grounded) {
+          const rate = st._settleT > 0 ? LANDING_SETTLE_RATE : CAR_SURFACE_ALIGN_RATE;
+          if (st._settleT > 0) st._settleT -= dt;
+          const k = 1 - Math.exp(-rate * dt);
+          const p0 = st.tiltPitch;
+          st.tiltPitch += (g.pitch - st.tiltPitch) * k;
+          st.tiltRoll += (g.roll - st.tiltRoll) * k;
+          st.pitchVel = dt > 0 ? (st.tiltPitch - p0) / dt : 0; // carried into a takeoff
+        } else {
+          const path = Math.atan2(st.velY, Math.max(1, Math.abs(st.speed))) * AIR_PITCH_FOLLOW;
+          const up = AIR_PITCH_MAX_UP_DEG * _TILT_DEG, down = AIR_PITCH_MAX_DOWN_DEG * _TILT_DEG;
+          const target = Math.max(-down, Math.min(up, path));
+          st.pitchVel += (AIR_PITCH_STIFFNESS * (target - st.tiltPitch) - AIR_PITCH_DAMPING * st.pitchVel) * dt;
+          st.tiltPitch = Math.max(-down, Math.min(up, st.tiltPitch + st.pitchVel * dt));
+          const rm = AIR_ROLL_MAX_DEG * _TILT_DEG;
+          st.tiltRoll = Math.max(-rm, Math.min(rm, st.tiltRoll * Math.exp(-AIR_ROLL_DAMPING * dt)));
+        }
+      }
+
+      /** Height a tilted car needs so its low end rests on the ground (it settles about it). */
+      function carTiltLift(st, g, lf) {
+        return Math.abs(Math.sin((st.tiltPitch || 0) - g.pitch)) * lf;
+      }
+
+      /**
+       * In the air: how far the car's lowest wheel (its own pitch / roll) is
+       * below the surface under that wheel ([FL, FR, RL, RR]); > 0 = touching down.
+       */
+      function carWheelPenetration(y, st, surf, lf, lr) {
+        const sp = Math.sin(st.tiltPitch || 0), sr = Math.sin(st.tiltRoll || 0);
+        let pen = -Infinity;
+        let i = 0;
+        for (const f of [1, -1]) {
+          for (const r of [-1, 1]) {
+            const wheelY = y - carBottomOffsetY + f * lf * sp + r * lr * sr;
+            pen = Math.max(pen, surf[i++] - wheelY);
           }
         }
+        return pen;
+      }
+
+      function onCarLanded(st, impactVy) {
+        st._settleT = LANDING_SETTLE_SEC;
+        st._compressT = 0;
+        st._compressAmp = Math.max(0, Math.min(1, -impactVy / LANDING_COMPRESS_REF_VY));
+      }
+
+      /** The landing's suspension dip (down, world units) this step. */
+      function carCompressDip(st, dt) {
+        if (st._compressT === undefined || st._compressT >= LANDING_COMPRESS_SEC) return 0;
+        st._compressT += dt;
+        return LANDING_COMPRESS * st._compressAmp * Math.sin(Math.PI * Math.min(1, st._compressT / LANDING_COMPRESS_SEC));
+      }
+
+      /** The player's ground under each wheel (footprint corners): table or ramp; and its angles. */
+      function sampleCarWheelGround() {
+        const { lf, lr } = carWheelOffsets();
+        const a = carState.angle + (carState.driftAngle || 0);
+        const fx = Math.sin(a), fz = Math.cos(a);
+        const rx = Math.cos(a), rz = -Math.sin(a);
         let lo = Infinity;
         let hi = -Infinity;
-        for (let i = 0; i < 4; i++) {
-          const w = _wheelSyncWorldPos[i];
-          w.copy(_carWheelLocal[i]).multiply(car.scale).applyQuaternion(car.quaternion).add(car.position);
-          const y = kitchenGroundY(w.x, w.z);
-          _carWheelSurfY[i] = y;
-          if (y < lo) lo = y;
-          if (y > hi) hi = y;
+        let i = 0;
+        for (const sf of [1, -1]) {
+          for (const sr of [-1, 1]) {
+            const w = _wheelSyncWorldPos[i];
+            w.set(car.position.x + fx * lf * sf + rx * lr * sr, 0, car.position.z + fz * lf * sf + rz * lr * sr);
+            const y = kitchenGroundY(w.x, w.z);
+            w.y = y;
+            _carWheelSurfY[i] = y;
+            if (y < lo) lo = y;
+            if (y > hi) hi = y;
+            i++;
+          }
         }
         _carFrontAxleSurfY = (_carWheelSurfY[0] + _carWheelSurfY[1]) * 0.5;
         _carRearAxleSurfY = (_carWheelSurfY[2] + _carWheelSurfY[3]) * 0.5;
         _carGroundSurfY = hi;
         _carSurfRange = hi - lo;
+        carGroundAngles(_carWheelSurfY, lf, lr, _carGround);
       }
 
       /**
-       * An AI race car's height and pitch on the table / ramp: ground-follow,
+       * An AI race car's height and tilt on the table / ramp: ground-follow,
        * launch off the edge, fall with gravity, land (same rules as the player).
        */
       const _raceWheelSurf = [0, 0, 0, 0];
+      const _raceGround = { pitch: 0, roll: 0 };
       function raceCarVerticalStep(rc, dt) {
         const st = rc.state;
-        const F = _carRailFoot;
-        if (!F.ok) return;
+        if (!_carRailFoot.ok) return;
+        const { lf, lr } = carWheelOffsets();
         const a = st.angle;
         const fx = Math.sin(a), fz = Math.cos(a);
         const rx = Math.cos(a), rz = -Math.sin(a);
-        const lf = F.hf * 0.7, lr = F.hr * 0.75;
         let k = 0;
         let hi = -Infinity;
         for (const sf of [1, -1]) {
@@ -3137,36 +3402,51 @@ let _worldSwitched = false;
             if (y > hi) hi = y;
           }
         }
-        const front = (_raceWheelSurf[0] + _raceWheelSurf[1]) * 0.5;
-        const rear = (_raceWheelSurf[2] + _raceWheelSurf[3]) * 0.5;
-        const rest = (front + rear) * 0.5 + carBottomOffsetY;
-        let pitch = 0;
+        carGroundAngles(_raceWheelSurf, lf, lr, _raceGround);
+        const avg = (_raceWheelSurf[0] + _raceWheelSurf[1] + _raceWheelSurf[2] + _raceWheelSurf[3]) * 0.25;
+        const rest = avg + carBottomOffsetY;
         if (st.velY !== 0) {
           rc.pos.y += st.velY * dt;
           st.velY -= carAirGravity(st) * dt;
-          const land = hi + carBottomOffsetY;
-          if (rc.pos.y <= land) {
-            rc.pos.y = land;
+          const pen = carWheelPenetration(rc.pos.y, st, _raceWheelSurf, lf, lr);
+          if (pen >= 0 && st.velY <= 0) {
+            // The low wheel touches first; the car settles about it from here.
+            rc.pos.y += pen;
+            st._groundOffset = rc.pos.y - rest;
+            onCarLanded(st, st.velY);
             st.velY = 0;
             st._rampAir = false;
             st._lastRestY = undefined;
-          } else {
-            pitch = Math.atan2(st.velY, Math.max(1, Math.abs(st.speed)) * 8);
           }
         } else {
           const launch = rampGroundStep(st, rc.pos.y, rest, dt);
-          if (launch !== null) st.velY = launch;
-          else rc.pos.y = rest;
-          pitch = Math.atan2(front - rear, 2 * lf);
+          if (launch !== null) {
+            st.velY = launch;
+            st._groundOffset = 0;
+          } else {
+            st._groundOffset = carTiltLift(st, _raceGround, lf) - carCompressDip(st, dt);
+            rc.pos.y = rest + st._groundOffset;
+          }
         }
-        rc.pitch = (rc.pitch || 0) + (pitch - (rc.pitch || 0)) * Math.min(1, dt * 10);
+        updateCarTilt(st, st.velY === 0, _raceGround, dt);
       }
 
       // ── Race boundaries: the car is stopped by the rails (raceBoundariesPhysic).
       // The car is moved by code, not the solver, so the rails are a list of
       // vertical wall segments in xz and the car's footprint rectangle is pushed
       // out of them each car step.
-      const KITCHEN_RAIL_BOUNCE = 0.3;
+      // Sliding along the rails: the car keeps the part of its motion along the
+      // wall; how much speed it keeps depends on how directly it hit (impact =
+      // |heading · wall normal|: 0 glancing … 1 head-on), and its heading turns
+      // toward the wall's direction (the one closest to its travel).
+      const RAIL_KEEP_GLANCING = 0.98; // speed kept on a glancing contact (no grip)
+      const RAIL_KEEP_HEAD_ON = 0.4; // speed kept on a head-on hit (never a full stop)
+      const RAIL_IMPACT_CURVE = 1.6; // > 1: shallow angles stay close to the glancing value
+      const RAIL_ALIGN_RATE = 7; // heading turn toward the wall's direction (1/s, × impact)
+      const RAIL_DEFLECT = 0.55; // immediate slide along the wall on a hit (× kept speed × impact)
+      const RAIL_RESTITUTION = 0.08; // small push-back off the wall (× speed into it)
+      /** Off the wall this long (seconds) before the next contact counts as a new hit. */
+      const RAIL_RECONTACT_SEC = 0.15;
       const _railSegs = []; // [ax, az, bx, bz, ...]
       let _railTopY = -Infinity;
       let _railBottomY = Infinity;
@@ -3227,43 +3507,80 @@ let _worldSwitched = false;
         _carRailFoot.ok = true;
       }
 
-      /** Push the car out of the rails and take speed off (bounce) when driving into one. */
-      function collideCarWithRails(pos, state) {
+      /**
+       * Rails: push the car's footprint out of the wall segments and let it slide
+       * along them. Overlap is tested with SAT (car axes + segment normal), but
+       * the push-out is always along the wall's normal (or from a rail piece's
+       * end point at its tips), never along the car's own axes, so it never
+       * catches on seams / piece ends. Moving into the wall: the speed kept
+       * depends on the impact angle, the heading turns toward the wall's
+       * direction, and a slide along the wall starts right away.
+       */
+      function collideCarWithRails(pos, state, dt = 1 / 60) {
         if (!_carRailFoot.ok || _railSegs.length === 0) return;
         const carBottom = pos.y - carBottomOffsetY;
         if (carBottom > _railTopY || pos.y < _railBottomY - 1) return;
         const F = _carRailFoot;
-        for (let iter = 0; iter < 2; iter++) {
-          let hit = false;
-          const a = state.angle;
-          const fx = Math.sin(a), fz = Math.cos(a);
-          const rx = Math.cos(a), rz = -Math.sin(a);
-          const cx = pos.x + rx * F.lr + fx * F.lf;
-          const cz = pos.z + rz * F.lr + fz * F.lf;
+        let slideNx = 0, slideNz = 0, slideHit = false;
+        for (let iter = 0; iter < 3; iter++) {
+          let any = false;
           for (let i = 0; i < _railSegs.length; i += 4) {
+            const a = state.angle;
+            const fx = Math.sin(a), fz = Math.cos(a);
+            const rx = Math.cos(a), rz = -Math.sin(a);
+            const cx = pos.x + rx * F.lr + fx * F.lf;
+            const cz = pos.z + rz * F.lr + fz * F.lf;
             const ax = _railSegs[i], az = _railSegs[i + 1];
             const bx = _railSegs[i + 2], bz = _railSegs[i + 3];
-            let sx = bx - ax, sz = bz - az;
+            const sx = bx - ax, sz = bz - az;
             const sl = Math.hypot(sx, sz);
-            // Separating axes: car right, car forward, segment normal.
-            const axes = [rx, rz, fx, fz, -sz / sl, sx / sl];
-            let depth = Infinity, nx = 0, nz = 0;
+            if (sl < 1e-6) continue;
+            const tx = sx / sl, tz = sz / sl;
+            // Overlap (SAT on car right / forward / segment normal).
+            const axes = [rx, rz, fx, fz, -tz, tx];
+            let separated = false;
             for (let k = 0; k < 6; k += 2) {
               const ux = axes[k], uz = axes[k + 1];
               const rad = F.hr * Math.abs(ux * rx + uz * rz) + F.hf * Math.abs(ux * fx + uz * fz);
               const c = cx * ux + cz * uz;
               const p0 = ax * ux + az * uz, p1 = bx * ux + bz * uz;
-              const sMin = Math.min(p0, p1), sMax = Math.max(p0, p1);
-              const pushNeg = c + rad - sMin; // move car along -u
-              const pushPos = sMax - (c - rad); // move car along +u
-              if (pushNeg <= 0 || pushPos <= 0) { depth = 0; break; }
-              if (pushNeg < depth) { depth = pushNeg; nx = -ux; nz = -uz; }
-              if (pushPos < depth) { depth = pushPos; nx = ux; nz = uz; }
+              if (c + rad <= Math.min(p0, p1) || c - rad >= Math.max(p0, p1)) {
+                separated = true;
+                break;
+              }
             }
+            if (separated) continue;
+            // Push-out direction: the wall normal toward the car while the car's
+            // centre is alongside the segment; past its ends, away from the end point.
+            const along = (cx - ax) * tx + (cz - az) * tz;
+            let nx, nz;
+            if (along >= 0 && along <= sl) {
+              nx = -tz;
+              nz = tx;
+              if ((cx - ax) * nx + (cz - az) * nz < 0) {
+                nx = -nx;
+                nz = -nz;
+              }
+            } else {
+              const ex = along < 0 ? ax : bx, ez = along < 0 ? az : bz;
+              nx = cx - ex;
+              nz = cz - ez;
+              const nl = Math.hypot(nx, nz);
+              if (nl < 1e-6) continue;
+              nx /= nl;
+              nz /= nl;
+            }
+            // Depth along that direction: the car's extent toward the wall vs the wall.
+            const rad = F.hr * Math.abs(nx * rx + nz * rz) + F.hf * Math.abs(nx * fx + nz * fz);
+            const wall = Math.max(ax * nx + az * nz, bx * nx + bz * nz);
+            const depth = wall - (cx * nx + cz * nz - rad);
             if (!(depth > 0)) continue;
-            hit = true;
             pos.x += nx * depth;
             pos.z += nz * depth;
+            any = true;
+            slideHit = true;
+            slideNx += nx;
+            slideNz += nz;
             // A collision push (from another car) never carries on into the rail.
             if (state.bumpVX || state.bumpVZ) {
               const bn = state.bumpVX * nx + state.bumpVZ * nz;
@@ -3272,16 +3589,48 @@ let _worldSwitched = false;
                 state.bumpVZ -= bn * nz;
               }
             }
-            const fn = fx * nx + fz * nz; // n points from the rail toward the car
-            if (state.speed * fn < 0) {
-              const k = Math.abs(fn);
-              state.speed = state.speed * (1 - k) - state.speed * k * KITCHEN_RAIL_BOUNCE;
-              if (Math.abs(state.speed) < 0.04) state.speed = 0;
-            }
-            break;
           }
-          if (!hit) break;
+          if (!any) break;
         }
+        if (!slideHit) {
+          state._railFree = (state._railFree ?? 1) + dt;
+          return;
+        }
+        // Sliding response (against the combined wall normal). The angle-based
+        // speed loss and the slide start once per contact; while the car stays
+        // against the wall only its heading keeps straightening along it.
+        const firstStep = (state._railFree ?? 1) > RAIL_RECONTACT_SEC;
+        state._railFree = 0;
+        const nl = Math.hypot(slideNx, slideNz);
+        if (nl < 1e-6) return;
+        const nx = slideNx / nl, nz = slideNz / nl;
+        const a = state.angle;
+        const fx = Math.sin(a), fz = Math.cos(a);
+        const sgn = state.speed >= 0 ? 1 : -1;
+        const vxDir = fx * sgn, vzDir = fz * sgn; // travel direction
+        const into = vxDir * nx + vzDir * nz; // < 0: moving into the wall
+        if (into >= 0 || Math.abs(state.speed) < 0.05) return;
+        const impact = Math.min(1, -into);
+        const keep = RAIL_KEEP_GLANCING + (RAIL_KEEP_HEAD_ON - RAIL_KEEP_GLANCING) * Math.pow(impact, RAIL_IMPACT_CURVE);
+        const speedIn = Math.abs(state.speed);
+        if (firstStep) state.speed *= keep;
+        // The wall's direction closest to the travel direction.
+        let txs = -nz, tzs = nx;
+        if (txs * vxDir + tzs * vzDir < 0) {
+          txs = -txs;
+          tzs = -tzs;
+        }
+        // Slide along it right away; a small push-back off the wall.
+        if (firstStep) {
+          const slide = speedIn * keep * impact * RAIL_DEFLECT;
+          state.bumpVX = (state.bumpVX || 0) + txs * slide + nx * speedIn * impact * RAIL_RESTITUTION;
+          state.bumpVZ = (state.bumpVZ || 0) + tzs * slide + nz * speedIn * impact * RAIL_RESTITUTION;
+        }
+        // Heading turns toward that direction (reversing: the car's back leads).
+        const target = Math.atan2(txs * sgn, tzs * sgn);
+        let dA = target - a;
+        dA = Math.atan2(Math.sin(dA), Math.cos(dA));
+        state.angle += dA * Math.min(1, RAIL_ALIGN_RATE * impact * dt);
       }
 
       // ── Kitchen race ─────────────────────────────────────────────────────
@@ -3324,8 +3673,19 @@ let _worldSwitched = false;
       const RACE_GRID_ORDER = ["ai0", "player", "ai1"];
       const _raceNoInput = { forward: false, reverse: false, left: false, right: false, brake: false };
       let _raceTrack = null;
-      let _racePhase = "off"; // off | intro | waiting | countdown | racing | finished
+      // finishing: a car has finished, the race goes on until the player
+      // finishes (or RACE_RESULTS_MAX_WAIT_SEC); finished: results popup open.
+      let _racePhase = "off"; // off | intro | waiting | countdown | racing | finishing | finished
       let _raceTimer = 0;
+      /** Race clock (world seconds since GO), stopped once the results open. */
+      let _raceElapsed = 0;
+      /** Time since the winner finished (finishing phase). */
+      let _raceEndWait = 0;
+      /** Countdown to opening the results popup (< 0: not scheduled). */
+      let _raceResultsIn = -1;
+      let _raceResults = null;
+      /** The player's car colour in the results list. */
+      const RACE_PLAYER_COLOR = 0xff2d55;
       let _raceGoTimer = 0;
       let _raceModel = null;
       let _raceAiTemplate = null;
@@ -3341,6 +3701,7 @@ let _worldSwitched = false;
       const _raceTmpQ = new THREE.Quaternion();
       const _raceSteerQ = new THREE.Quaternion();
       const _axisRacePitch = new THREE.Vector3(1, 0, 0);
+      const _axisRaceRoll = new THREE.Vector3(0, 0, 1);
       const _raceRollQ = new THREE.Quaternion();
 
       function kitchenRaceInputsLocked() {
@@ -3565,8 +3926,10 @@ let _worldSwitched = false;
         _raceCars.length = 0;
         _raceCars.push({
           id: "player",
-          name: "You",
+          name: "Red",
+          color: RACE_PLAYER_COLOR,
           isPlayer: true,
+          finishTime: 0,
           pos: car.position,
           state: carState,
           tracker: new LapTracker(_raceTrack),
@@ -3581,6 +3944,11 @@ let _worldSwitched = false;
 
         _raceHud = new RaceHud();
         _raceHud.attach(getKitchenSceneMount());
+        _raceResults = new RaceResultsPopup({
+          onRetry: () => retryKitchenRace(),
+          onNext: () => goToNextKitchenLevel(),
+        });
+        _raceResults.attach(getKitchenSceneMount());
         resetKitchenRace();
         buildKitchenRaceArrows();
       }
@@ -3590,7 +3958,12 @@ let _worldSwitched = false;
         rc.state._rampAir = false;
         rc.state._lastRestY = undefined;
         rc.state._climbVy = 0;
-        rc.pitch = 0;
+        rc.state.tiltPitch = 0;
+        rc.state.tiltRoll = 0;
+        rc.state.pitchVel = 0;
+        rc.state._settleT = 0;
+        rc.state._compressT = undefined;
+        rc.state._groundOffset = 0;
         rc.state.angle = heading;
         rc.state.speed = 0;
         rc.state.steerAngle = 0;
@@ -3627,12 +4000,17 @@ let _worldSwitched = false;
             syncRaceAiCar(rc, 0);
           }
           rc.finishOrder = 0;
+          rc.finishTime = 0;
           rc.tracker.reset(rc.pos.x, rc.pos.z);
         });
         _raceWinner = null;
         _racePhase = "waiting";
         _raceTimer = RACE_START_DELAY_SEC;
         _raceGoTimer = 0;
+        _raceElapsed = 0;
+        _raceEndWait = 0;
+        _raceResultsIn = -1;
+        if (_raceResults) _raceResults.hide(true);
         // Held (no timer, no laps) until the cinematic intro hands over.
         if (_kIntro.state !== "done") _racePhase = "intro";
         if (_raceHud) {
@@ -3673,7 +4051,8 @@ let _worldSwitched = false;
         const st = rc.state;
         // Height from raceCarVerticalStep (table / ramp / air); nose up = −x rotation.
         rc.root.quaternion.setFromAxisAngle(_flatUp, st.angle);
-        if (rc.pitch) rc.root.quaternion.multiply(_raceTmpQ.setFromAxisAngle(_axisRacePitch, -rc.pitch));
+        if (st.tiltPitch) rc.root.quaternion.multiply(_raceTmpQ.setFromAxisAngle(_axisRacePitch, -st.tiltPitch));
+        if (st.tiltRoll) rc.root.quaternion.multiply(_raceTmpQ.setFromAxisAngle(_axisRaceRoll, st.tiltRoll));
         rc.root.updateMatrixWorld(true);
         st.wheelAngle = (st.wheelAngle + (st.speed * dt) / WHEEL_RADIUS) % (Math.PI * 2);
         _raceRollQ.setFromAxisAngle(_axisWheelRoll, st.wheelAngle);
@@ -3807,14 +4186,14 @@ let _worldSwitched = false;
           stepCarDrive(rc.state, input, rc.pos, false, dt);
           integrateRaceCarBump(rc.pos, rc.state, dt);
           raceCarVerticalStep(rc, dt);
-          collideCarWithRails(rc.pos, rc.state);
+          collideCarWithRails(rc.pos, rc.state, dt);
         }
         // No pushing while the cars are held (waiting / countdown / finished).
         if (!locked) collideRaceCars();
         // A car pushed by another one must still not end up inside a rail.
         for (const rc of _raceCars) {
           if (rc.isPlayer && (carFalling || carState.velY !== 0)) continue;
-          collideCarWithRails(rc.pos, rc.state);
+          collideCarWithRails(rc.pos, rc.state, dt);
         }
         // An AI car pushed through a gap in the outer rails is put back on the track.
         for (const rc of _raceCars) {
@@ -3826,6 +4205,130 @@ let _worldSwitched = false;
           placeRaceCar(rc, pt.x, pt.z, pt.heading);
           rc.bumperPrevValid = false;
         }
+      }
+
+      const _hex = (c) => "#" + (c >>> 0).toString(16).padStart(6, "0");
+
+      /** Race over: lock the cars, stop the clock and show the results popup. */
+      function openKitchenRaceResults() {
+        _racePhase = "finished";
+        _raceResultsIn = -1;
+        _raceHud.setBig("");
+        const standings = raceStandings();
+        const player = _raceCars.find((c) => c.isPlayer);
+        const place = standings.indexOf(player) + 1;
+        const ord = ["1st", "2nd", "3rd", "4th"][place - 1] || place + "th";
+        let title;
+        let color;
+        if (place === 1) {
+          title = "You win!";
+          color = "#4dff88";
+        } else {
+          title = player.finishOrder ? `${ord} place` : `${_raceWinner.name} car wins`;
+          color = player.finishOrder ? "#ffd23f" : _hex(_raceWinner.color);
+        }
+        const sub = player.finishOrder
+          ? `Your time ${formatRaceTime(player.finishTime)}`
+          : `You: ${ord} — lap ${Math.min(RACE_LAPS, player.tracker.lapsDone + 1)}/${RACE_LAPS}`;
+        _raceResults.attach(getKitchenSceneMount());
+        _raceResults.show({
+          title,
+          color,
+          sub,
+          nextEnabled: !!nextLevelPath(SCENE_ROUTES.kitchen),
+          rows: standings.map((rc, i) => ({
+            place: i + 1,
+            name: rc.name,
+            color: _hex(rc.color),
+            isPlayer: !!rc.isPlayer,
+            time: rc.finishOrder
+              ? formatRaceTime(rc.finishTime)
+              : `Lap ${Math.min(RACE_LAPS, rc.tracker.lapsDone + 1)}/${RACE_LAPS}`,
+          })),
+        });
+      }
+
+      /** Ramp jump slow motion, jump camera and landing shakes off; normal camera. */
+      function cancelKitchenCameraFx() {
+        restoreKitchenJumpCamera();
+        const F = _jumpFx;
+        F.active = false;
+        F.tReal = 0;
+        F.w = 0;
+        F.orbit = 0;
+        F.wasAir = false;
+        F.airVy = 0;
+        F.airWorld = 0;
+        F.launchVy = 0;
+        F.shakeT = Infinity;
+        _kitchenTimeScale = 1;
+        updateKitchenJumpVignette();
+        _carCam1LandShakeTime = 0;
+        _carLandShakePending = false;
+      }
+
+      /** Physics props (plates, cups, boxes, signs) back where they started, at rest. */
+      function resetKitchenProps() {
+        for (const p of _kitchenProps) {
+          const b = p.body;
+          const h = b._home;
+          if (!h) continue;
+          b.position.copy(h.pos);
+          b.previousPosition.copy(h.pos);
+          b.interpolatedPosition.copy(h.pos);
+          b.quaternion.copy(h.quat);
+          b.previousQuaternion.copy(h.quat);
+          b.interpolatedQuaternion.copy(h.quat);
+          b.velocity.set(0, 0, 0);
+          b.angularVelocity.set(0, 0, 0);
+          b.force.set(0, 0, 0);
+          b.torque.set(0, 0, 0);
+          if (b._propCup) b.sleep();
+          else b.wakeUp();
+          p.synced = false;
+        }
+        _cupHitByCar = false;
+      }
+
+      /** Turn arrows back to their default: no wave playing, all hidden. */
+      function resetKitchenRaceArrows() {
+        const R = _raceArrows;
+        if (!R) return;
+        for (const U of R.turns) {
+          U.waveT = -1;
+          U.cooldown = 0;
+          U.fired = -1;
+          U.carsIn.clear();
+        }
+        for (const A of R.arrows) A.age = 1e6;
+        R.nextWave = RACE_ARROW_WAVE_MIN_SEC + Math.random() * (RACE_ARROW_WAVE_MAX_SEC - RACE_ARROW_WAVE_MIN_SEC);
+      }
+
+      /** "Race again": everything back to the start, straight into the countdown (no intro). */
+      function retryKitchenRace() {
+        if (!_raceTrack) return;
+        if (_kIntro.state !== "done") finishKitchenIntro();
+        cancelKitchenCameraFx();
+        resetKitchenProps();
+        resetKitchenRaceArrows();
+        for (const k in keys) if (typeof keys[k] === "boolean") keys[k] = false;
+        resetKitchenRace();
+        _racePhase = "countdown";
+        _raceTimer = RACE_COUNTDOWN_SEC;
+        if (camera === carCamera) {
+          getCarCameraLookAtPoint(_carMatrixLookAt);
+          controls.target.copy(_carMatrixLookAt);
+          syncCarOrbitCamAnglesFromPosition(camera);
+          applyCarOrbitCameraFromAngles();
+        }
+      }
+
+      /** "Next level": hand over to the page, which plays the transition and changes level. */
+      function goToNextKitchenLevel() {
+        const next = nextLevelPath(SCENE_ROUTES.kitchen);
+        if (!next) return;
+        if (_raceResults) _raceResults.hide();
+        emitKitchenSceneEvent("next-level", { path: next });
       }
 
       function kitchenRaceCarsMoving() {
@@ -3872,7 +4375,8 @@ let _worldSwitched = false;
           } else {
             _raceHud.setBig(String(Math.ceil(_raceTimer)), "#ffd23f");
           }
-        } else if (_racePhase === "racing") {
+        } else if (_racePhase === "racing" || _racePhase === "finishing") {
+          _raceElapsed += dt;
           if (_raceGoTimer > 0) {
             _raceGoTimer -= dt;
             if (_raceGoTimer <= 0) _raceHud.setBig("");
@@ -3880,20 +4384,30 @@ let _worldSwitched = false;
           let order = 0;
           for (const rc of _raceCars) order = Math.max(order, rc.finishOrder);
           for (const rc of _raceCars) {
+            if (rc.finishOrder) continue; // finished cars keep driving; their result is fixed
             rc.tracker.update(rc.pos.x, rc.pos.z);
-            if (!rc.finishOrder && rc.tracker.lapsDone >= RACE_LAPS) {
+            if (rc.tracker.lapsDone >= RACE_LAPS) {
               rc.finishOrder = ++order;
+              rc.finishTime = _raceElapsed;
               if (!_raceWinner) _raceWinner = rc;
+              if (rc.isPlayer) {
+                // The finish moment first, then the results.
+                _raceHud.setBig(rc.finishOrder === 1 ? "FINISH!" : "FINISH", rc.finishOrder === 1 ? "#4dff88" : "#ffd23f");
+                _raceResultsIn = RACE_RESULTS_DELAY_SEC;
+              }
             }
           }
-          if (_raceWinner) {
-            _racePhase = "finished";
-            _raceHud.setBig("");
-            if (_raceWinner.isPlayer) {
-              _raceHud.showResult("You win!", "Press R to race again", "#4dff88");
-            } else {
-              const hex = "#" + _raceWinner.color.toString(16).padStart(6, "0");
-              _raceHud.showResult(`${_raceWinner.name} car wins`, "Press R to race again", hex);
+          if (_raceWinner && _racePhase === "racing") {
+            _racePhase = "finishing";
+            _raceEndWait = 0;
+          }
+          if (_racePhase === "finishing") {
+            _raceEndWait += dt;
+            // The player is far behind: don't keep everyone waiting.
+            if (_raceResultsIn < 0 && _raceEndWait >= RACE_RESULTS_MAX_WAIT_SEC) _raceResultsIn = 0;
+            if (_raceResultsIn >= 0) {
+              _raceResultsIn -= dt;
+              if (_raceResultsIn <= 0) openKitchenRaceResults();
             }
           }
         }
@@ -3901,7 +4415,7 @@ let _worldSwitched = false;
         const standings = raceStandings();
         const player = _raceCars.find((c) => c.isPlayer);
         if (player) {
-          const lap = Math.min(RACE_LAPS, player.tracker.lapsDone + 1);
+          const lap = Math.min(RACE_LAPS, (player.finishOrder ? RACE_LAPS : player.tracker.lapsDone + 1));
           _raceHud.setStatus(lap, RACE_LAPS, standings.indexOf(player) + 1, _raceCars.length);
         }
       }
@@ -4948,7 +5462,7 @@ let _worldSwitched = false;
       const JUMP_SLOWMO_SCALE = 0.2; // world time scale in slow motion
       const JUMP_SLOWMO_EASE_IN_SEC = 0.08; // real seconds into slow motion (kicks in at takeoff)
       const JUMP_SLOWMO_EASE_OUT_SEC = 0.35; // real seconds back to 1× (from the landing)
-      const JUMP_SLOWMO_MAX_REAL_SEC = 3.4; // a very long jump leaves slow motion after this (a top-speed flight fits)
+      const JUMP_SLOWMO_MAX_REAL_SEC = 4.2; // a very long jump leaves slow motion after this (a top-speed flight fits)
       const JUMP_CAM_ZOOM = 0.25; // camera distance × this (close to the car)
       const JUMP_CAM_MIN_DIST = 4.2; // never closer than this to the car (whole car in frame)
       const JUMP_CAM_ORBIT_DEG = 90; // arc around the car (from behind to its side)
@@ -5148,7 +5662,7 @@ let _worldSwitched = false;
       }
 
       window.kitchenRace = {
-        restart: () => resetKitchenRace(),
+        restart: () => retryKitchenRace(),
         getState: () => ({
           phase: _racePhase,
           winner: _raceWinner ? _raceWinner.name : null,
@@ -5166,8 +5680,9 @@ let _worldSwitched = false;
       window.addEventListener("keydown", (e) => {
         if (e.code !== "KeyR" || e.repeat || e.metaKey || e.ctrlKey || e.altKey) return;
         if (!_kitchenSceneRendering || !_raceTrack) return;
+        if (_kIntro.state !== "done") return;
         e.preventDefault();
-        resetKitchenRace();
+        retryKitchenRace();
       });
 
       // Car bumper for props: the car's body collider starts above the plates
@@ -10172,6 +10687,30 @@ let _worldSwitched = false;
                 _nishBackWallPlateClones,
                 _shelfReflectSlate,
               );
+              try {
+                // Mask the plates behind the listed parts, along the wall's normal
+                // (the plate's thinnest axis, pointing into the room).
+                const _maskParts = [];
+                kmodel.traverse((n) => {
+                  if (n.isMesh && KITCHEN_NISH_MASK_PARTS.includes(n.name)) _maskParts.push(n);
+                });
+                const g = mainNishBackWallPlateMesh.geometry;
+                if (!g.boundingBox) g.computeBoundingBox();
+                const gs = g.boundingBox.getSize(new THREE.Vector3());
+                const wallNormal = new THREE.Vector3(
+                  gs.x <= gs.y && gs.x <= gs.z ? 1 : 0,
+                  gs.y < gs.x && gs.y <= gs.z ? 1 : 0,
+                  gs.z < gs.x && gs.z < gs.y ? 1 : 0,
+                ).transformDirection(mainNishBackWallPlateMesh.matrixWorld);
+                if (_maskParts.length) {
+                  const wallPos = mainNishBackWallPlateMesh.getWorldPosition(new THREE.Vector3());
+                  const partPos = new THREE.Box3().setFromObject(_maskParts[0]).getCenter(new THREE.Vector3());
+                  if (partPos.sub(wallPos).dot(wallNormal) < 0) wallNormal.negate();
+                }
+                applyKitchenNishMask(_shelfReflectSlate, renderKitchenNishMask(_maskParts, wallNormal));
+              } catch (e) {
+                console.warn("Failed to mask wall plates behind parts:", e);
+              }
             }
 
             if (kitchenPlate) {
@@ -11146,7 +11685,7 @@ let _worldSwitched = false;
           bl.material = input.brake ? bl._brakeMat : bl._offMat;
         }
 
-        if (!carFalling) collideCarWithRails(car.position, carState);
+        if (!carFalling) collideCarWithRails(car.position, carState, dt);
         carState.driftAngle = 0;
         if (!carFalling) sampleCarWheelGround();
         const edgeX = Math.abs(car.position.x - tablePlateCenter.x) > tablePlateHalfX;
@@ -11201,10 +11740,15 @@ let _worldSwitched = false;
           carState.velY -= carAirGravity(carState) * dt * gravScale;
           _jumpFx.airVy = carState.velY;
           if (carState._rampAir) _jumpFx.airWorld += dt;
-          // Land on whatever is under the wheels (table or ramp).
-          const _landOnY = Math.max(tableSpawn.y, _carGroundSurfY + carBottomOffsetY);
-          if (car.position.y < _landOnY) {
-            car.position.y = _landOnY;
+          // Land when the lowest wheel (the car's own pitch / roll) meets the
+          // surface under it (table or ramp): that end touches first.
+          const _wo = carWheelOffsets();
+          const _pen = carWheelPenetration(car.position.y, carState, _carWheelSurfY, _wo.lf, _wo.lr);
+          if (_pen >= 0 && carState.velY <= 0) {
+            car.position.y += _pen;
+            const _rest = (_carWheelSurfY[0] + _carWheelSurfY[1] + _carWheelSurfY[2] + _carWheelSurfY[3]) * 0.25 + carBottomOffsetY;
+            carState._groundOffset = car.position.y - _rest;
+            onCarLanded(carState, carState.velY);
             carState.velY = 0;
             carState._lastRestY = undefined;
           }
@@ -11268,6 +11812,13 @@ let _worldSwitched = false;
             minWheelBottomY < tableSurfaceY
           ) {
             car.position.y += tableSurfaceY - minWheelBottomY;
+          }
+          // Settling from a tilted landing (low end on the ground) and the suspension dip.
+          if (_launchVy === null) {
+            carState._groundOffset = carTiltLift(carState, _carGround, carWheelOffsets().lf) - carCompressDip(carState, dt);
+            car.position.y += carState._groundOffset;
+          } else {
+            carState._groundOffset = 0;
           }
         }
         if (!carFalling) {
@@ -11501,33 +12052,8 @@ let _worldSwitched = false;
             }
           }
           if (_carTumbling) carOnTable = false;
+          if (carOnTable && carState.velY < 0) onCarLanded(carState, carState.velY);
           if (carOnTable && carState.velY <= 0) carState.velY = 0;
-          const speedFactor = Math.min(
-            1,
-            Math.abs(carState.speed) / Math.max(0.01, carState.maxSpeed),
-          );
-          const tiltLerpFactor =
-            TILT_SPEED_MIN_LERP +
-            (TILT_SPEED_MAX_LERP - TILT_SPEED_MIN_LERP) * speedFactor;
-          let targetUp = _flatUp;
-          if (
-            carState.velY === 0 &&
-            _carSurfRange > CAR_STEP_SURF_DELTA_MIN
-          ) {
-            computeCarGroundNormalFromWheels(_stepTiltUp);
-            targetUp = _stepTiltUp;
-          }
-          if (carState.velY !== 0) {
-            const fx = Math.sin(carState.angle + carState.driftAngle);
-            const fz = Math.cos(carState.angle + carState.driftAngle);
-            const hSpeed = Math.max(1, Math.abs(carState.speed));
-            const pitchAngle = Math.atan2(carState.velY, hSpeed * 8);
-            const sinP = Math.sin(pitchAngle);
-            const cosP = Math.cos(pitchAngle);
-            targetUp = _airTiltUp
-              .set(-sinP * fx, cosP, -sinP * fz)
-              .normalize();
-          }
           if (carState.velY !== 0) wasInAir = true;
           const onGround = carState.velY === 0 && carOnTable;
           const justLanded = onGround && wasInAir;
@@ -11537,7 +12063,6 @@ let _worldSwitched = false;
             _rampJumpFxBlend = 0;
             _rampJumpFxIn = 0;
             landingRecoveryUntil = nowSec + LANDING_RECOVERY_DURATION;
-            carUpLerp.set(0, 1, 0);
             _carLandShakePending = true;
             const hadJumpCamFx =
               _rampJumpMatrixActive ||
@@ -11552,43 +12077,17 @@ let _worldSwitched = false;
             _rampJumpSimAirTime = 0;
             _rampJumpCamRestOffset.set(0, 0, 0);
           }
-          const inLandingRecovery = onGround && nowSec < landingRecoveryUntil;
-          const stepTiltLerp = CAR_STEP_TILT_LERP * tiltLerpFactor;
-          const onStepTransition = carState.velY === 0 &&
-            _carSurfRange > CAR_STEP_SURF_DELTA_MIN;
-          const airTiltLerp = 5 + 5 * Math.min(1, jumpLaunchSpeed / Math.max(0.01, carState.maxSpeed));
-          const groundTiltLerp = inLandingRecovery
-            ? LANDING_TILT_LERP
-            : stepTiltLerp;
-          if (!justLanded)
-            carUpLerp.lerp(
-              targetUp,
-              Math.min(
-                1,
-                dt * (carState.velY !== 0 ? airTiltLerp : groundTiltLerp),
-              ),
-            );
-          _quatY.setFromAxisAngle(
-            _flatUp,
-            carState.angle + carState.driftAngle,
-          );
-          const ux = carUpLerp.x,
-            uy = carUpLerp.y,
-            uz = carUpLerp.z;
-          const uyClamp = Math.max(-1, Math.min(1, uy));
-          const tiltAngle = Math.acos(uyClamp);
-          if (tiltAngle < 1e-6) {
-            _quatTilt.identity();
-          } else {
-            _tiltAxis.set(uz, 0, -ux);
-            if (_tiltAxis.lengthSq() < 1e-12) _tiltAxis.set(1, 0, 0);
-            else _tiltAxis.normalize();
-            _quatTilt.setFromAxisAngle(_tiltAxis, tiltAngle);
-          }
-          car.quaternion.copy(_quatTilt).multiply(_quatY);
+          // Tilt: the shared model (ground pitch / roll, the airborne arc, landing settle).
+          updateCarTilt(carState, carState.velY === 0 && !carFalling, _carGround, dt);
+          _quatY.setFromAxisAngle(_flatUp, carState.angle + carState.driftAngle);
+          car.quaternion.copy(_quatY);
+          if (carState.tiltPitch) car.quaternion.multiply(_quatTilt.setFromAxisAngle(_axisRacePitch, -carState.tiltPitch));
+          if (carState.tiltRoll) car.quaternion.multiply(_quatTilt.setFromAxisAngle(_axisRaceRoll, carState.tiltRoll));
+          carUpLerp.set(0, 1, 0).applyQuaternion(car.quaternion);
           syncCarFromFallBody();
           if (carOnTable && carState.velY <= 0) {
-            if (_carGroundSurfY <= tableSurfaceY + 0.01) {
+            const settling = carState._settleT > 0 || (carState._compressT ?? Infinity) < LANDING_COMPRESS_SEC;
+            if (_carGroundSurfY <= tableSurfaceY + 0.01 && !settling) {
               car.position.y = tableSpawn.y;
             }
             carState.velY = 0;
