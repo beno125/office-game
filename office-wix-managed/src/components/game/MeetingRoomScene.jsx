@@ -1,29 +1,28 @@
 import { useEffect, useRef, useState } from "react";
 import { setMeetingRoomSceneMount } from "../meeting-room/meetingRoomSceneMount.js";
 import { onMeetingRoomSceneEvent } from "./meetingRoomSceneEvents.js";
-import { SCENE_ROUTES, consumeLevelTransition } from "./sceneRoutes.js";
+import { SCENE_ROUTES } from "./sceneRoutes.js";
 import { useLevelHotkeys } from "./useLevelHotkeys.js";
-import WorldTransition from "./WorldTransition.jsx";
+import MeetingRoomSignTransition from "./MeetingRoomSignTransition.jsx";
 
-/** World-transition loader fade-out (when arriving from the previous level). */
-const TRANSITION_FADE_MS = 600;
+/** Sign loader fade-out once its lights have dimmed. */
+const SIGN_FADE_MS = 700;
 
 export default function MeetingRoomScene() {
   const rootRef = useRef(null);
   const [phase, setPhase] = useState("loading");
   const [sceneReady, setSceneReady] = useState(false);
-  // Arrived through "Next level": the world transition is the loader, as for the kitchen.
-  const [withTransition] = useState(() => consumeLevelTransition(SCENE_ROUTES.meetingRoom));
-  const [transitionDone, setTransitionDone] = useState(false);
-  const [transitionGone, setTransitionGone] = useState(false);
-  const transitionReveal = sceneReady && transitionDone;
+  // The lightbox sign is the loader: it ends (lights dim) once the room is
+  // ready, then fades out and is removed.
+  const [signFading, setSignFading] = useState(false);
+  const [signGone, setSignGone] = useState(false);
   useLevelHotkeys(SCENE_ROUTES.meetingRoom);
 
   useEffect(() => {
-    if (!withTransition || !transitionReveal) return;
-    const timer = window.setTimeout(() => setTransitionGone(true), TRANSITION_FADE_MS);
+    if (!signFading) return;
+    const timer = window.setTimeout(() => setSignGone(true), SIGN_FADE_MS);
     return () => window.clearTimeout(timer);
-  }, [withTransition, transitionReveal]);
+  }, [signFading]);
 
   useEffect(() => {
     const root = rootRef.current;
@@ -80,19 +79,18 @@ export default function MeetingRoomScene() {
       }}
     >
       <div id="perfBadge" aria-hidden="true" />
-      {withTransition && !transitionGone && (
+      {!signGone && phase !== "error" && (
         <div
-          aria-busy={!transitionReveal}
           style={{
             position: "fixed",
             inset: 0,
             zIndex: 30,
-            opacity: transitionReveal ? 0 : 1,
-            transition: `opacity ${TRANSITION_FADE_MS}ms ease`,
-            pointerEvents: transitionReveal ? "none" : "auto",
+            opacity: signFading ? 0 : 1,
+            transition: `opacity ${SIGN_FADE_MS}ms ease`,
+            pointerEvents: signFading ? "none" : "auto",
           }}
         >
-          <WorldTransition onComplete={() => setTransitionDone(true)} />
+          <MeetingRoomSignTransition ready={sceneReady} onFinished={() => setSignFading(true)} />
         </div>
       )}
       <div
@@ -110,7 +108,7 @@ export default function MeetingRoomScene() {
           font: "800 15px/1.4 system-ui, sans-serif",
           letterSpacing: "0.06em",
           textTransform: "uppercase",
-          opacity: sceneReady ? 0 : 1,
+          opacity: phase === "error" ? 1 : 0,
           transition: "opacity 650ms ease",
           pointerEvents: "none",
         }}

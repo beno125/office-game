@@ -38,34 +38,11 @@ export function nextLevelPath(currentPath) {
   return LEVEL_ORDER[index + 1];
 }
 
-const LEVEL_TRANSITION_KEY = "office-game:level-transition";
-
 /**
- * Go to level `path` (a full page load, so the old scene is torn down
- * completely). The next page plays the world transition as its loader.
+ * Go to level `path` with a full page load, so the old scene is torn down
+ * completely. The next level's page shows its own loading transition.
  */
 export function goToLevelWithTransition(path) {
   if (typeof window === "undefined" || !path) return;
-  try {
-    window.sessionStorage.setItem(LEVEL_TRANSITION_KEY, path);
-  } catch (e) {}
   window.location.assign(levelUrl(path));
-}
-
-let _arrivedWithTransition = null;
-
-/**
- * True if this page was reached through goToLevelWithTransition. The flag is
- * read (and cleared) once per page load, so a reload doesn't replay it.
- */
-export function consumeLevelTransition(path) {
-  if (typeof window === "undefined") return false;
-  if (_arrivedWithTransition === null) {
-    _arrivedWithTransition = "";
-    try {
-      _arrivedWithTransition = window.sessionStorage.getItem(LEVEL_TRANSITION_KEY) || "";
-      window.sessionStorage.removeItem(LEVEL_TRANSITION_KEY);
-    } catch (e) {}
-  }
-  return _arrivedWithTransition === path;
 }
