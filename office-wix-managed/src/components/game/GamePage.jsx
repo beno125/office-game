@@ -7,7 +7,6 @@ import IntroPage, {
 import { onOfficeSceneEvent } from "./officeSceneEvents.js";
 import OfficeScene from "../OfficeScene.jsx";
 import KitchenScene from "./KitchenScene.jsx";
-import WorldTransition from "./WorldTransition.jsx";
 
 const overlayBase = {
   ...introPageStyle,
@@ -136,12 +135,11 @@ export default function GamePage() {
         <OfficeScene
           hideModuleLoadingOverlay
           onModuleReady={() => setBundleReady(true)}
-          onTransitionToKitchen={() => setActiveScene("transition")}
+          onTransitionToKitchen={() => setActiveScene("kitchen")}
         />
-      ) : activeScene === "transition" ? (
-        <WorldTransition onComplete={() => setActiveScene("kitchen")} />
       ) : (
-        <KitchenScene />
+        // The world transition is the kitchen's loader (it stays until the kitchen is ready).
+        <KitchenScene waitForTransition />
       )}
       {activeScene === "office" && transitionPhase !== "done" && (
         <div

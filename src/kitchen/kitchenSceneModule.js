@@ -32,9 +32,14 @@ const officeAsset = (path) => _OFFICE_BASE + String(path).replace(/^\.\//, "");
 let _kitchenSceneRendering = false;
 let _kitchenSceneAnimationFrame = 0;
 let _kitchenSceneReady = false;
+/** Set (and "ready" emitted) once the loaded kitchen has been drawn a few times. */
+let _kitchenSceneShown = false;
+let _kitchenSceneShownFrames = 0;
+/** Frames drawn before "ready": shaders compiled, textures uploaded (no hitch on reveal). */
+const KITCHEN_READY_FRAMES = 4;
 
 export function isKitchenSceneReady() {
-  return _kitchenSceneReady;
+  return _kitchenSceneShown;
 }
 
       const scene = new THREE.Scene();
@@ -2932,7 +2937,7 @@ let _worldSwitched = false;
       const RACE_GRID_ORDER = ["ai0", "player", "ai1"];
       const _raceNoInput = { forward: false, reverse: false, left: false, right: false, brake: false };
       let _raceTrack = null;
-      let _racePhase = "off"; // off | waiting | countdown | racing | finished
+      let _racePhase = "off"; // off | intro | waiting | countdown | racing | finished
       let _raceTimer = 0;
       let _raceGoTimer = 0;
       let _raceModel = null;
@@ -2951,7 +2956,12 @@ let _worldSwitched = false;
       const _raceRollQ = new THREE.Quaternion();
 
       function kitchenRaceInputsLocked() {
-        return _racePhase === "waiting" || _racePhase === "countdown" || _racePhase === "finished";
+        return (
+          _racePhase === "intro" ||
+          _racePhase === "waiting" ||
+          _racePhase === "countdown" ||
+          _racePhase === "finished"
+        );
       }
 
       /** Copy of the player's car model (lights / particles stripped later) for the AI cars. */
@@ -3184,6 +3194,7 @@ let _worldSwitched = false;
         _raceHud = new RaceHud();
         _raceHud.attach(getKitchenSceneMount());
         resetKitchenRace();
+        buildKitchenRaceArrows();
       }
 
       function placeRaceCar(rc, x, z, heading) {
@@ -3230,6 +3241,8 @@ let _worldSwitched = false;
         _racePhase = "waiting";
         _raceTimer = RACE_START_DELAY_SEC;
         _raceGoTimer = 0;
+        // Held (no timer, no laps) until the cinematic intro hands over.
+        if (_kIntro.state !== "done") _racePhase = "intro";
         if (_raceHud) {
           _raceHud.hideResult();
           _raceHud.setBig("");
@@ -3447,6 +3460,7 @@ let _worldSwitched = false;
           if (!_raceTrack) return;
         }
         _raceHud.attach(getKitchenSceneMount());
+        _raceHud.setVisible(_racePhase !== "intro");
         for (const rc of _raceCars) if (!rc.isPlayer) syncRaceAiCar(rc, dt);
 
         if (_racePhase === "waiting") {
@@ -3496,6 +3510,936 @@ let _worldSwitched = false;
           const lap = Math.min(RACE_LAPS, player.tracker.lapsDone + 1);
           _raceHud.setStatus(lap, RACE_LAPS, standings.indexOf(player) + 1, _raceCars.length);
         }
+      }
+
+
+      // ---------------------------------------------------------------------------
+      // Turn arrows: hollow neon chevrons floating just above the raceBoundaries
+      // rail along each turn, following the rail's own path. Each stands upright
+      // along the rail, facing the track, its tip along the rail's tangent in the
+      // direction of travel, so the row bends with the curve. Their only
+      // animation is a one-shot wave (a pulse in the direction of travel, then
+      // fading out), started by a car entering a turn's range or now and then at
+      // random. Between waves they're hidden and draw nothing. Visual only: no
+      // physics, no raycasts.
+      // One InstancedMesh (shared quad + glow shader), per-arrow brightness.
+      // ---------------------------------------------------------------------------
+      /** The rail mesh the arrows sit on (the visible raceBoundaries rail, not its legs / collider). */
+      const RACE_ARROW_RAIL_MESH = "raceBoundaries";
+      /** Overall arrow size (1 = the first version: 2.6 tall). Shape and spacing scale with it. */
+      const RACE_ARROW_SIZE = 0.36;
+      /** The neon line keeps its weight better than the shape: it scales with √size. */
+      const RACE_ARROW_LINE_SCALE = Math.sqrt(RACE_ARROW_SIZE);
+      const RACE_ARROW_HEIGHT = 2.6 * RACE_ARROW_SIZE; // chevron outline
+      const RACE_ARROW_WIDTH = 1.9 * RACE_ARROW_SIZE; // along its pointing direction (the rail's tangent)
+      const RACE_ARROW_ARM = 0.55 * RACE_ARROW_SIZE; // thickness of the chevron's arms (the hollow outline's shape)
+      const RACE_ARROW_GLOW_MARGIN = 0.4 * RACE_ARROW_LINE_SCALE; // halo reach beyond the outline line
+      /** Clear space between the rail's top and the arrow's lowest point (its glow included). */
+      const RACE_ARROW_RAIL_GAP = 0.22;
+      const RACE_ARROW_SPACING = 4.6 * RACE_ARROW_SIZE; // distance between arrows along the rail
+      /** Rail path: vertices this close in direction (rad, from the turn centre) form one ring. */
+      const RACE_ARROW_RING_ANGLE = 0.01;
+      /** A gap between rings this many times the usual spacing is an opening in the rail. */
+      const RACE_ARROW_OPENING_FACTOR = 2.5;
+      // The wave: the arrows' only animation. One pulse runs along a turn's row
+      // in the direction of travel, then every arrow fades out (hidden again).
+      const RACE_ARROW_FLASH_SEC = 0.04; // rise of each arrow's flash
+      const RACE_ARROW_WAVE_SEC = 1.3; // one wave, first arrow's flash to the last arrow fading out
+      const RACE_ARROW_WAVE_STEP_SEC = 0.06; // delay from one arrow to the next
+      /** After a wave ends, its turn can't start another for this long (cars arriving together / in-out). */
+      const RACE_ARROW_WAVE_COOLDOWN_SEC = 1.8;
+      /**
+       * A car entering this distance of a turn's row (world units from the row's
+       * reach) triggers a wave there: ~1 s ahead at top speed (17 / s), well
+       * beyond the ~1.6 a car needs to brake, so it plays before the turn.
+       */
+      const RACE_ARROW_ACTIVATE_DIST = 18;
+      // Random waves on an idle turn, even with no car near.
+      const RACE_ARROW_WAVE_MIN_SEC = 6; // random interval between waves…
+      const RACE_ARROW_WAVE_MAX_SEC = 12; // …(seconds)
+      const RACE_ARROW_INTENSITY = 2.4; // overall brightness (HDR, additive)
+      const RACE_ARROW_BRIGHT_MODE_SCALE = 1.5; // brightness in bright mode (more, so waves aren't washed out)
+      // Reflection on the table top (a mirrored copy, drawn on the table's surface).
+      const RACE_ARROW_REFLECT_STRENGTH = 0.32; // × the arrow's brightness
+      const RACE_ARROW_REFLECT_FADE = 0.9; // fades with depth below the surface (world units, e-folding)
+      const RACE_ARROW_REFLECT_SOFTNESS = 1.8; // wider, softer line than the arrow
+      const RACE_ARROW_REFLECT_LIFT = 0.01; // drawn just above the table surface (no z-fighting)
+      /** The table's visible top meshes (the reflecting surface: its height and extent). */
+      const RACE_ARROW_TABLE_TOP_MESHES = ["mainTableTopPlane", "mainTablePlate"];
+      // Line look (chevron units).
+      const RACE_ARROW_CORE_WIDTH = 0.04 * RACE_ARROW_LINE_SCALE; // white-hot core half width
+      const RACE_ARROW_LINE_WIDTH = 0.1 * RACE_ARROW_LINE_SCALE; // red neon line half width
+
+      let _raceArrows = null;
+
+      /** Chevron outline (closed), pointing +x, centred, in arrow units. */
+      function _raceArrowOutline() {
+        const w = RACE_ARROW_WIDTH / 2;
+        const h = RACE_ARROW_HEIGHT / 2;
+        const a = RACE_ARROW_ARM;
+        return [
+          [-w, h],
+          [-w + a, h],
+          [w, 0],
+          [-w + a, -h],
+          [-w, -h],
+          [w - a, 0],
+          [-w, h],
+        ];
+      }
+
+      /**
+       * The arrows' glow material. With `reflect`, the mirrored copy under the
+       * table top: each vertex is drawn where the camera's ray to its mirrored
+       * position meets the table surface (same screen spot, the table's depth, so
+       * cars in front still hide it), interpolated as if at its mirrored depth,
+       * fading with depth, softer, and clipped to the table top.
+       */
+      /** The table's top surface, measured from its meshes: { y, min (xz), max (xz) }. */
+      function _raceArrowTableTop() {
+        const box = new THREE.Box3();
+        for (const n of RACE_ARROW_TABLE_TOP_MESHES) {
+          const o = scene.getObjectByName(n);
+          if (o) box.union(new THREE.Box3().setFromObject(o));
+        }
+        if (box.isEmpty()) {
+          return {
+            y: tableSurfaceY,
+            min: new THREE.Vector2(tablePlateCenter.x - tablePlateHalfX, tablePlateCenter.z - tablePlateHalfZ),
+            max: new THREE.Vector2(tablePlateCenter.x + tablePlateHalfX, tablePlateCenter.z + tablePlateHalfZ),
+          };
+        }
+        return { y: box.max.y, min: new THREE.Vector2(box.min.x, box.min.z), max: new THREE.Vector2(box.max.x, box.max.z) };
+      }
+
+      function _raceArrowMaterial(reflect = false, top = null) {
+        const pts = _raceArrowOutline().map(([x, y]) => new THREE.Vector2(x, y));
+        const soft = reflect ? RACE_ARROW_REFLECT_SOFTNESS : 1;
+        return new THREE.ShaderMaterial({
+          defines: reflect ? { REFLECT: 1 } : {},
+          uniforms: {
+            uPts: { value: pts },
+            uCore: { value: RACE_ARROW_CORE_WIDTH * (reflect ? 0.6 : 1) },
+            uLine: { value: RACE_ARROW_LINE_WIDTH * soft },
+            uGlow: { value: RACE_ARROW_GLOW_MARGIN },
+            uRed: { value: new THREE.Color(1.0, 0.04, 0.07) },
+            uHot: { value: new THREE.Color(1.0, 0.86, 0.86) },
+            uIntensity: { value: RACE_ARROW_INTENSITY * (reflect ? RACE_ARROW_REFLECT_STRENGTH : 1) },
+            uSurfY: { value: top ? top.y : tableSurfaceY },
+            uLift: { value: RACE_ARROW_REFLECT_LIFT },
+            uFade: { value: RACE_ARROW_REFLECT_FADE },
+            uTableMin: { value: top ? top.min : new THREE.Vector2() },
+            uTableMax: { value: top ? top.max : new THREE.Vector2() },
+          },
+          vertexShader: `
+            attribute float aBright;
+            uniform float uSurfY;
+            uniform float uLift;
+            varying vec4 vPw; // (local xy, depth below the surface, 1) × w ratio (reflection)
+            varying vec2 vQ; // where it's drawn on the table (reflection)
+            varying float vB;
+            void main() {
+              vB = aBright;
+              vec4 wp = modelMatrix * instanceMatrix * vec4(position, 1.0);
+            #ifdef REFLECT
+              vec3 C = cameraPosition;
+              float surf = uSurfY + uLift;
+              if (C.y <= surf + 1e-3 || wp.y >= surf) {
+                // Camera at / below the table top: no reflection.
+                gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+                vPw = vec4(0.0);
+                vQ = vec2(1e6);
+                return;
+              }
+              vec3 Q = C + (wp.xyz - C) * ((surf - C.y) / (wp.y - C.y));
+              vec4 clipM = projectionMatrix * viewMatrix * wp;
+              gl_Position = projectionMatrix * viewMatrix * vec4(Q, 1.0);
+              vPw = vec4(position.xy, uSurfY - wp.y, 1.0) * (gl_Position.w / clipM.w);
+              vQ = Q.xz;
+            #else
+              vPw = vec4(position.xy, 0.0, 1.0);
+              vQ = vec2(0.0);
+              gl_Position = projectionMatrix * viewMatrix * wp;
+            #endif
+            }`,
+          fragmentShader: `
+            uniform vec2 uPts[7];
+            uniform float uCore;
+            uniform float uLine;
+            uniform float uGlow;
+            uniform vec3 uRed;
+            uniform vec3 uHot;
+            uniform float uIntensity;
+            uniform float uFade;
+            uniform vec2 uTableMin;
+            uniform vec2 uTableMax;
+            varying vec4 vPw;
+            varying vec2 vQ;
+            varying float vB;
+            void main() {
+              vec2 vP = vPw.xy / vPw.w;
+              float fade = 1.0;
+            #ifdef REFLECT
+              if (vQ.x < uTableMin.x || vQ.x > uTableMax.x || vQ.y < uTableMin.y || vQ.y > uTableMax.y) discard;
+              fade = exp(-max(0.0, vPw.z / vPw.w) / uFade);
+            #endif
+              float d = 1e3;
+              for (int i = 0; i < 6; i++) {
+                vec2 a = uPts[i];
+                vec2 ab = uPts[i + 1] - a;
+                float t = clamp(dot(vP - a, ab) / dot(ab, ab), 0.0, 1.0);
+                d = min(d, length(vP - a - ab * t));
+              }
+              float core = 1.0 - smoothstep(uCore * 0.4, uCore, d);
+              float line = 1.0 - smoothstep(uLine * 0.5, uLine, d);
+              float halo = exp(-d / (uGlow * 0.35)) * (1.0 - smoothstep(uGlow * 0.6, uGlow, d));
+              vec3 col = uHot * core * 1.6 + uRed * (line * 1.4 + halo * 0.55);
+              col *= vB * uIntensity * fade;
+              if (max(col.r, max(col.g, col.b)) < 0.002) discard;
+              gl_FragColor = vec4(col, 1.0);
+            }`,
+          transparent: true,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+          depthTest: true,
+          side: THREE.DoubleSide,
+          toneMapped: false,
+        });
+      }
+
+      /** World vertices of the rail mesh (x, y, z). */
+      function _raceArrowRailVertices() {
+        const o = scene.getObjectByName(RACE_ARROW_RAIL_MESH);
+        if (!o || !o.isMesh || !o.geometry) return null;
+        o.updateMatrixWorld(true);
+        const pa = o.geometry.attributes.position;
+        const out = new Float32Array(pa.count * 3);
+        const v = new THREE.Vector3();
+        for (let i = 0; i < pa.count; i++) {
+          v.fromBufferAttribute(pa, i).applyMatrix4(o.matrixWorld);
+          out[i * 3] = v.x;
+          out[i * 3 + 1] = v.y;
+          out[i * 3 + 2] = v.z;
+        }
+        return out;
+      }
+
+      /**
+       * The rail's path around one turn, in the direction of travel. The rail is
+       * a tube along a polyline: its vertices sit in rings at the polyline's
+       * corners. Each ring gives a path point (its centre) and the rail's top
+       * there; rings are ordered by race progress, and the path is split where
+       * the rail has an opening (a gap far longer than the usual ring spacing).
+       */
+      function _raceArrowRailPath(rail, T, pa) {
+        const p0 = {}, p1 = {};
+        T.pointAt(pa + T.halfTurn / 2, 0, p0);
+        T.pointAt(pa + T.halfTurn / 2, 1, p1);
+        const cx = p0.x - (p1.x - p0.x) * T.r;
+        const cz = p0.z - (p1.z - p0.z) * T.r;
+        const verts = [];
+        for (let k = 0; k < rail.length; k += 3) {
+          const x = rail[k], z = rail[k + 2];
+          let q = T.progress(x, z) - pa;
+          q = ((q % T.length) + T.length) % T.length;
+          if (q > T.halfTurn) continue; // not this turn
+          verts.push({ x, y: rail[k + 1], z, q, a: Math.atan2(x - cx, z - cz) });
+        }
+        verts.sort((u, v) => u.q - v.q);
+        // Rings: vertices at (almost) the same direction from the turn's centre.
+        const rings = [];
+        let ring = null;
+        for (const v of verts) {
+          if (!ring || Math.abs(Math.atan2(Math.sin(v.a - ring.a), Math.cos(v.a - ring.a))) > RACE_ARROW_RING_ANGLE) {
+            rings.push((ring = { a: v.a, q: v.q, xs: 0, zs: 0, n: 0, top: -Infinity }));
+          }
+          ring.xs += v.x;
+          ring.zs += v.z;
+          ring.n++;
+          ring.top = Math.max(ring.top, v.y);
+        }
+        const pts = rings.map((r) => ({ x: r.xs / r.n, z: r.zs / r.n, top: r.top, q: r.q }));
+        // Split at openings.
+        const gaps = [];
+        for (let i = 1; i < pts.length; i++) gaps.push(Math.hypot(pts[i].x - pts[i - 1].x, pts[i].z - pts[i - 1].z));
+        const median = gaps.length ? gaps.slice().sort((u, v) => u - v)[Math.floor(gaps.length / 2)] : 0;
+        const runs = [];
+        let run = pts.length ? [pts[0]] : null;
+        if (run) runs.push(run);
+        for (let i = 1; i < pts.length; i++) {
+          if (gaps[i - 1] > median * RACE_ARROW_OPENING_FACTOR) runs.push((run = []));
+          run.push(pts[i]);
+        }
+        return runs.filter((r) => r.length > 1);
+      }
+
+      function buildKitchenRaceArrows() {
+        if (_raceArrows || !_raceTrack) return;
+        const T = _raceTrack;
+        const rail = _raceArrowRailVertices();
+        if (!rail) return;
+        const halfBelow = RACE_ARROW_HEIGHT / 2 + RACE_ARROW_GLOW_MARGIN; // centre to the glow's lowest point
+        // Obstacles for the placement check: visible kitchen meshes, not the
+        // rails (the arrows sit on them), cars or flat effect planes.
+        const blockers = [];
+        const skipRoots = new Set(_raceCars.map((rc) => (rc.isPlayer ? car : rc.root)).filter(Boolean));
+        scene.traverse((o) => {
+          if (!o.isMesh || o.isInstancedMesh) return;
+          for (let q = o; q; q = q.parent) {
+            if (!q.visible || skipRoots.has(q)) return;
+          }
+          if (/^raceBoundaries/.test(o.name)) return;
+          const m = o.material;
+          if (m && m.transparent && m.depthWrite === false) return;
+          blockers.push(o);
+        });
+        const rc = new THREE.Raycaster();
+        const _a = new THREE.Vector3(), _b = new THREE.Vector3(), _d = new THREE.Vector3();
+        const outline = _raceArrowOutline();
+        const placed = []; // { matrix, turn, k, n, fire, age, x, z }
+        const turns = [];
+        const basis = new THREE.Matrix4();
+        const X = new THREE.Vector3(), Y = new THREE.Vector3(0, 1, 0), Z = new THREE.Vector3();
+        const pos = new THREE.Vector3();
+        const turnStarts = [T.straight - T.startS, 2 * T.straight + T.halfTurn - T.startS];
+        turnStarts.forEach((pa, turn) => {
+          const runs = _raceArrowRailPath(rail, T, pa);
+          const row = [];
+          for (const runPts of runs) {
+            // Walk the run by arc length, an arrow every RACE_ARROW_SPACING
+            // (centred in the run), tangent from the path itself.
+            const cum = [0];
+            for (let i = 1; i < runPts.length; i++) {
+              cum.push(cum[i - 1] + Math.hypot(runPts[i].x - runPts[i - 1].x, runPts[i].z - runPts[i - 1].z));
+            }
+            const len = cum[cum.length - 1];
+            const n = Math.floor(len / RACE_ARROW_SPACING) + 1;
+            const start = (len - (n - 1) * RACE_ARROW_SPACING) / 2;
+            let j = 1;
+            for (let k = 0; k < n; k++) {
+              const sAt = start + k * RACE_ARROW_SPACING;
+              while (j < cum.length - 1 && cum[j] < sAt) j++;
+              const A0 = runPts[j - 1], A1 = runPts[j];
+              const f = (sAt - cum[j - 1]) / Math.max(1e-6, cum[j] - cum[j - 1]);
+              const x = A0.x + (A1.x - A0.x) * f;
+              const z = A0.z + (A1.z - A0.z) * f;
+              // Tangent: the rail's straight section under the arrow, in travel order.
+              X.set(A1.x - A0.x, 0, A1.z - A0.z).normalize();
+              // The rail's top under the arrow: the higher of the section's ends.
+              const top = Math.max(A0.top, A1.top);
+              pos.set(x, top + RACE_ARROW_RAIL_GAP + halfBelow, z);
+              Z.crossVectors(X, Y);
+              basis.makeBasis(X, Y, Z).setPosition(pos);
+              // Skip an arrow that would cut through a kitchen object.
+              let clear = true;
+              for (let i = 0; i < outline.length - 1 && clear; i++) {
+                _a.set(outline[i][0], outline[i][1], 0).applyMatrix4(basis);
+                _b.set(outline[i + 1][0], outline[i + 1][1], 0).applyMatrix4(basis);
+                _d.subVectors(_b, _a);
+                const l = _d.length();
+                rc.set(_a, _d.normalize());
+                rc.far = l;
+                if (rc.intersectObjects(blockers, false).length) clear = false;
+              }
+              if (clear) row.push({ matrix: basis.clone(), turn, x, z, railTop: top, age: Infinity, shown: true });
+            }
+          }
+          row.forEach((A, k) => {
+            A.k = k;
+            A.n = row.length;
+            A.fire = k * RACE_ARROW_WAVE_STEP_SEC; // in travel order
+            placed.push(A);
+          });
+          // Activation: the row's centre and reach.
+          let cx = 0, cz = 0;
+          for (const A of row) {
+            cx += A.x;
+            cz += A.z;
+          }
+          cx /= Math.max(1, row.length);
+          cz /= Math.max(1, row.length);
+          let reach = 0;
+          for (const A of row) reach = Math.max(reach, Math.hypot(A.x - cx, A.z - cz));
+          turns.push({
+            cx,
+            cz,
+            reach,
+            n: row.length,
+            waveT: -1, // time into a playing wave (−1 = none)
+            cooldown: 0, // after a wave: no new wave until this runs out
+            carsIn: new Set(), // cars within the activation distance (enter = trigger)
+          });
+        });
+        if (!placed.length) return;
+
+        const geo = new THREE.PlaneGeometry(
+          RACE_ARROW_WIDTH + 2 * RACE_ARROW_GLOW_MARGIN,
+          RACE_ARROW_HEIGHT + 2 * RACE_ARROW_GLOW_MARGIN,
+        );
+        const bright = new Float32Array(placed.length);
+        geo.setAttribute("aBright", new THREE.InstancedBufferAttribute(bright, 1).setUsage(THREE.DynamicDrawUsage));
+        const mesh = new THREE.InstancedMesh(geo, _raceArrowMaterial(false), placed.length);
+        mesh.name = "raceTurnArrows";
+        placed.forEach((A, i) => mesh.setMatrixAt(i, A.matrix));
+        mesh.instanceMatrix.needsUpdate = true;
+        mesh.frustumCulled = false;
+        mesh.castShadow = false;
+        mesh.receiveShadow = false;
+        mesh.renderOrder = 6;
+        mesh.raycast = () => {}; // never a raycast / collision target
+        mesh.userData.noCollision = true;
+        scene.add(mesh);
+        // Reflection: each arrow mirrored across the table top, sharing the
+        // arrows' brightness attribute (always in sync with its arrow).
+        const top = _raceArrowTableTop();
+        const mirror = new THREE.Matrix4()
+          .makeTranslation(0, top.y, 0)
+          .multiply(new THREE.Matrix4().makeScale(1, -1, 1))
+          .multiply(new THREE.Matrix4().makeTranslation(0, -top.y, 0));
+        const reflGeo = new THREE.BufferGeometry();
+        reflGeo.setIndex(geo.index);
+        reflGeo.setAttribute("position", geo.attributes.position);
+        reflGeo.setAttribute("aBright", geo.attributes.aBright);
+        const refl = new THREE.InstancedMesh(reflGeo, _raceArrowMaterial(true, top), placed.length);
+        refl.name = "raceTurnArrowsReflection";
+        placed.forEach((A, i) => {
+          A.reflMatrix = mirror.clone().multiply(A.matrix);
+          refl.setMatrixAt(i, A.reflMatrix);
+        });
+        refl.instanceMatrix.needsUpdate = true;
+        refl.frustumCulled = false;
+        refl.castShadow = false;
+        refl.receiveShadow = false;
+        refl.renderOrder = 5; // just before the arrows
+        refl.raycast = () => {};
+        refl.userData.noCollision = true;
+        scene.add(refl);
+        _raceArrows = {
+          mesh,
+          refl,
+          arrows: placed,
+          bright,
+          turns,
+          nextWave: RACE_ARROW_WAVE_MIN_SEC + Math.random() * (RACE_ARROW_WAVE_MAX_SEC - RACE_ARROW_WAVE_MIN_SEC),
+          zero: new THREE.Matrix4().makeScale(0, 0, 0),
+        };
+      }
+
+      /** Each arrow's fade, so a whole wave (all its arrows) lasts RACE_ARROW_WAVE_SEC. */
+      function _raceArrowFadeSec(n) {
+        return Math.max(0.25, RACE_ARROW_WAVE_SEC - RACE_ARROW_FLASH_SEC - (n - 1) * RACE_ARROW_WAVE_STEP_SEC);
+      }
+
+      /** Flash shape of one arrow in a wave: quick rise, then a fade to nothing. */
+      function _raceArrowFlash(A, fadeSec) {
+        if (A.age < RACE_ARROW_FLASH_SEC) return A.age / RACE_ARROW_FLASH_SEC;
+        if (A.age < RACE_ARROW_FLASH_SEC + fadeSec) {
+          const u = 1 - (A.age - RACE_ARROW_FLASH_SEC) / fadeSec;
+          return u * u;
+        }
+        return 0;
+      }
+
+      /**
+       * The one wave, for every trigger: starts on turn U unless one is playing
+       * there (that one counts) or the turn is cooling down after its last wave.
+       */
+      function _raceArrowStartWave(U) {
+        if (U.waveT >= 0 || U.cooldown > 0) return false;
+        U.waveT = 0;
+        U.fired = -1; // index of the last arrow fired in this wave
+        return true;
+      }
+
+      /**
+       * Waves start when a car enters a turn's range, and now and then on a
+       * random idle turn. Between waves the arrows are off and not drawn.
+       */
+      function updateKitchenRaceArrows(dt) {
+        const R = _raceArrows;
+        if (!R) return;
+        const modeScale = 1 + (RACE_ARROW_BRIGHT_MODE_SCALE - 1) * lightBlend;
+        // Random wave on an idle turn (not during the cinematic intro).
+        if (_kIntro.state === "done") {
+          R.nextWave -= dt;
+          if (R.nextWave <= 0) {
+            R.nextWave = RACE_ARROW_WAVE_MIN_SEC + Math.random() * (RACE_ARROW_WAVE_MAX_SEC - RACE_ARROW_WAVE_MIN_SEC);
+            const idle = R.turns.filter((U) => U.waveT < 0 && U.cooldown <= 0);
+            if (idle.length) _raceArrowStartWave(idle[Math.floor(Math.random() * idle.length)]);
+          }
+        }
+        for (let ti = 0; ti < R.turns.length; ti++) {
+          const U = R.turns[ti];
+          if (U.cooldown > 0) U.cooldown -= dt;
+          // A car entering the range triggers a wave (once per entry).
+          for (const rc of _raceCars) {
+            const inside = Math.hypot(rc.pos.x - U.cx, rc.pos.z - U.cz) - U.reach < RACE_ARROW_ACTIVATE_DIST;
+            if (inside && !U.carsIn.has(rc)) {
+              U.carsIn.add(rc);
+              _raceArrowStartWave(U);
+            } else if (!inside) U.carsIn.delete(rc);
+          }
+          if (U.waveT < 0) continue;
+          U.waveT += dt;
+          // Fire the arrows the pulse has reached, in the direction of travel.
+          const reached = Math.min(U.n - 1, Math.floor(U.waveT / RACE_ARROW_WAVE_STEP_SEC));
+          if (reached > U.fired) {
+            for (const A of R.arrows) {
+              if (A.turn === ti && A.k > U.fired && A.k <= reached) A.age = 0;
+            }
+            U.fired = reached;
+          }
+          if (U.waveT >= RACE_ARROW_WAVE_SEC) {
+            U.waveT = -1; // done: every arrow has faded out
+            U.cooldown = RACE_ARROW_WAVE_COOLDOWN_SEC;
+          }
+        }
+        let anyShown = false;
+        let matricesDirty = false;
+        for (let i = 0; i < R.arrows.length; i++) {
+          const A = R.arrows[i];
+          A.age += dt;
+          const b = _raceArrowFlash(A, _raceArrowFadeSec(A.n)) * modeScale;
+          R.bright[i] = b;
+          // Off: collapsed to nothing (not drawn); back just as it lights up.
+          const show = b > 1e-3;
+          if (show !== A.shown) {
+            R.mesh.setMatrixAt(i, show ? A.matrix : R.zero);
+            R.refl.setMatrixAt(i, show ? A.reflMatrix : R.zero);
+            A.shown = show;
+            matricesDirty = true;
+          }
+          if (show) anyShown = true;
+        }
+        if (matricesDirty) {
+          R.mesh.instanceMatrix.needsUpdate = true;
+          R.refl.instanceMatrix.needsUpdate = true;
+        }
+        R.mesh.visible = anyShown;
+        R.refl.visible = anyShown;
+        if (anyShown) R.mesh.geometry.attributes.aBright.needsUpdate = true;
+      }
+
+      // ---------------------------------------------------------------------------
+      // Cinematic intro (dark mode), letterboxed:
+      //   1. table overview — a slow glide along the table, descending toward the track
+      //   2. car beauty shot — (cut) a slow, low front-three-quarter orbit of the player's car
+      //   3. track run — fast and low along the track's centre line through a turn
+      //   4. arrival — back over the infield onto the gameplay camera
+      // The race is held meanwhile (phase "intro": no input, AI paused, no timer /
+      // laps, HUD hidden). A click or any key skips straight to the race view. Every shot is built from the race track and the cars' positions.
+      // ---------------------------------------------------------------------------
+      /** Shots, in order (seconds). `blendIn` > 0 glides in from the previous shot; 0 = a cut. */
+      const KITCHEN_INTRO_SHOTS = [
+        { name: "overview", sec: 2.2, blendIn: 0 },
+        { name: "carBeauty", sec: 2.2, blendIn: 1.6 }, // glides down onto the car
+        { name: "trackRun", sec: 3.2, blendIn: 0 }, // the one cut
+        { name: "arrival", sec: 2.4, blendIn: 0 }, // continues from the run's last pose
+      ];
+      /** 1. Overview: along the table (from its left half toward the grid), descending. */
+      const KITCHEN_INTRO_OVERVIEW = {
+        alongFrom: -28, // along the start straight from the track centre
+        alongTo: -6,
+        outFrom: 14, // toward the table's front (the start straight's outside)
+        outTo: 9,
+        heightFrom: 13, // above the table
+        heightTo: 6,
+        lookAlongFrom: -4, // look point: along the track from its centre…
+        fovFrom: 58, // …turning onto the player's car by the end (where the next shot looks)
+        fovTo: 48,
+      };
+      /**
+       * 2. Car beauty shot: a slow orbit around the player's car, front three-
+       * quarter from the table's front side, so the kitchen (counter, shelves)
+       * is the background; just above the rail and the car beside it.
+       */
+      const KITCHEN_INTRO_CAR = {
+        radiusFrom: 7.0,
+        radiusTo: 6.0,
+        angleFromDeg: 45, // 0 = straight ahead of the car, 90 = its outer (table-front) side
+        angleToDeg: 78,
+        heightFrom: 2.6, // camera above the table (car height ≈ 1.65)
+        heightTo: 1.9,
+        lookHeight: 0.75,
+        fovFrom: 36, // tight
+        fovTo: 32,
+      };
+      /**
+       * 3. Track run: low and fast along the track into the next turn, slowing
+       * through it (fast straight, controlled turn, at rest for the arrival).
+       */
+      const KITCHEN_INTRO_RUN = {
+        beforeTurn: 14, // progress before the turn where the run starts
+        endAfterTurn: 2, // progress past the end of the turn
+        lateral: 2.0, // toward the outside of the loop (a wider line through the turn)
+        height: 1.3,
+        lookAhead: 8, // world units along the curve
+        lookHeight: 0.6,
+        fovFrom: 62, // wide
+        fovTo: 66,
+        maxRollDeg: 7, // leaning into the turn
+      };
+      /** Letterbox bars: height (share of the view, each) and slide in / out times. */
+      const KITCHEN_INTRO_LETTERBOX_HEIGHT = 0.11;
+      const KITCHEN_INTRO_LETTERBOX_IN_SEC = 0.9;
+      const KITCHEN_INTRO_LETTERBOX_OUT_SEC = 0.7;
+      const KITCHEN_INTRO_TOTAL_SEC = KITCHEN_INTRO_SHOTS.reduce((t, s) => t + s.sec, 0);
+      /** Arrow wave on the run's turn: starts this long before the camera reaches the turn. */
+      const KITCHEN_INTRO_RUN_WAVE_LEAD = 0.3;
+      /** One arrow wave along both turns as the camera arrives on the gameplay view. */
+      const KITCHEN_INTRO_WAVE_AT_SEC = KITCHEN_INTRO_TOTAL_SEC - 0.9;
+
+      const _kIntro = {
+        state: "pending", // pending (under the loader) | playing | done
+        t: 0,
+        rig: null, // track / car frame the shots are built from (at the start)
+        savedPos: new THREE.Vector3(),
+        savedQuat: new THREE.Quaternion(),
+        savedFov: 50,
+        controlsWereEnabled: true,
+        overriding: false,
+        waveDone: false,
+        runWaveDone: false,
+        bars: null, // letterbox elements
+        barsK: 0, // 0 = out, 1 = in
+      };
+      const _kIntroPose = { pos: new THREE.Vector3(), look: new THREE.Vector3(), fov: 50, roll: 0 };
+      const _kIntroPrev = { pos: new THREE.Vector3(), look: new THREE.Vector3(), fov: 50, roll: 0 };
+      const _kIntroPt = { x: 0, z: 0, heading: 0 };
+      const _kIntroPt2 = { x: 0, z: 0, heading: 0 };
+      const _kIntroV = new THREE.Vector3();
+      const _kIntroV2 = new THREE.Vector3();
+
+      function _kIntroEase(t) {
+        return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+      }
+      function _kIntroEaseSine(t) {
+        return -(Math.cos(Math.PI * t) - 1) / 2;
+      }
+      const _kIntroLerp = (a, b, t) => a + (b - a) * t;
+      const _kIntroDeg = Math.PI / 180;
+
+      /** Race progress in (-L/2, L/2]: the grid sits just behind the start line (negative). */
+      function _kIntroProgress(T, x, z) {
+        const p = T.progress(x, z);
+        return p > T.length / 2 ? p - T.length : p;
+      }
+
+      /** The track / car frame the shots are built from (null until the race is set up). */
+      function _kIntroBuildRig() {
+        if (!_raceTrack || !_raceCars.length) return null;
+        const T = _raceTrack;
+        const surf = tableSurfaceY;
+        const player = _raceCars.find((c) => c.isPlayer) || _raceCars[0];
+        let pLead = -Infinity;
+        for (const c of _raceCars) pLead = Math.max(pLead, _kIntroProgress(T, c.pos.x, c.pos.z));
+        const pPlayer = _kIntroProgress(T, player.pos.x, player.pos.z);
+        T.pointAt(pPlayer, 0, _kIntroPt);
+        T.pointAt(pPlayer, 1, _kIntroPt2);
+        const out = new THREE.Vector3(_kIntroPt2.x - _kIntroPt.x, 0, _kIntroPt2.z - _kIntroPt.z).normalize();
+        const fwd = new THREE.Vector3(Math.sin(player.state.angle), 0, Math.cos(player.state.angle));
+        // Track run: the centre line from ahead of the leading car, through the
+        // next turn, as a smooth curve (world units along it).
+        // The next turn ahead of the grid.
+        const turnStarts = [T.straight - T.startS, 2 * T.straight + T.halfTurn - T.startS];
+        let turnStart = Infinity;
+        let runTurn = 0; // index, same order as the arrows' turns
+        turnStarts.forEach((ts, ti) => {
+          let d = ts - pLead;
+          d = ((d % T.length) + T.length) % T.length;
+          if (pLead + d < turnStart) {
+            turnStart = pLead + d;
+            runTurn = ti;
+          }
+        });
+        const runFrom = turnStart - KITCHEN_INTRO_RUN.beforeTurn;
+        const runTo = turnStart + T.halfTurn + KITCHEN_INTRO_RUN.endAfterTurn;
+        // The curve runs on past the end, so the look-ahead always has track ahead.
+        const curveTo = runTo + KITCHEN_INTRO_RUN.lookAhead * 1.5;
+        const pts = [];
+        const steps = Math.max(8, Math.ceil((curveTo - runFrom) / 2));
+        for (let i = 0; i <= steps; i++) {
+          T.pointAt(runFrom + ((curveTo - runFrom) * i) / steps, KITCHEN_INTRO_RUN.lateral, _kIntroPt);
+          pts.push(new THREE.Vector3(_kIntroPt.x, surf, _kIntroPt.z));
+        }
+        const run = new THREE.CatmullRomCurve3(pts, false, "centripetal");
+        const runFracEnd = (runTo - runFrom) / (curveTo - runFrom); // the camera stops here
+        return {
+          T,
+          surf,
+          centre: new THREE.Vector3((T.xL + T.xR) / 2, surf, T.z0),
+          fwd,
+          out,
+          inward: out.clone().negate(),
+          player: player.pos.clone(),
+          run,
+          runLen: run.getLength(),
+          runFracEnd,
+          runTurn,
+          // Shot time (0..1) when the camera reaches the turn (the run's position easing inverted).
+          runTurnU: (2 / Math.PI) * Math.asin(Math.min(1, KITCHEN_INTRO_RUN.beforeTurn / run.getLength() / runFracEnd)),
+        };
+      }
+
+      /** Pose of shot i at local time u (0..1) into `o`. */
+      function _kIntroShotPose(i, u, o) {
+        const R = _kIntro.rig;
+        const name = KITCHEN_INTRO_SHOTS[i].name;
+        if (name === "overview") {
+          const V = KITCHEN_INTRO_OVERVIEW;
+          const e = _kIntroEaseSine(u);
+          o.pos.copy(R.centre)
+            .addScaledVector(R.fwd, _kIntroLerp(V.alongFrom, V.alongTo, e))
+            .addScaledVector(R.out, _kIntroLerp(V.outFrom, V.outTo, e));
+          o.pos.y = R.surf + _kIntroLerp(V.heightFrom, V.heightTo, e);
+          _kIntroV.copy(R.centre).addScaledVector(R.fwd, V.lookAlongFrom);
+          _kIntroV2.copy(R.player);
+          _kIntroV2.y = R.surf + KITCHEN_INTRO_CAR.lookHeight;
+          o.look.lerpVectors(_kIntroV, _kIntroV2, e);
+          o.fov = _kIntroLerp(V.fovFrom, V.fovTo, e);
+          o.roll = 0;
+        } else if (name === "carBeauty") {
+          const C = KITCHEN_INTRO_CAR;
+          const e = _kIntroEaseSine(u);
+          const a = _kIntroLerp(C.angleFromDeg, C.angleToDeg, e) * _kIntroDeg;
+          const rad = _kIntroLerp(C.radiusFrom, C.radiusTo, e);
+          o.pos.copy(R.player)
+            .addScaledVector(R.fwd, Math.cos(a) * rad)
+            .addScaledVector(R.out, Math.sin(a) * rad);
+          o.pos.y = R.surf + _kIntroLerp(C.heightFrom, C.heightTo, e);
+          o.look.copy(R.player);
+          o.look.y = R.surf + C.lookHeight;
+          o.fov = _kIntroLerp(C.fovFrom, C.fovTo, e);
+          o.roll = 0;
+        } else if (name === "trackRun") {
+          const W = KITCHEN_INTRO_RUN;
+          const e = Math.sin((Math.PI / 2) * u) * R.runFracEnd; // fast in (out of the cut), slowing through the turn to rest
+          const la = Math.min(1, e + W.lookAhead / R.runLen);
+          R.run.getPointAt(e, _kIntroV);
+          R.run.getPointAt(la, _kIntroV2);
+          o.pos.copy(_kIntroV);
+          o.pos.y = R.surf + W.height;
+          o.look.copy(_kIntroV2);
+          o.look.y = R.surf + W.lookHeight;
+          // Lean into the curve: how much the path turns over the look-ahead.
+          const t0 = R.run.getTangentAt(e);
+          const t1 = R.run.getTangentAt(la);
+          const turn = Math.atan2(t0.x * t1.z - t0.z * t1.x, t0.x * t1.x + t0.z * t1.z);
+          const maxRoll = W.maxRollDeg * _kIntroDeg;
+          o.roll = Math.max(-maxRoll, Math.min(maxRoll, turn * 0.5));
+          o.fov = _kIntroLerp(W.fovFrom, W.fovTo, e);
+        }
+        return o;
+      }
+
+      /** The intro camera pose at intro time t (shots, blends, the arrival). */
+      function _kIntroPoseAt(time, o) {
+        let t = time;
+        let i = 0;
+        while (i < KITCHEN_INTRO_SHOTS.length - 1 && t >= KITCHEN_INTRO_SHOTS[i].sec) {
+          t -= KITCHEN_INTRO_SHOTS[i].sec;
+          i++;
+        }
+        const shot = KITCHEN_INTRO_SHOTS[i];
+        const u = Math.min(1, Math.max(0, t / shot.sec));
+        if (shot.name === "arrival") {
+          // From the run's last pose up over the infield (height first, clear of
+          // the props and cars) onto the live gameplay camera.
+          _kIntroShotPose(i - 1, 1, _kIntroPrev);
+          const e = _kIntroEaseSine(u);
+          const eUp = Math.sin((Math.PI / 2) * Math.min(1, u * 1.4));
+          o.pos.x = _kIntroLerp(_kIntroPrev.pos.x, camera.position.x, e);
+          o.pos.z = _kIntroLerp(_kIntroPrev.pos.z, camera.position.z, e);
+          o.pos.y = _kIntroLerp(_kIntroPrev.pos.y, camera.position.y, eUp);
+          o.look.lerpVectors(_kIntroPrev.look, controls.target, e);
+          o.fov = _kIntroLerp(_kIntroPrev.fov, camera.fov, e);
+          o.roll = _kIntroLerp(_kIntroPrev.roll, 0, e);
+          return o;
+        }
+        _kIntroShotPose(i, u, o);
+        if (shot.blendIn > 0 && i > 0 && t < shot.blendIn) {
+          _kIntroShotPose(i - 1, 1, _kIntroPrev);
+          const k = 1 - _kIntroEaseSine(t / shot.blendIn);
+          o.pos.lerp(_kIntroPrev.pos, k);
+          o.look.lerp(_kIntroPrev.look, k);
+          o.fov = _kIntroLerp(o.fov, _kIntroPrev.fov, k);
+          o.roll = _kIntroLerp(o.roll, _kIntroPrev.roll, k);
+        }
+        return o;
+      }
+
+      /** Called when the loader starts fading out: the intro begins. */
+      function startKitchenIntroPlayback() {
+        if (_kIntro.state !== "pending") return;
+        if (!_kIntro.rig) _kIntro.rig = _kIntroBuildRig();
+        if (!_kIntro.rig) {
+          finishKitchenIntro();
+          return;
+        }
+        _kIntro.state = "playing";
+        _kIntro.t = 0;
+        _kIntro.controlsWereEnabled = controls.enabled;
+        controls.enabled = false;
+      }
+
+      /** Dark mode, race camera, HUD and the countdown (end of the intro, or a skip). */
+      function finishKitchenIntro() {
+        if (_kIntro.state === "done") return;
+        const wasPlaying = _kIntro.state === "playing";
+        _kIntro.state = "done";
+        if (wasPlaying) {
+          controls.enabled = _kIntro.controlsWereEnabled;
+          // Skipped: stop the intro's waves (lit arrows fade out); normal triggers take over.
+          if (_kIntro.t < KITCHEN_INTRO_TOTAL_SEC && _raceArrows) {
+            for (const U of _raceArrows.turns) {
+              U.waveT = -1;
+              U.cooldown = 0;
+            }
+          }
+        }
+        if (_racePhase === "intro") {
+          _racePhase = "countdown";
+          _raceTimer = RACE_COUNTDOWN_SEC;
+          if (_raceHud) _raceHud.setVisible(true);
+        }
+      }
+
+      // Skip: a click or any key (modifiers alone don't count). The skipping
+      // event stops here, so it doesn't also act as a game key.
+      window.addEventListener(
+        "keydown",
+        (e) => {
+          if (_kIntro.state !== "playing" || !_kitchenSceneRendering) return;
+          if (["Shift", "Control", "Alt", "Meta"].includes(e.key)) return;
+          e.preventDefault();
+          e.stopImmediatePropagation();
+          finishKitchenIntro();
+        },
+        true,
+      );
+      window.addEventListener(
+        "pointerdown",
+        (e) => {
+          if (_kIntro.state !== "playing" || !_kitchenSceneRendering) return;
+          e.stopImmediatePropagation();
+          finishKitchenIntro();
+        },
+        true,
+      );
+
+      /** The intro's arrow waves, timed with the shots. */
+      function _kIntroWaves(t) {
+        // A wave on the turn the track run goes through, timed with the camera.
+        if (!_kIntro.runWaveDone && _raceArrows && _kIntro.rig) {
+          let runStart = 0;
+          for (const sh of KITCHEN_INTRO_SHOTS) {
+            if (sh.name === "trackRun") break;
+            runStart += sh.sec;
+          }
+          const runSec = KITCHEN_INTRO_SHOTS.find((sh) => sh.name === "trackRun").sec;
+          if (t >= runStart + _kIntro.rig.runTurnU * runSec - KITCHEN_INTRO_RUN_WAVE_LEAD) {
+            _kIntro.runWaveDone = true;
+            const U = _raceArrows.turns[_kIntro.rig.runTurn];
+            if (U) _raceArrowStartWave(U);
+          }
+        }
+        // One arrow wave along both turns as the camera arrives.
+        if (!_kIntro.waveDone && t >= KITCHEN_INTRO_WAVE_AT_SEC && _raceArrows) {
+          _kIntro.waveDone = true;
+          for (const U of _raceArrows.turns) {
+            if (U.waveT < 0) U.cooldown = 0;
+            _raceArrowStartWave(U);
+          }
+        }
+      }
+
+      /** Letterbox bars: in while the intro plays, out as the race begins (every frame). */
+      function updateKitchenIntroLetterbox(dt) {
+        const mount = getKitchenSceneMount();
+        if (!_kIntro.bars) {
+          if (_kIntro.state !== "playing" || !mount) return;
+          const bar = (top) => {
+            const el = document.createElement("div");
+            Object.assign(el.style, {
+              position: "absolute",
+              left: "0",
+              right: "0",
+              [top ? "top" : "bottom"]: "0",
+              height: `${KITCHEN_INTRO_LETTERBOX_HEIGHT * 100}%`,
+              background: "#000",
+              zIndex: "4",
+              pointerEvents: "none",
+              transform: `translateY(${top ? -100 : 100}%)`,
+              willChange: "transform",
+            });
+            mount.appendChild(el);
+            return el;
+          };
+          _kIntro.bars = [bar(true), bar(false)];
+        }
+        const target = _kIntro.state === "playing" ? 1 : 0;
+        const sec = target ? KITCHEN_INTRO_LETTERBOX_IN_SEC : KITCHEN_INTRO_LETTERBOX_OUT_SEC;
+        const k0 = _kIntro.barsK;
+        _kIntro.barsK = target > k0 ? Math.min(1, k0 + dt / sec) : Math.max(0, k0 - dt / sec);
+        if (_kIntro.barsK === k0 && (k0 === 0 || k0 === 1) && _kIntro.barsSet === k0) return;
+        const e = _kIntroEaseSine(_kIntro.barsK);
+        _kIntro.bars[0].style.transform = `translateY(${-100 * (1 - e)}%)`;
+        _kIntro.bars[1].style.transform = `translateY(${100 * (1 - e)}%)`;
+        _kIntro.barsSet = _kIntro.barsK;
+        if (_kIntro.barsK === 0 && _kIntro.state === "done") {
+          for (const el of _kIntro.bars) el.remove();
+          _kIntro.bars = null;
+        }
+      }
+
+      /**
+       * Per frame, after the normal camera update: moves the active camera to the
+       * intro pose for this frame's render (restored right after, so the race
+       * camera keeps its own state and the last move can land on it exactly).
+       */
+      function applyKitchenIntroCamera(dt) {
+        updateKitchenIntroLetterbox(dt);
+        if (_kIntro.state === "done") return false;
+        if (!_kIntro.rig) {
+          if (!_kitchenSceneReady) return false;
+          _kIntro.rig = _kIntroBuildRig();
+          if (!_kIntro.rig) return false; // race not set up yet: normal camera (under the loader)
+        }
+        if (_kIntro.state === "playing") {
+          _kIntro.t += dt;
+          _kIntroWaves(_kIntro.t);
+          if (_kIntro.t >= KITCHEN_INTRO_TOTAL_SEC) {
+            finishKitchenIntro();
+            return false;
+          }
+        }
+        const o = _kIntroPoseAt(_kIntro.t, _kIntroPose);
+        _kIntro.savedPos.copy(camera.position);
+        _kIntro.savedQuat.copy(camera.quaternion);
+        _kIntro.savedFov = camera.fov;
+        camera.position.copy(o.pos);
+        camera.up.set(0, 1, 0);
+        camera.lookAt(o.look);
+        if (o.roll) camera.rotateZ(o.roll);
+        if (Math.abs(camera.fov - o.fov) > 1e-4) {
+          camera.fov = o.fov;
+          camera.updateProjectionMatrix();
+        }
+        camera.updateMatrixWorld();
+        _kIntro.overriding = true;
+        return true;
+      }
+
+      function restoreKitchenIntroCamera() {
+        if (!_kIntro.overriding) return;
+        camera.position.copy(_kIntro.savedPos);
+        camera.quaternion.copy(_kIntro.savedQuat);
+        if (camera.fov !== _kIntro.savedFov) {
+          camera.fov = _kIntro.savedFov;
+          camera.updateProjectionMatrix();
+        }
+        camera.updateMatrixWorld();
+        _kIntro.overriding = false;
       }
 
       window.kitchenRace = {
@@ -8842,7 +9786,6 @@ let _worldSwitched = false;
                 try { applyLightBlend(lightBlend); } catch (e) {}
                 scheduleRectAreaLightingSweeps();
                 _kitchenSceneReady = true;
-                emitKitchenSceneEvent("ready");
               }
             })();
           },
@@ -9710,6 +10653,7 @@ let _worldSwitched = false;
             carTimeLeft -= step;
           }
           updateKitchenRace(dt);
+          updateKitchenRaceArrows(dt);
           if (_carLandShakePending && camera === carCamera) {
             triggerCarCam1LandingShake(
               jumpLaunchSpeed / Math.max(0.01, carState.maxSpeed),
@@ -10057,6 +11001,7 @@ let _worldSwitched = false;
             syncCarFollowCamAnglesFromPosition(carCameraFollow);
             applyCarFollowCameraFromAngles();
           }
+          applyKitchenIntroCamera(Math.min(rawDt, 0.1));
           if (sceneBloomEnabled) {
             renderCarLightsBloomComposer();
             carBloomMixPass.material.uniforms.bloomTexture.value =
@@ -10072,10 +11017,21 @@ let _worldSwitched = false;
           updateMisterSpotTrail(dt);
           updateTableLightReflections();
           finalComposer.render();
+          restoreKitchenIntroCamera();
+          if (_kitchenSceneReady && !_kitchenSceneShown && ++_kitchenSceneShownFrames >= KITCHEN_READY_FRAMES) {
+            _kitchenSceneShown = true;
+            emitKitchenSceneEvent("ready");
+          }
         } catch (e) {
+          restoreKitchenIntroCamera();
           console.error("Animate error:", e);
         }
       }
+      /** The loader is fading out: play the intro (then the race). */
+      export function startKitchenIntro() {
+        startKitchenIntroPlayback();
+      }
+
       export function setKitchenSceneRendering(active) {
         const shouldRender = Boolean(active);
         if (!shouldRender) {
