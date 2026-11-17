@@ -1,6 +1,7 @@
       import * as THREE from "three";
       import * as CANNON from "cannon-es";
       import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+      import { ConvexHull } from "three/addons/math/ConvexHull.js";
       import { OrbitControls } from "three/addons/controls/OrbitControls.js";
       import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
       import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
@@ -1309,6 +1310,28 @@ export function isKitchenSceneReady() {
       finalComposer.addPass(smaaPass);
       finalComposer.addPass(sharpenPass);
       finalComposer.addPass(outputPass);
+      // Slow-motion vignette (edge darkening): last, off unless a jump is slowed.
+      const jumpVignettePass = new ShaderPass({
+        uniforms: { tDiffuse: { value: null }, uStrength: { value: 0 } },
+        vertexShader: `
+          varying vec2 vUv;
+          void main() {
+            vUv = uv;
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          }`,
+        fragmentShader: `
+          uniform sampler2D tDiffuse;
+          uniform float uStrength;
+          varying vec2 vUv;
+          void main() {
+            vec4 c = texture2D(tDiffuse, vUv);
+            float d = length((vUv - 0.5) * vec2(1.0, 0.85)) * 1.45;
+            float v = 1.0 - uStrength * smoothstep(0.45, 1.05, d);
+            gl_FragColor = vec4(c.rgb * v, c.a);
+          }`,
+      });
+      jumpVignettePass.enabled = false;
+      finalComposer.addPass(jumpVignettePass);
       // Dev-only (?perf in `npm run dev`): handles for profiling. Compiled out of production.
       if (
         import.meta.env.DEV &&
@@ -2775,6 +2798,370 @@ let _worldSwitched = false;
         }
       }
 
+      // ── Ramp ("ramp" in the kitchen model): its top surface is part of every
+      // race car's ground (sampled per wheel), so cars drive up the slope and
+      // launch off its edge; a static convex collider (its hull) for the
+      // physics props. Cars are moved by code (same rules for all of them):
+      // the ground's rise rate under a car is its speed along the slope's
+      // vertical (speed × slope), and when the ground drops away (the edge) the
+      // car leaves it with exactly that (capped): height and distance follow
+      // from the car's speed and the ramp's angle.
+      const RAMP_MESH_NAME = "ramp";
+      /** Takeoff: vertical speed off the edge = climb speed (speed × slope) × this… */
+      const RAMP_TAKEOFF_SCALE = 1.25;
+      /** …capped here (top speed: ≈ 4.4 natural → ≈ 5.5). */
+      const RAMP_TAKEOFF_MAX_VY = 6.9;
+      /** Below this climb speed a car just drops off the edge (no launch). */
+      const RAMP_LAUNCH_MIN_VY = 1;
+      /** The ground under a car fell away by more than this → airborne. */
+      const RAMP_LEAVE_DROP = 0.2;
+      /** Gravity while airborne off the ramp (the cars' normal 75 is a hop, not a jump). */
+      const RAMP_AIR_GRAVITY = 26;
+      /** Extra gravity while falling (after the apex): a firm, not floaty, landing. */
+      const RAMP_AIR_EXTRA_GRAVITY_DOWN = 8;
+      /** How fast a car's measured climb speed fades on flat ground (1/s). */
+      const RAMP_CLIMB_DECAY = 3;
+      let _rampMesh = null;
+      let _rampBody = null;
+      const _rampBox = new THREE.Box3();
+      const _rampRay = new THREE.Raycaster();
+      const _rampRayFrom = new THREE.Vector3();
+      const _rampDown = new THREE.Vector3(0, -1, 0);
+      const _rampHits = [];
+
+      function setupKitchenRamp(model, material) {
+        _rampMesh = null;
+        if (_rampBody) {
+          try { physicsWorld.removeBody(_rampBody); } catch (e) {}
+          _rampBody = null;
+        }
+        const mesh = model.getObjectByName(RAMP_MESH_NAME);
+        if (!mesh || !mesh.isMesh || !mesh.geometry) return;
+        mesh.updateMatrixWorld(true);
+        _rampMesh = mesh;
+        _rampBox.setFromObject(mesh);
+        // Static convex collider: the hull of the ramp's own vertices.
+        const pa = mesh.geometry.attributes.position;
+        const pts = [];
+        for (let i = 0; i < pa.count; i++) pts.push(new THREE.Vector3().fromBufferAttribute(pa, i).applyMatrix4(mesh.matrixWorld));
+        const centre = _rampBox.getCenter(new THREE.Vector3());
+        const hull = new ConvexHull().setFromPoints(pts);
+        const verts = [];
+        const index = new Map();
+        const faces = [];
+        for (const face of hull.faces) {
+          const f = [];
+          let e = face.edge;
+          do {
+            const pt = e.head().point;
+            let id = index.get(pt);
+            if (id === undefined) {
+              id = verts.length;
+              index.set(pt, id);
+              verts.push(new CANNON.Vec3(pt.x - centre.x, pt.y - centre.y, pt.z - centre.z));
+            }
+            f.push(id);
+            e = e.next;
+          } while (e !== face.edge);
+          faces.push(f);
+        }
+        if (verts.length >= 4 && faces.length >= 4) {
+          _rampBody = new CANNON.Body({
+            type: CANNON.Body.STATIC,
+            material: _rampPhysMaterial(material),
+            collisionFilterGroup: 1,
+            collisionFilterMask: -1,
+          });
+          _rampBody.addShape(new CANNON.ConvexPolyhedron({ vertices: verts, faces }));
+          _rampBody.position.set(centre.x, centre.y, centre.z);
+          physicsWorld.addBody(_rampBody);
+        }
+        brandKitchenRamp(mesh);
+      }
+
+      // --- ramp look: a racing ramp in the cup's colour palette (colours only) ---
+      /** The cup print's palette (sampled from its colours, nothing else of it). */
+      const RAMP_COLORS = {
+        deck: "#141b33", // deep navy: a very dark shade of the cup's blue (the neon arrows read on it)
+        red: "#e3304e", // the cup's red
+      };
+      /** A subtle self-glow (the print's own colours) so it reads in dark mode too. */
+      const RAMP_BRAND_GLOW = 0.3;
+      /** Atlas: the ramp's top uses v 0..RAMP_BRAND_TOP_V, its sides / ends the strip below. */
+      const RAMP_BRAND_TOP_V = 0.75;
+      /** The ramp's frame (set when it's dressed): up-slope / across directions and extents. */
+      let _rampFrameInfo = null;
+
+      /** Road border width on the ramp's deck, as a share of its width (each side). */
+      const RAMP_BORDER_WIDTH = 0.07;
+
+      /** The ramp's design: one clean road — a dark deck with narrow red borders, foot to edge; red sides. */
+      function drawRampBrandCanvas() {
+        const W = 2048;
+        const H = 1024;
+        const cv = document.createElement("canvas");
+        cv.width = W;
+        cv.height = H;
+        const ctx = cv.getContext("2d");
+        const C = RAMP_COLORS;
+        const top = Math.round(H * RAMP_BRAND_TOP_V);
+        // Top: x = along the slope (0 = foot, W = edge), y = across.
+        ctx.fillStyle = C.deck;
+        ctx.fillRect(0, 0, W, top);
+        const border = top * RAMP_BORDER_WIDTH;
+        ctx.fillStyle = C.red;
+        ctx.fillRect(0, 0, W, border);
+        ctx.fillRect(0, top - border, W, border);
+        // Sides and the drop face: red.
+        ctx.fillRect(0, top, W, H - top);
+        return cv;
+      }
+
+      /**
+       * Re-dress the ramp (look only: same shape, same collider): its geometry
+       * copied with UVs per face — the top mapped along the slope / across, the
+       * sides and ends to the strip — and a material with the cup's print.
+       */
+      function brandKitchenRamp(mesh) {
+        if (typeof document === "undefined" || !mesh.geometry) return;
+        const geo = mesh.geometry.index ? mesh.geometry.toNonIndexed() : mesh.geometry.clone();
+        const pos = geo.attributes.position;
+        const m = mesh.matrixWorld;
+        const nm = new THREE.Matrix3().getNormalMatrix(m);
+        const w = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()];
+        // Up-slope direction: where the top faces get higher (opposite their normals' tilt).
+        const up = new THREE.Vector3();
+        const nrm = new THREE.Vector3();
+        const e1 = new THREE.Vector3(), e2 = new THREE.Vector3();
+        for (let i = 0; i < pos.count; i += 3) {
+          for (let k = 0; k < 3; k++) w[k].fromBufferAttribute(pos, i + k).applyMatrix4(m);
+          nrm.crossVectors(e1.subVectors(w[1], w[0]), e2.subVectors(w[2], w[0])).normalize();
+          if (nrm.y > 0.3 && nrm.y < 0.999) up.add(new THREE.Vector3(-nrm.x, 0, -nrm.z));
+        }
+        if (up.lengthSq() < 1e-8) up.set(1, 0, 0);
+        up.normalize();
+        const across = new THREE.Vector3(-up.z, 0, up.x);
+        // Extents along / across / height.
+        let sMin = Infinity, sMax = -Infinity, tMin = Infinity, tMax = -Infinity, yMin = Infinity, yMax = -Infinity;
+        const v = new THREE.Vector3();
+        for (let i = 0; i < pos.count; i++) {
+          v.fromBufferAttribute(pos, i).applyMatrix4(m);
+          const s_ = v.x * up.x + v.z * up.z;
+          const t_ = v.x * across.x + v.z * across.z;
+          sMin = Math.min(sMin, s_); sMax = Math.max(sMax, s_);
+          tMin = Math.min(tMin, t_); tMax = Math.max(tMax, t_);
+          yMin = Math.min(yMin, v.y); yMax = Math.max(yMax, v.y);
+        }
+        const uv = new Float32Array(pos.count * 2);
+        for (let i = 0; i < pos.count; i += 3) {
+          for (let k = 0; k < 3; k++) w[k].fromBufferAttribute(pos, i + k).applyMatrix4(m);
+          nrm.crossVectors(e1.subVectors(w[1], w[0]), e2.subVectors(w[2], w[0])).normalize();
+          const onTop = nrm.y > 0.3;
+          const endFace = Math.abs(nrm.x * up.x + nrm.z * up.z) > 0.7;
+          // Seen from outside (looking along −n), a side's "right" is (−n) × up: text reads left → right.
+          const rx = nrm.z, rz = -nrm.x;
+          const flip = endFace ? rx * across.x + rz * across.z < 0 : rx * up.x + rz * up.z < 0;
+          for (let k = 0; k < 3; k++) {
+            const s_ = (w[k].x * up.x + w[k].z * up.z - sMin) / Math.max(1e-6, sMax - sMin);
+            const t_ = (w[k].x * across.x + w[k].z * across.z - tMin) / Math.max(1e-6, tMax - tMin);
+            const h = (w[k].y - yMin) / Math.max(1e-6, yMax - yMin);
+            let U, V;
+            if (onTop) {
+              U = s_;
+              V = t_ * RAMP_BRAND_TOP_V;
+            } else {
+              U = endFace ? t_ : s_;
+              if (flip) U = 1 - U;
+              V = RAMP_BRAND_TOP_V + (1 - h) * (1 - RAMP_BRAND_TOP_V);
+            }
+            uv[(i + k) * 2] = U;
+            uv[(i + k) * 2 + 1] = V;
+          }
+        }
+        geo.setAttribute("uv", new THREE.BufferAttribute(uv, 2));
+        _rampFrameInfo = { up: up.clone(), across: across.clone(), sMin, sMax, tMin, tMax };
+        geo.computeVertexNormals();
+        const tex = new THREE.CanvasTexture(drawRampBrandCanvas());
+        tex.colorSpace = THREE.SRGBColorSpace;
+        tex.flipY = false;
+        tex.anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy());
+        mesh.geometry = geo;
+        mesh.material = new THREE.MeshStandardMaterial({
+          map: tex,
+          emissive: 0xffffff,
+          emissiveMap: tex,
+          emissiveIntensity: RAMP_BRAND_GLOW,
+          roughness: 0.5,
+          metalness: 0,
+        });
+      }
+
+      /** The ramp's own physics material: no bounce for props landing on it. */
+      let _rampMat = null;
+      function _rampPhysMaterial() {
+        if (_rampMat) return _rampMat;
+        _rampMat = new CANNON.Material("ramp");
+        for (const [mat, friction] of [[propPhysMaterial, KITCHEN_PROP_FRICTION], [cupPhysMaterial, KITCHEN_CUP_FRICTION]]) {
+          physicsWorld.addContactMaterial(
+            new CANNON.ContactMaterial(mat, _rampMat, {
+              friction,
+              restitution: 0,
+              contactEquationStiffness: 1e8,
+              contactEquationRelaxation: 2,
+            }),
+          );
+        }
+        return _rampMat;
+      }
+
+      /** The surface under (x, z): its height (table or ramp top) and its normal into `outNormal`. */
+      function _rampSurfaceAt(x, z, outNormal) {
+        outNormal.set(0, 1, 0);
+        if (
+          !_rampMesh ||
+          x < _rampBox.min.x || x > _rampBox.max.x ||
+          z < _rampBox.min.z || z > _rampBox.max.z
+        ) {
+          return tableSurfaceY;
+        }
+        _rampRayFrom.set(x, _rampBox.max.y + 1, z);
+        _rampRay.set(_rampRayFrom, _rampDown);
+        _rampRay.far = _rampBox.max.y - _rampBox.min.y + 2;
+        _rampHits.length = 0;
+        _rampMesh.raycast(_rampRay, _rampHits);
+        let best = null;
+        for (const h of _rampHits) if (!best || h.point.y > best.point.y) best = h;
+        if (!best || best.point.y <= tableSurfaceY || !best.face) return tableSurfaceY;
+        outNormal.copy(best.face.normal).transformDirection(_rampMesh.matrixWorld);
+        if (outNormal.y < 0) outNormal.negate();
+        return best.point.y;
+      }
+
+      /** Ground height under (x, z): the table top, or the ramp's top surface. */
+      function kitchenGroundY(x, z) {
+        if (
+          !_rampMesh ||
+          x < _rampBox.min.x || x > _rampBox.max.x ||
+          z < _rampBox.min.z || z > _rampBox.max.z
+        ) {
+          return tableSurfaceY;
+        }
+        _rampRayFrom.set(x, _rampBox.max.y + 1, z);
+        _rampRay.set(_rampRayFrom, _rampDown);
+        _rampRay.far = _rampBox.max.y - _rampBox.min.y + 2;
+        _rampHits.length = 0;
+        _rampMesh.raycast(_rampRay, _rampHits);
+        let y = tableSurfaceY;
+        for (const h of _rampHits) if (h.point.y > y) y = h.point.y;
+        return y;
+      }
+
+      /**
+       * Ground-follow for any race car (same rules for all): tracks how fast the
+       * ground under it rises; when the ground drops away under it (the ramp's
+       * edge), returns the vertical speed it leaves the ground with, else null.
+       */
+      function rampGroundStep(state, curY, restY, dt) {
+        state._rampAir = false; // on the ground
+        if (state._lastRestY === undefined) state._lastRestY = restY;
+        if (curY - restY > RAMP_LEAVE_DROP && Math.abs(state.speed) > 0.3) {
+          const climb = state._climbVy || 0;
+          state._climbVy = 0;
+          state._lastRestY = undefined;
+          state._rampAir = true;
+          return climb > RAMP_LAUNCH_MIN_VY ? Math.min(RAMP_TAKEOFF_MAX_VY, climb * RAMP_TAKEOFF_SCALE) : -0.01;
+        }
+        const vy = dt > 0 ? (restY - state._lastRestY) / dt : 0;
+        state._lastRestY = restY;
+        // Keep the peak climb speed over the ramp's short flat top.
+        state._climbVy = Math.max(vy, (state._climbVy || 0) * Math.exp(-RAMP_CLIMB_DECAY * dt));
+        return null;
+      }
+
+      /** Gravity for a car in the air (off the ramp: a clean arc, firmer on the way down). */
+      function carAirGravity(state) {
+        if (!state._rampAir) return CAR_GRAVITY;
+        return RAMP_AIR_GRAVITY + (state.velY < 0 ? RAMP_AIR_EXTRA_GRAVITY_DOWN : 0);
+      }
+
+      // Wheel positions in the car's own frame (for sampling the ground under each wheel).
+      const _carWheelLocal = [];
+
+      /** The player's ground under each wheel: table or ramp. */
+      function sampleCarWheelGround() {
+        const ws = [wheelFL, wheelFR, wheelRL, wheelRR];
+        if (!_carWheelLocal.length) {
+          car.updateMatrixWorld(true);
+          const inv = new THREE.Matrix4().copy(car.matrixWorld).invert();
+          for (let i = 0; i < 4; i++) {
+            const v = new THREE.Vector3();
+            if (ws[i]) ws[i].getWorldPosition(v).applyMatrix4(inv);
+            _carWheelLocal.push(v);
+          }
+        }
+        let lo = Infinity;
+        let hi = -Infinity;
+        for (let i = 0; i < 4; i++) {
+          const w = _wheelSyncWorldPos[i];
+          w.copy(_carWheelLocal[i]).multiply(car.scale).applyQuaternion(car.quaternion).add(car.position);
+          const y = kitchenGroundY(w.x, w.z);
+          _carWheelSurfY[i] = y;
+          if (y < lo) lo = y;
+          if (y > hi) hi = y;
+        }
+        _carFrontAxleSurfY = (_carWheelSurfY[0] + _carWheelSurfY[1]) * 0.5;
+        _carRearAxleSurfY = (_carWheelSurfY[2] + _carWheelSurfY[3]) * 0.5;
+        _carGroundSurfY = hi;
+        _carSurfRange = hi - lo;
+      }
+
+      /**
+       * An AI race car's height and pitch on the table / ramp: ground-follow,
+       * launch off the edge, fall with gravity, land (same rules as the player).
+       */
+      const _raceWheelSurf = [0, 0, 0, 0];
+      function raceCarVerticalStep(rc, dt) {
+        const st = rc.state;
+        const F = _carRailFoot;
+        if (!F.ok) return;
+        const a = st.angle;
+        const fx = Math.sin(a), fz = Math.cos(a);
+        const rx = Math.cos(a), rz = -Math.sin(a);
+        const lf = F.hf * 0.7, lr = F.hr * 0.75;
+        let k = 0;
+        let hi = -Infinity;
+        for (const sf of [1, -1]) {
+          for (const sr of [-1, 1]) {
+            const y = kitchenGroundY(rc.pos.x + fx * lf * sf + rx * lr * sr, rc.pos.z + fz * lf * sf + rz * lr * sr);
+            _raceWheelSurf[k++] = y;
+            if (y > hi) hi = y;
+          }
+        }
+        const front = (_raceWheelSurf[0] + _raceWheelSurf[1]) * 0.5;
+        const rear = (_raceWheelSurf[2] + _raceWheelSurf[3]) * 0.5;
+        const rest = (front + rear) * 0.5 + carBottomOffsetY;
+        let pitch = 0;
+        if (st.velY !== 0) {
+          rc.pos.y += st.velY * dt;
+          st.velY -= carAirGravity(st) * dt;
+          const land = hi + carBottomOffsetY;
+          if (rc.pos.y <= land) {
+            rc.pos.y = land;
+            st.velY = 0;
+            st._rampAir = false;
+            st._lastRestY = undefined;
+          } else {
+            pitch = Math.atan2(st.velY, Math.max(1, Math.abs(st.speed)) * 8);
+          }
+        } else {
+          const launch = rampGroundStep(st, rc.pos.y, rest, dt);
+          if (launch !== null) st.velY = launch;
+          else rc.pos.y = rest;
+          pitch = Math.atan2(front - rear, 2 * lf);
+        }
+        rc.pitch = (rc.pitch || 0) + (pitch - (rc.pitch || 0)) * Math.min(1, dt * 10);
+      }
+
       // ── Race boundaries: the car is stopped by the rails (raceBoundariesPhysic).
       // The car is moved by code, not the solver, so the rails are a list of
       // vertical wall segments in xz and the car's footprint rectangle is pushed
@@ -2953,6 +3340,7 @@ let _worldSwitched = false;
       const _raceTmpV = new THREE.Vector3();
       const _raceTmpQ = new THREE.Quaternion();
       const _raceSteerQ = new THREE.Quaternion();
+      const _axisRacePitch = new THREE.Vector3(1, 0, 0);
       const _raceRollQ = new THREE.Quaternion();
 
       function kitchenRaceInputsLocked() {
@@ -3199,6 +3587,10 @@ let _worldSwitched = false;
 
       function placeRaceCar(rc, x, z, heading) {
         rc.pos.set(x, tableSpawn.y, z);
+        rc.state._rampAir = false;
+        rc.state._lastRestY = undefined;
+        rc.state._climbVy = 0;
+        rc.pitch = 0;
         rc.state.angle = heading;
         rc.state.speed = 0;
         rc.state.steerAngle = 0;
@@ -3279,8 +3671,9 @@ let _worldSwitched = false;
       /** AI car visuals (pose + wheels) and its prop bumper follow its drive state. */
       function syncRaceAiCar(rc, dt) {
         const st = rc.state;
-        rc.root.position.y = tableSpawn.y;
+        // Height from raceCarVerticalStep (table / ramp / air); nose up = −x rotation.
         rc.root.quaternion.setFromAxisAngle(_flatUp, st.angle);
+        if (rc.pitch) rc.root.quaternion.multiply(_raceTmpQ.setFromAxisAngle(_axisRacePitch, -rc.pitch));
         rc.root.updateMatrixWorld(true);
         st.wheelAngle = (st.wheelAngle + (st.speed * dt) / WHEEL_RADIUS) % (Math.PI * 2);
         _raceRollQ.setFromAxisAngle(_axisWheelRoll, st.wheelAngle);
@@ -3413,6 +3806,7 @@ let _worldSwitched = false;
           }
           stepCarDrive(rc.state, input, rc.pos, false, dt);
           integrateRaceCarBump(rc.pos, rc.state, dt);
+          raceCarVerticalStep(rc, dt);
           collideCarWithRails(rc.pos, rc.state);
         }
         // No pushing while the cars are held (waiting / countdown / finished).
@@ -3557,6 +3951,13 @@ let _worldSwitched = false;
       // Random waves on an idle turn, even with no car near.
       const RACE_ARROW_WAVE_MIN_SEC = 6; // random interval between waves…
       const RACE_ARROW_WAVE_MAX_SEC = 12; // …(seconds)
+      // Arrows to the ramp: one row lying flat along the centre of the approach,
+      // on the table and on up the ramp's slope (neon road markings).
+      const RAMP_ARROW_TABLE_LEN = 7; // the row starts this far before the ramp's foot (along the approach)
+      const RAMP_ARROW_TOP_MARGIN = 0.9; // and ends this far before the ramp's top edge
+      const RAMP_ARROW_SCALE = 1.8; // × the turn arrows' size (fits the ramp's width)
+      const RAMP_ARROW_SPACING = 2.1; // along the surface
+      const RAMP_ARROW_SURFACE_OFFSET = 0.02; // above the surface, along its normal (plus polygon offset)
       const RACE_ARROW_INTENSITY = 2.4; // overall brightness (HDR, additive)
       const RACE_ARROW_BRIGHT_MODE_SCALE = 1.5; // brightness in bright mode (more, so waves aren't washed out)
       // Reflection on the table top (a mirrored copy, drawn on the table's surface).
@@ -3870,6 +4271,84 @@ let _worldSwitched = false;
             carsIn: new Set(), // cars within the activation distance (enter = trigger)
           });
         });
+        // Ramp approach: one row lying flat along the centre of the approach,
+        // from a short way before the ramp's foot on the table, up its slope to
+        // near its top edge. Heights / normals come from the table and the ramp's
+        // own surface (raycast); arrows are spaced evenly along the surface and
+        // lie in it, tip along the path. One group; no reflection for these.
+        if (_rampFrameInfo && _rampMesh) {
+          const Rf = _rampFrameInfo;
+          const tMid = (Rf.tMin + Rf.tMax) / 2;
+          const s0 = Rf.sMin - RAMP_ARROW_TABLE_LEN;
+          const s1 = Rf.sMax - RAMP_ARROW_TOP_MARGIN;
+          // The surface path, sampled finely: points and normals.
+          const path = [];
+          const N = 240;
+          const nTmp = new THREE.Vector3();
+          for (let i = 0; i <= N; i++) {
+            const sAt = s0 + ((s1 - s0) * i) / N;
+            const x = Rf.up.x * sAt + Rf.across.x * tMid;
+            const z = Rf.up.z * sAt + Rf.across.z * tMid;
+            const y = _rampSurfaceAt(x, z, nTmp);
+            path.push({ p: new THREE.Vector3(x, y, z), n: nTmp.clone() });
+          }
+          const cum = [0];
+          for (let i = 1; i < path.length; i++) cum.push(cum[i - 1] + path[i].p.distanceTo(path[i - 1].p));
+          const len = cum[cum.length - 1];
+          // The ramp's foot falls midway between two arrows (none straddles the bend).
+          let footI = path.findIndex((q) => q.p.y > tableSurfaceY + 1e-3);
+          if (footI < 0) footI = path.length - 1;
+          const footAt = cum[Math.max(0, footI - 1)];
+          const start = Math.max(0, footAt - (Math.floor(footAt / RAMP_ARROW_SPACING - 0.5) + 0.5) * RAMP_ARROW_SPACING);
+          const count = Math.floor((len - start) / RAMP_ARROW_SPACING) + 1;
+          const group = turns.length;
+          const row = [];
+          const T3 = new THREE.Vector3(), B3 = new THREE.Vector3(), N3 = new THREE.Vector3();
+          const scl = new THREE.Vector3(RAMP_ARROW_SCALE, RAMP_ARROW_SCALE, RAMP_ARROW_SCALE);
+          const noReflection = new THREE.Matrix4().makeScale(0, 0, 0);
+          let j = 1;
+          for (let k = 0; k < count; k++) {
+            const at = start + k * RAMP_ARROW_SPACING;
+            while (j < cum.length - 1 && cum[j] < at) j++;
+            const P0 = path[j - 1], P1 = path[j];
+            const f = (at - cum[j - 1]) / Math.max(1e-6, cum[j] - cum[j - 1]);
+            pos.lerpVectors(P0.p, P1.p, f);
+            // The surface under the arrow's centre (normal), the path's direction in it.
+            const y = _rampSurfaceAt(pos.x, pos.z, N3);
+            pos.y = y;
+            T3.copy(Rf.up).addScaledVector(N3, -Rf.up.dot(N3)).normalize(); // tip: up the path, in the surface
+            B3.crossVectors(N3, T3).normalize();
+            pos.addScaledVector(N3, RAMP_ARROW_SURFACE_OFFSET);
+            basis.makeBasis(T3, B3, N3).scale(scl).setPosition(pos);
+            row.push({
+              matrix: basis.clone(),
+              reflMatrix: noReflection,
+              turn: group,
+              k,
+              n: count,
+              x: pos.x,
+              z: pos.z,
+              age: Infinity,
+              shown: true,
+              ramp: true,
+              onRamp: y > tableSurfaceY + 1e-3,
+            });
+          }
+          if (row.length) {
+            let cx = 0, cz = 0;
+            for (const A of row) {
+              A.fire = A.k * RACE_ARROW_WAVE_STEP_SEC;
+              placed.push(A);
+              cx += A.x;
+              cz += A.z;
+            }
+            cx /= row.length;
+            cz /= row.length;
+            let reach = 0;
+            for (const A of row) reach = Math.max(reach, Math.hypot(A.x - cx, A.z - cz));
+            turns.push({ cx, cz, reach, n: row.length, waveT: -1, cooldown: 0, carsIn: new Set(), ramp: true });
+          }
+        }
         if (!placed.length) return;
 
         const geo = new THREE.PlaneGeometry(
@@ -3878,7 +4357,12 @@ let _worldSwitched = false;
         );
         const bright = new Float32Array(placed.length);
         geo.setAttribute("aBright", new THREE.InstancedBufferAttribute(bright, 1).setUsage(THREE.DynamicDrawUsage));
-        const mesh = new THREE.InstancedMesh(geo, _raceArrowMaterial(false), placed.length);
+        const arrowMat = _raceArrowMaterial(false);
+        // The flat ramp-path arrows sit on surfaces: pull them toward the camera in depth.
+        arrowMat.polygonOffset = true;
+        arrowMat.polygonOffsetFactor = -2;
+        arrowMat.polygonOffsetUnits = -2;
+        const mesh = new THREE.InstancedMesh(geo, arrowMat, placed.length);
         mesh.name = "raceTurnArrows";
         placed.forEach((A, i) => mesh.setMatrixAt(i, A.matrix));
         mesh.instanceMatrix.needsUpdate = true;
@@ -3903,7 +4387,7 @@ let _worldSwitched = false;
         const refl = new THREE.InstancedMesh(reflGeo, _raceArrowMaterial(true, top), placed.length);
         refl.name = "raceTurnArrowsReflection";
         placed.forEach((A, i) => {
-          A.reflMatrix = mirror.clone().multiply(A.matrix);
+          if (!A.reflMatrix) A.reflMatrix = mirror.clone().multiply(A.matrix); // flat ramp arrows: none
           refl.setMatrixAt(i, A.reflMatrix);
         });
         refl.instanceMatrix.needsUpdate = true;
@@ -4084,6 +4568,8 @@ let _worldSwitched = false;
       const KITCHEN_INTRO_LETTERBOX_IN_SEC = 0.9;
       const KITCHEN_INTRO_LETTERBOX_OUT_SEC = 0.7;
       const KITCHEN_INTRO_TOTAL_SEC = KITCHEN_INTRO_SHOTS.reduce((t, s) => t + s.sec, 0);
+      /** Arrow wave before the ramp during the overview (the ramp is in its view). */
+      const KITCHEN_INTRO_RAMP_WAVE_AT_SEC = 1.0;
       /** Arrow wave on the run's turn: starts this long before the camera reaches the turn. */
       const KITCHEN_INTRO_RUN_WAVE_LEAD = 0.3;
       /** One arrow wave along both turns as the camera arrives on the gameplay view. */
@@ -4100,6 +4586,7 @@ let _worldSwitched = false;
         overriding: false,
         waveDone: false,
         runWaveDone: false,
+        rampWaveDone: false,
         bars: null, // letterbox elements
         barsK: 0, // 0 = out, 1 = in
       };
@@ -4329,6 +4816,12 @@ let _worldSwitched = false;
 
       /** The intro's arrow waves, timed with the shots. */
       function _kIntroWaves(t) {
+        // A wave toward the ramp while the overview shows it.
+        if (!_kIntro.rampWaveDone && t >= KITCHEN_INTRO_RAMP_WAVE_AT_SEC && _raceArrows) {
+          _kIntro.rampWaveDone = true;
+          const U = _raceArrows.turns.find((g) => g.ramp);
+          if (U) _raceArrowStartWave(U);
+        }
         // A wave on the turn the track run goes through, timed with the camera.
         if (!_kIntro.runWaveDone && _raceArrows && _kIntro.rig) {
           let runStart = 0;
@@ -4440,6 +4933,218 @@ let _worldSwitched = false;
         }
         camera.updateMatrixWorld();
         _kIntro.overriding = false;
+      }
+
+      // ---------------------------------------------------------------------------
+      // Player ramp jumps: slow motion, a cinematic camera arc and a landing shake.
+      // Only the player's car, only off the ramp, never during the intro. The
+      // world runs on scaled time (cars, AI, physics, particles, arrows); the
+      // camera move and the shake run on real time. Both camera effects are drawn
+      // on top of the gameplay camera at render time (it keeps its own state), so
+      // it returns to the normal view with no jump.
+      // ---------------------------------------------------------------------------
+      const JUMP_FX_MIN_AIR_SEC = 0.05; // world seconds airborne before the effects start (no tiny bumps)
+      const JUMP_FX_MIN_LAUNCH_VY = 2.4; // launch speed off the ramp needed for the effects (medium speed and up)
+      const JUMP_SLOWMO_SCALE = 0.2; // world time scale in slow motion
+      const JUMP_SLOWMO_EASE_IN_SEC = 0.08; // real seconds into slow motion (kicks in at takeoff)
+      const JUMP_SLOWMO_EASE_OUT_SEC = 0.35; // real seconds back to 1× (from the landing)
+      const JUMP_SLOWMO_MAX_REAL_SEC = 3.4; // a very long jump leaves slow motion after this (a top-speed flight fits)
+      const JUMP_CAM_ZOOM = 0.25; // camera distance × this (close to the car)
+      const JUMP_CAM_MIN_DIST = 4.2; // never closer than this to the car (whole car in frame)
+      const JUMP_CAM_ORBIT_DEG = 90; // arc around the car (from behind to its side)
+      const JUMP_CAM_FOV_DELTA = -6; // degrees: a slightly tighter lens in slow motion
+      const JUMP_CAM_CLEARANCE = 0.5; // keep this far from the ramp / table / rails
+      const JUMP_CAM_ORBIT_SEC = 1.8; // real seconds for the whole arc
+      const JUMP_CAM_LIFT = 0.12; // extra camera height, × its distance
+      const JUMP_CAM_IN_SEC = 0.35; // real seconds to blend into the jump camera
+      const JUMP_CAM_OUT_SEC = 0.7; // real seconds back to the gameplay camera
+      const LAND_SHAKE_MAX = 0.5; // world units, at full impact
+      const LAND_SHAKE_ROLL_DEG = 2.4; // camera roll at full impact
+      const LAND_KICK_DOWN = 0.22; // a quick downward camera kick at the impact (world units, full impact)
+      const LAND_KICK_FOV = 3; // degrees wider at the impact, settling back
+      const LAND_KICK_SEC = 0.18; // kick decay (real seconds)
+      const LAND_SHAKE_SEC = 0.4;
+      const LAND_SHAKE_FREQ = 15; // Hz (smooth noise)
+      const LAND_SHAKE_REF_VY = 16; // landing speed (down) for full intensity
+      const JUMP_VIGNETTE_STRENGTH = 0.45; // edge darkening in slow motion (0 = off)
+
+      let _kitchenTimeScale = 1;
+      const _jumpFx = {
+        active: false,
+        tReal: 0,
+        w: 0, // jump camera blend (0 = gameplay camera)
+        orbit: 0, // current arc (rad)
+        orbitSign: 1,
+        wasAir: false,
+        airVy: 0,
+        airWorld: 0,
+        launchVy: 0,
+        shakeT: Infinity,
+        shakeAmp: 0,
+        shakeSeed: [0, 0, 0, 0, 0, 0],
+        overriding: false,
+        savedPos: new THREE.Vector3(),
+        savedQuat: new THREE.Quaternion(),
+        savedFov: 50,
+      };
+      const _jfxTarget = new THREE.Vector3();
+      const _jfxRay = new THREE.Raycaster();
+      const _jfxDir = new THREE.Vector3();
+      let _jfxObstacles = null;
+      /** The few static surfaces the jump camera keeps clear of (cheap to raycast). */
+      function _jfxCameraObstacles() {
+        if (_jfxObstacles) return _jfxObstacles;
+        _jfxObstacles = [];
+        for (const n of ["ramp", "mainTablePlate", "mainTableTopPlane", "raceBoundaries", "raceBoundariesLegs"]) {
+          const o = scene.getObjectByName(n);
+          if (o && o.isMesh) _jfxObstacles.push(o);
+        }
+        return _jfxObstacles;
+      }
+      const _jfxOff = new THREE.Vector3();
+      const _jfxPos = new THREE.Vector3();
+      const _jfxLook = new THREE.Vector3();
+      const _jfxRight = new THREE.Vector3();
+      const _jfxUp = new THREE.Vector3();
+
+      function _jfxCameraIsGameplay() {
+        return camera === carCamera || camera === carCameraFollow;
+      }
+
+      /** Per frame (real time, before the world steps): jump detection, time scale, camera blend. */
+      function updateKitchenTimeScale(realDt) {
+        const F = _jumpFx;
+        const air = !carFalling && carState.velY !== 0 && !!carState._rampAir;
+        const allowed = _kIntro.state === "done" && _jfxCameraIsGameplay();
+        // Start: the player's car has been off the ramp long enough.
+        if (!F.active && air && allowed && F.airWorld >= JUMP_FX_MIN_AIR_SEC && F.launchVy >= JUMP_FX_MIN_LAUNCH_VY) {
+          F.active = true;
+          F.tReal = 0;
+          F.orbit = 0;
+          // Arc toward the side the camera already leans to (else the track's outside).
+          _jfxOff.subVectors(camera.position, controls.target);
+          const side = _jfxOff.x * Math.cos(carState.angle) - _jfxOff.z * Math.sin(carState.angle);
+          F.orbitSign = side >= 0 ? 1 : -1;
+        }
+        if (F.active) {
+          F.tReal += realDt;
+          if (!air || F.tReal > JUMP_SLOWMO_MAX_REAL_SEC || !allowed) F.active = false;
+        }
+        // Landing (after a ramp jump): a shake scaled by the landing speed.
+        if (F.wasAir && !air && !carFalling && allowed) {
+          const k = Math.min(1, Math.max(0, -F.airVy / LAND_SHAKE_REF_VY));
+          if (k > 0.05) {
+            F.shakeT = 0;
+            F.shakeAmp = k;
+            for (let i = 0; i < 6; i++) F.shakeSeed[i] = Math.random() * Math.PI * 2;
+            _carLandShakePending = false; // this replaces the generic landing shake
+          }
+        }
+        F.wasAir = air;
+        if (!air) F.airWorld = 0;
+        // Time scale toward its target (smooth, real time).
+        const target = F.active ? JUMP_SLOWMO_SCALE : 1;
+        const tau = (target < _kitchenTimeScale ? JUMP_SLOWMO_EASE_IN_SEC : JUMP_SLOWMO_EASE_OUT_SEC) / 3;
+        _kitchenTimeScale += (target - _kitchenTimeScale) * (1 - Math.exp(-realDt / tau));
+        if (Math.abs(_kitchenTimeScale - target) < 1e-3) _kitchenTimeScale = target;
+        // Camera blend and arc (real time).
+        const wTarget = F.active ? 1 : 0;
+        const wSec = F.active ? JUMP_CAM_IN_SEC : JUMP_CAM_OUT_SEC;
+        F.w = wTarget === 1 ? Math.min(1, F.w + realDt / wSec) : Math.max(0, F.w - realDt / wSec);
+        if (F.active) {
+          const u = Math.min(1, F.tReal / JUMP_CAM_ORBIT_SEC);
+          F.orbit = F.orbitSign * JUMP_CAM_ORBIT_DEG * (Math.PI / 180) * _kIntroEaseSine(u);
+        }
+        if (F.shakeT < LAND_SHAKE_SEC) F.shakeT += realDt;
+      }
+
+      /** Smooth noise in [-1, 1] (two detuned sines). */
+      function _jfxNoise(t, seed) {
+        const w = LAND_SHAKE_FREQ * Math.PI * 2;
+        return (Math.sin(t * w + seed) + 0.5 * Math.sin(t * w * 2.13 + seed * 1.7)) / 1.5;
+      }
+
+      /** At render: the jump camera (blended) and the landing shake on top of the gameplay camera. */
+      function applyKitchenJumpCamera() {
+        const F = _jumpFx;
+        const shaking = F.shakeT < LAND_SHAKE_SEC;
+        updateKitchenJumpVignette();
+        if ((F.w <= 0 && !shaking) || _kIntro.overriding || !_jfxCameraIsGameplay()) return false;
+        F.savedPos.copy(camera.position);
+        F.savedQuat.copy(camera.quaternion);
+        F.savedFov = camera.fov;
+        _jfxPos.copy(camera.position);
+        _jfxLook.copy(controls.target);
+        let fov = camera.fov;
+        if (F.w > 0) {
+          const e = _kIntroEaseSine(F.w);
+          // Close to the car and around it (from the gameplay camera's own offset).
+          _jfxTarget.copy(car.position);
+          _jfxOff.subVectors(camera.position, controls.target);
+          const dist = Math.max(JUMP_CAM_MIN_DIST, _jfxOff.length() * JUMP_CAM_ZOOM);
+          _jfxOff.setLength(dist).applyAxisAngle(_flatUp, F.orbit);
+          _jfxOff.y += dist * JUMP_CAM_LIFT;
+          // Keep clear of the ramp / table / rails: pull in along the line to the car.
+          _jfxDir.copy(_jfxOff).normalize();
+          _jfxRay.set(_jfxTarget, _jfxDir);
+          _jfxRay.far = _jfxOff.length();
+          const hit = _jfxRay.intersectObjects(_jfxCameraObstacles(), false)[0];
+          if (hit) _jfxOff.setLength(Math.max(1.5, hit.distance - JUMP_CAM_CLEARANCE));
+          _jfxOff.add(_jfxTarget);
+          _jfxOff.y = Math.max(_jfxOff.y, kitchenGroundY(_jfxOff.x, _jfxOff.z) + JUMP_CAM_CLEARANCE + 0.3);
+          _jfxPos.lerp(_jfxOff, e);
+          _jfxLook.lerp(_jfxTarget, e);
+          fov += JUMP_CAM_FOV_DELTA * e;
+        }
+        if (shaking) {
+          // The impact's first hit: a quick downward kick and a wider lens, settling fast.
+          const kick = F.shakeAmp * Math.exp(-F.shakeT / LAND_KICK_SEC);
+          _jfxPos.y -= LAND_KICK_DOWN * kick;
+          fov += LAND_KICK_FOV * kick;
+        }
+        camera.position.copy(_jfxPos);
+        camera.up.set(0, 1, 0);
+        camera.lookAt(_jfxLook);
+        if (shaking) {
+          const u = F.shakeT / LAND_SHAKE_SEC;
+          const amp = F.shakeAmp * (1 - u) * (1 - u);
+          const t = F.shakeT;
+          camera.updateMatrix();
+          _jfxRight.setFromMatrixColumn(camera.matrix, 0);
+          _jfxUp.setFromMatrixColumn(camera.matrix, 1);
+          camera.position
+            .addScaledVector(_jfxRight, _jfxNoise(t, F.shakeSeed[0]) * amp * LAND_SHAKE_MAX)
+            .addScaledVector(_jfxUp, _jfxNoise(t, F.shakeSeed[1]) * amp * LAND_SHAKE_MAX);
+          camera.rotateZ(_jfxNoise(t, F.shakeSeed[2]) * amp * LAND_SHAKE_ROLL_DEG * (Math.PI / 180));
+        }
+        if (Math.abs(fov - camera.fov) > 1e-4) {
+          camera.fov = fov;
+          camera.updateProjectionMatrix();
+        }
+        camera.updateMatrixWorld();
+        F.overriding = true;
+        return true;
+      }
+
+      /** Edge darkening while the world is slowed (only enabled while it shows). */
+      function updateKitchenJumpVignette() {
+        const k = (1 - _kitchenTimeScale) / (1 - JUMP_SLOWMO_SCALE);
+        const strength = JUMP_VIGNETTE_STRENGTH * Math.max(0, Math.min(1, k));
+        jumpVignettePass.uniforms.uStrength.value = strength;
+        jumpVignettePass.enabled = strength > 0.005;
+      }
+
+      function restoreKitchenJumpCamera() {
+        const F = _jumpFx;
+        if (!F.overriding) return;
+        camera.position.copy(F.savedPos);
+        camera.quaternion.copy(F.savedQuat);
+        if (camera.fov !== F.savedFov) {
+          camera.fov = F.savedFov;
+          camera.updateProjectionMatrix();
+        }
+        camera.updateMatrixWorld();
+        F.overriding = false;
       }
 
       window.kitchenRace = {
@@ -6521,7 +7226,7 @@ let _worldSwitched = false;
         const sidePlane = _findKitchenMesh(kmodel, "mainTableSidePlane", meshByName);
         if (!topPlane && !sidePlane) {
           console.warn(
-            "ul-kitchen23.gltf: mainTableTopPlane / mainTableSidePlane not found",
+            "ul-kitchen24.gltf: mainTableTopPlane / mainTableSidePlane not found",
           );
           return { coverCloneStepX: null, topMat: null, sideMat: null };
         }
@@ -7974,7 +8679,7 @@ let _worldSwitched = false;
         const loadToken = ++_kitchenLoadToken;
         const kLoader = new GLTFLoader();
         kLoader.load(
-          kitchenAsset("ul-kitchen23.gltf"),
+          kitchenAsset("ul-kitchen24.gltf"),
           (gltf) => {
             if (!_worldSwitched || loadToken !== _kitchenLoadToken) return;
 
@@ -7996,7 +8701,7 @@ let _worldSwitched = false;
             });
             const surfaceMesh = kitchenPlate || kitchenPlatePhysic;
             if (!surfaceMesh) {
-              console.warn("ul-kitchen23.gltf: no mainTablePlate/mainTablePlatePhysic mesh found");
+              console.warn("ul-kitchen24.gltf: no mainTablePlate/mainTablePlatePhysic mesh found");
               _worldSwitched = false;
               return;
             }
@@ -9209,6 +9914,7 @@ let _worldSwitched = false;
             rotateKitchenGreyBox(kmodel);
             setupKitchenPropPhysics(kmodel);
             buildKitchenRaceBoundaries(kmodel);
+            setupKitchenRamp(kmodel, tablePlatePhysicsMaterial);
             _raceModel = kmodel;
 
             const shadowPlaneGeo = new THREE.PlaneGeometry(tSize.x * 1.5, tSize.z * 1.5);
@@ -9791,7 +10497,7 @@ let _worldSwitched = false;
           },
           undefined,
           (err) => {
-            console.error("Failed to load ul-kitchen23.gltf:", err);
+            console.error("Failed to load ul-kitchen24.gltf:", err);
             _worldSwitched = false;
           },
         );
@@ -10442,13 +11148,7 @@ let _worldSwitched = false;
 
         if (!carFalling) collideCarWithRails(car.position, carState);
         carState.driftAngle = 0;
-        if (!carFalling) {
-          _carFrontAxleSurfY = tableSurfaceY;
-          _carRearAxleSurfY = tableSurfaceY;
-          _carGroundSurfY = tableSurfaceY;
-          for (let wi = 0; wi < 4; wi++) _carWheelSurfY[wi] = tableSurfaceY;
-          _carSurfRange = 0;
-        }
+        if (!carFalling) sampleCarWheelGround();
         const edgeX = Math.abs(car.position.x - tablePlateCenter.x) > tablePlateHalfX;
         const edgeZ = Math.abs(car.position.z - tablePlateCenter.z) > tablePlateHalfZ;
         const offTable = edgeX || edgeZ;
@@ -10498,11 +11198,15 @@ let _worldSwitched = false;
         } else if (carState.velY !== 0) {
           const gravScale = getMatrixJumpGravityScale();
           car.position.y += carState.velY * dt;
-          carState.velY -= CAR_GRAVITY * dt * gravScale;
-          const _landOnY = tableSpawn.y;
+          carState.velY -= carAirGravity(carState) * dt * gravScale;
+          _jumpFx.airVy = carState.velY;
+          if (carState._rampAir) _jumpFx.airWorld += dt;
+          // Land on whatever is under the wheels (table or ramp).
+          const _landOnY = Math.max(tableSpawn.y, _carGroundSurfY + carBottomOffsetY);
           if (car.position.y < _landOnY) {
             car.position.y = _landOnY;
             carState.velY = 0;
+            carState._lastRestY = undefined;
           }
         } else {
           const surfDelta = _carFrontAxleSurfY - _carRearAxleSurfY;
@@ -10528,8 +11232,21 @@ let _worldSwitched = false;
               _carGroundSurfY + carBottomOffsetY + 0.05 * storedCarScale;
             if (_restOnY > _wheelRestCap) _restOnY = _wheelRestCap;
           }
-          const stepClimbing = unevenSurface;
-          if (stepClimbing && car.position.y < _restOnY) {
+          // Ramp edge: the ground dropped away → airborne (launch or fall off).
+          const _launchVy = rampGroundStep(carState, car.position.y, _restOnY, dt);
+          if (_launchVy !== null) {
+            carState.velY = _launchVy;
+            jumpInitialVelY = Math.max(0, _launchVy);
+            jumpLaunchSpeed = Math.abs(carState.speed);
+            _jumpFx.launchVy = _launchVy;
+            _jumpFx.airWorld = 0;
+            _restOnY = car.position.y;
+          }
+          const onRamp = _rampMesh && _carGroundSurfY > tableSurfaceY + 1e-3;
+          const stepClimbing = unevenSurface && !onRamp; // the ramp is a smooth slope: follow it exactly
+          if (_launchVy !== null) {
+            // keep the height this step; the air branch takes over next step
+          } else if (stepClimbing && car.position.y < _restOnY) {
             car.position.y = THREE.MathUtils.lerp(
               car.position.y,
               _restOnY,
@@ -10633,7 +11350,10 @@ let _worldSwitched = false;
         if (!_tabVisible) return;
         try {
           const rawDt = clock.getDelta();
-          const dt = Math.min(rawDt, 0.05);
+          const realDt = Math.min(rawDt, 0.05);
+          updateKitchenTimeScale(realDt);
+          // The world runs on scaled time (slow motion on the player's ramp jumps).
+          const dt = realDt * _kitchenTimeScale;
           const nowSec = performance.now() / 1000;
           const carDt = 1 / 60;
           const maxCarSteps = perfMaxCarSteps;
@@ -11002,6 +11722,7 @@ let _worldSwitched = false;
             applyCarFollowCameraFromAngles();
           }
           applyKitchenIntroCamera(Math.min(rawDt, 0.1));
+          applyKitchenJumpCamera();
           if (sceneBloomEnabled) {
             renderCarLightsBloomComposer();
             carBloomMixPass.material.uniforms.bloomTexture.value =
@@ -11017,12 +11738,14 @@ let _worldSwitched = false;
           updateMisterSpotTrail(dt);
           updateTableLightReflections();
           finalComposer.render();
+          restoreKitchenJumpCamera();
           restoreKitchenIntroCamera();
           if (_kitchenSceneReady && !_kitchenSceneShown && ++_kitchenSceneShownFrames >= KITCHEN_READY_FRAMES) {
             _kitchenSceneShown = true;
             emitKitchenSceneEvent("ready");
           }
         } catch (e) {
+          restoreKitchenJumpCamera();
           restoreKitchenIntroCamera();
           console.error("Animate error:", e);
         }
