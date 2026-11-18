@@ -3,6 +3,10 @@ import { onOfficeSceneEvent } from "./game/officeSceneEvents.js";
 import { SCENE_ROUTES } from "./game/sceneRoutes.js";
 import { useLevelHotkeys } from "./game/useLevelHotkeys.js";
 import { setOfficeSceneMount } from "./office-copy/officeSceneMount.js";
+import ControlsGuide from "./game/ControlsGuide.jsx";
+
+/** Loader fade-out once the scene is ready (ms); the intro starts as it begins. */
+const OFFICE_LOADER_FADE_MS = 450;
 
 /**
  * @param {object} props
@@ -21,6 +25,12 @@ export default function OfficeSceneCopy({
   onReadyRef.current = onModuleReady;
   onTransitionRef.current = onTransitionToKitchen;
   const [phase, setPhase] = useState("loading");
+  // The loader covers the canvas until the scene is ready (car placed, gums
+  // settled, first intro shot drawn), so the first frame seen is the intro.
+  const [sceneReady, setSceneReady] = useState(false);
+  const [loaderGone, setLoaderGone] = useState(false);
+  // The intro has ended and the player has control: show the controls guide.
+  const [introDone, setIntroDone] = useState(false);
   useLevelHotkeys(SCENE_ROUTES.office);
 
   useEffect(() => {
@@ -34,6 +44,17 @@ export default function OfficeSceneCopy({
       "transition-to-kitchen",
       () => onTransitionRef.current?.(),
     );
+    let fadeTimer = 0;
+    const revealScene = () => {
+      if (disposed || !sceneModule) return;
+      setSceneReady(true);
+      sceneModule.startOfficeIntro();
+      fadeTimer = window.setTimeout(() => setLoaderGone(true), OFFICE_LOADER_FADE_MS);
+    };
+    const stopSceneReady = onOfficeSceneEvent("office-scene-ready", revealScene);
+    const stopIntroDone = onOfficeSceneEvent("office-intro-done", () => {
+      if (!disposed) setIntroDone(true);
+    });
     import("./office-copy/officeSceneModule.js")
       .then((module) => {
         sceneModule = module;
@@ -41,6 +62,8 @@ export default function OfficeSceneCopy({
         if (disposed) return;
         setPhase("ready");
         onReadyRef.current?.();
+        if (module.isOfficeSceneReady()) revealScene();
+        if (module.isOfficeIntroDone()) setIntroDone(true);
       })
       .catch((err) => {
         if (disposed) return;
@@ -50,7 +73,10 @@ export default function OfficeSceneCopy({
 
     return () => {
       disposed = true;
+      window.clearTimeout(fadeTimer);
       stopKitchenTransition();
+      stopSceneReady();
+      stopIntroDone();
       sceneModule?.setOfficeSceneRendering(false);
       setOfficeSceneMount(null);
     };
@@ -72,6 +98,7 @@ export default function OfficeSceneCopy({
 
   const showModuleOverlay =
     !hideModuleLoadingOverlay && (phase === "loading" || phase === "error");
+  const showSceneLoader = !hideModuleLoadingOverlay && phase !== "error" && !loaderGone;
 
   return (
     <div
@@ -88,8 +115,18 @@ export default function OfficeSceneCopy({
       }}
     >
       <div id="perfBadge" aria-hidden="true" />
-      {showModuleOverlay && phase === "loading" && (
-        <div style={overlayStyle}>Loading 3D scene…</div>
+      <ControlsGuide active={introDone} />
+      {showSceneLoader && (
+        <div
+          style={{
+            ...overlayStyle,
+            background: "#1a1a1a",
+            opacity: sceneReady ? 0 : 1,
+            transition: `opacity ${OFFICE_LOADER_FADE_MS}ms ease`,
+          }}
+        >
+          Loading 3D scene…
+        </div>
       )}
       {showModuleOverlay && phase === "error" && (
         <div style={overlayStyle}>

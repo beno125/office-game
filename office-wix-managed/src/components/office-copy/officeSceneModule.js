@@ -14,6 +14,14 @@
       import { RectAreaLightUniformsLib } from "three/addons/lights/RectAreaLightUniformsLib.js";
 import { getOfficeSceneMount } from "./officeSceneMount.js";
 import { emitOfficeSceneEvent } from "../game/officeSceneEvents.js";
+import {
+  createCinematicIntro,
+  introEase,
+  introEaseSine,
+  introLerp,
+} from "../game/cinematicIntro.js";
+import { createCarLighting } from "../game/carLighting.js";
+import { addThresholdBloom, BLOOM_EMISSIVE, setBloomWeight } from "../game/thresholdBloom.js";
 
 const _OFFICE_BASE = `${import.meta.env.BASE_URL}office-scene-optimized/`;
 function officeAsset(relativePath) {
@@ -35,8 +43,6 @@ let _officeSceneAnimationFrame = 0;
 
       const carCamera = new THREE.PerspectiveCamera(50, 1, 0.1, 1000);
       carCamera.position.set(2, 2, 2);
-      const freeCamera = new THREE.PerspectiveCamera(55, 1, 0.05, 1500);
-      freeCamera.position.set(18, 9, 10);
       let camera = carCamera;
       const CAR_CAM_AZIMUTH_LIMIT = THREE.MathUtils.degToRad(70);
       let _carOrbitCamDistance = 0;
@@ -1029,7 +1035,8 @@ let _officeSceneAnimationFrame = 0;
           : 1;
         mat._bloomEmissiveIntensity = mat._baseEmissiveIntensity * bloomScale;
         mat._mainEmissiveIntensity = mat._bloomEmissiveIntensity * mainMul;
-        mat.emissiveIntensity = mat._bloomEmissiveIntensity;
+        // The light bar keeps its glow above the shared bloom threshold in every tier.
+        mat.emissiveIntensity = mat._bloomGlow ?? mat._bloomEmissiveIntensity;
         mat.envMapIntensity = 0;
         mat.toneMapped = true;
       }
@@ -1502,6 +1509,9 @@ let _officeSceneAnimationFrame = 0;
       finalComposer.addPass(smaaPass);
       finalComposer.addPass(sharpenPass);
       finalComposer.addPass(outputPass);
+      // Selective bloom by threshold (shared with the kitchen): the light bar, the
+      // monitors' LEDs and the screens' edges glow; nothing else crosses it.
+      const officeBloom = addThresholdBloom({ THREE, composer: finalComposer, afterPass: renderScenePass });
 
       smaaPass.enabled = perfSettings.smaa;
       sharpenPass.enabled = false;
@@ -1636,46 +1646,546 @@ let _officeSceneAnimationFrame = 0;
       let controls = createOrbitControls(camera);
       controls.target.set(0, 0, 0);
 
-      function switchToFreeInspectionCamera() {
-        const target = new THREE.Vector3();
-        if (_drawerEffectMesh) {
-          _drawerEffectMesh.updateWorldMatrix(true, false);
-          _drawerEffectMesh.getWorldPosition(target);
-        } else if (drawerGroup) {
-          drawerGroup.getWorldPosition(target);
-        } else if (car) {
-          target.copy(car.position);
+      // ---- Gameplay camera (camera 1) ------------------------------------
+      /** Camera 1's gameplay pose (orbit distance / elevation / yaw / fov), captured once the car is placed. */
+      let _officeGameplayCam = null;
+      /**
+       * Puts camera 1 at its gameplay pose behind the car with fresh orbit
+       * controls (no damping or follow smoothing left over). Used when the car
+       * is placed, when the intro starts and when it hands over to gameplay.
+       */
+      function setupOfficeGameplayCamera() {
+        if (!car) return;
+        if (!_officeGameplayCam) {
+          // Same as the first follow frame: yaw from where the load placed the camera.
+          syncCarOrbitCamYawFromPosition();
+          applyCarOrbitCameraFromAngles();
+          _officeGameplayCam = {
+            dist: _carOrbitCamDistance,
+            elev: _carOrbitCamElev,
+            yaw: _carOrbitCamWorldYaw,
+            fov: carCamera.fov,
+          };
         }
+        _carOrbitCamDistance = _officeGameplayCam.dist;
+        _carOrbitCamElev = _officeGameplayCam.elev;
+        _carOrbitCamWorldYaw = _officeGameplayCam.yaw;
+        if (carCamera.fov !== _officeGameplayCam.fov) {
+          carCamera.fov = _officeGameplayCam.fov;
+          carCamera.updateProjectionMatrix();
+        }
+        _carCam1LandShakeTime = 0;
+        applyCarOrbitCameraFromAngles();
+        const pos = _gameplayCamPos.copy(carCamera.position);
         controls.dispose();
-        camera = freeCamera;
-        camera.aspect = window.innerWidth / window.innerHeight;
-        camera.updateProjectionMatrix();
-        camera.position.copy(target).add(new THREE.Vector3(3.8, 4.8, 4.8));
-        camera.lookAt(target);
-        controls = createOrbitControls(camera);
-        controls.target.copy(target);
-        controls.minDistance = 0.35;
-        controls.maxDistance = 80;
-        controls.enableZoom = true;
+        controls = createOrbitControls(carCamera);
+        getCarCameraLookAtPoint(_carMatrixLookAt);
+        controls.target.copy(_carMatrixLookAt);
+        // Update first so the polar lock below reads this pose (a new control's angle is 0 until then).
         controls.update();
-        renderScenePass.camera = camera;
+        configureOrbitControlsForCarView(carCamera);
+        carCamera.position.copy(pos);
+        applyCarCameraLookAtCar();
+      }
+      const _gameplayCamPos = new THREE.Vector3();
+
+      // ---- Level intro (shared cinematicIntro module) ---------------------
+      // Bright: a slow low dolly with a crane rise along the desk. Then a push-in
+      // on the car with the window blinds behind it: the blinds close and the
+      // room goes dark. Then (all in dark mode) musa, a move onto the green hand
+      // (its flame lights up), the gum machine, and a low dramatic orbit around
+      // the car that rises onto camera 1.
+      /**
+       * The last shot: one continuous move that orbits low around the car and,
+       * without stopping, pulls back and up onto camera 1 (s). It replaces the
+       * orbit (1.5 s) and the arrival (1.3 s), which were two moves with a stop
+       * between them.
+       */
+      const OFFICE_INTRO_ORBIT_PULLBACK_SEC = 2.8;
+            const OFFICE_INTRO_SHOTS = [
+        { name: "opening", sec: 4.8 },
+        { name: "blinds", sec: 2.8, fade: true },
+        { name: "musaHand", sec: 4.5, fade: true },
+        { name: "gums", sec: 1.4, fade: true },
+        { name: "carOrbit", sec: OFFICE_INTRO_ORBIT_PULLBACK_SEC, fade: true },
+      ];
+      /**
+       * Opening (bright): starts low just past the desk's left end, with the cone
+       * at that corner passing close in front, and glides right while craning up
+       * to reveal the desk. Positions along the desk's width (0..1; was 0.15 →
+       * 0.6 over 3.4 s), height above its top (was 4.5 → 4.0), distance in front
+       * of its front edge (was 7.6 → 6.5), the look point's track, and an FOV
+       * and roll that settle as the shot ends.
+       */
+      const OFFICE_INTRO_OPENING = {
+        fromX: -0.06, toX: 0.55,
+        height: 1.3, heightEnd: 4.2,
+        front: 5.2, frontEnd: 6.8,
+        lookFromX: 0.14, lookToX: 0.75, lookY: 1.0, lookYEnd: 0.8,
+        fov: 40, fovEnd: 48, roll: 0.045,
+      };
+      /** Space around an object framed from its bounding box (share of its size). */
+      const OFFICE_INTRO_FRAME_MARGIN = 0.3;
+      /**
+       * musa → hand is one continuous camera move (4.5 s, was 4.2 s in two
+       * moves): a Catmull-Rom path through musa's framing (farther back, with
+       * OFFICE_INTRO_MUSA_START_MARGIN), the hand's framing, and a wider view
+       * of the hand and its green flame, with one ease over the whole shot. The
+       * look point follows a matching path from musa to the hand.
+       */
+      const OFFICE_INTRO_MUSA_START_MARGIN = 0.55;
+      /** The green flame ends this long before the shot does, so it's off by the cut (s). */
+      const OFFICE_INTRO_HAND_FX_END_SEC = 0.15;
+      /** Area the hand's green flame covers around the hand's box (world units: to the sides, above). */
+      const OFFICE_INTRO_HAND_FX_EXTENT = { side: 0.9, up: 1.8 };
+      /** Framings seen from the desk's front side (`yaw`, radians), the camera a little above the centre (`rise` × distance). */
+      const OFFICE_INTRO_MUSA_HAND = { yaw: 0.32, rise: 0.22, fov: 42 };
+      /** Lights-out starts this long into the blinds shot (s). */
+      const OFFICE_INTRO_DARK_SWITCH_DELAY = 0.35;
+      /**
+       * The whole switch to dark mode, as one transition (s): one shared
+       * progress 0 → 1 (smootherstep) drives the blinds closing, the daylight
+       * fading, the room's lights going down and the dark mode's accents and
+       * glowing parts coming up, all together. (Was in steps: close 1.3 s, a
+       * 0.15 s dim hold, then the accents over 0.5 s.)
+       */
+      const OFFICE_INTRO_DARK_SWITCH_SEC = 1.7;
+      /** The exposure dips by this much at the middle of the switch (follows the same progress). */
+      const OFFICE_INTRO_DARK_SWITCH_DIP = 0.25;
+      /**
+       * Blinds shot: the camera sits on the far side of the car from the
+       * nearest window and pushes in from `dist` to `distEnd` (world units),
+       * `height` / `heightEnd` above the car's centre and `side` / `sideEnd` to
+       * its side (+ = to the right looking at the window). It always looks at
+       * the centre of the real car's bounding box, so the car stays in the
+       * middle of the frame with the blinds behind it. (It used to look at a
+       * point 18% of the way to the window and 1.45 higher: the frame's centre
+       * then fell on the Mac's screen, which shows the car's live feed.)
+       */
+      const OFFICE_INTRO_BLINDS = {
+        dist: 4.6, distEnd: 3.7, height: 0.6, heightEnd: 0.45, side: 2.4, sideEnd: 2.0, fov: 58,
+      };
+      /**
+       * Space around the whole car in the car shots (share of its size). The
+       * camera never gets closer than the distance that fits the car's bounding
+       * box at that shot's FOV, so the car is never cut off.
+       */
+      const OFFICE_INTRO_CAR_MARGIN = 0.22;
+      /**
+       * Gum machine: the same slow orbit and push-in as before (yaw / sweep,
+       * radians), now at the distance that fits the whole machine in frame
+       * (its bounding box + OFFICE_INTRO_FRAME_MARGIN); `push` is how much
+       * closer it ends, `low` how far below the machine's centre the camera sits
+       * (× its height). Was a fixed 5.6 → 5.0 radius, too close to read.
+       */
+      const OFFICE_INTRO_GUMS = { yaw: -0.85, sweep: -0.35, push: 0.07, low: 0.08, fov: 44 };
+      /**
+       * Orbit → pull-back (OFFICE_INTRO_ORBIT_PULLBACK_SEC), one ease over the
+       * whole move: the camera starts low (`height` vs. the car's centre) at
+       * `yawFrom` (radians, relative to camera 1's yaw) and `fit` × the
+       * distance that frames the whole car, and turns steadily round to camera
+       * 1's yaw. Its distance, height and fov move to camera 1's on a curve
+       * that starts slowly (`pullCurve`: higher = the pull-back comes later),
+       * so it mostly orbits first and then backs away, without stopping. It
+       * looks at the car the whole time and ends exactly on camera 1.
+       */
+      const OFFICE_INTRO_CAR_ORBIT = { fit: 1.08, height: -0.1, yawFrom: 2.2, fov: 40, pullCurve: 1.8 };
+      /** Longest step the intro clock takes per frame (s): a hitch slows it instead of skipping. */
+      const OFFICE_INTRO_MAX_STEP = 1 / 20;
+      /**
+       * Warm-up behind the loader, each step held for OFFICE_READY_WARMUP_STEP_FRAMES
+       * frames: the light sets of dark, the lights-out in-between and bright, and
+       * the drawer portal on (dark and bright: the portal's own shaders). The
+       * portal's light used to be added to the scene only when the drawer opened,
+       * which recompiled every lit material at that moment (the freeze); it now
+       * stays on the drawer at 0 while closed. The last step is bright, for the
+       * intro's opening.
+       */
+      const OFFICE_READY_WARMUP = [
+        { blend: 0 },
+        { blend: 0.5 },
+        { blend: 0, portal: true },
+        { blend: 1, portal: true },
+        { blend: 1 },
+      ];
+      const OFFICE_READY_WARMUP_STEP_FRAMES = 2;
+      /** Frames rendered behind the loader before the scene reports ready. */
+      const OFFICE_READY_WARMUP_FRAMES = OFFICE_READY_WARMUP.length * OFFICE_READY_WARMUP_STEP_FRAMES + 1;
+      /** Seconds after the car loads to stop waiting for the gums to settle. */
+      const OFFICE_READY_MAX_WAIT_SEC = 12;
+
+      let _officeIntroRig = null;
+      let _officeIntroDarkened = false;
+      let _officeSceneReady = false;
+      let _officeReadyFrames = 0;
+      let _officeCarLoadedAt = 0;
+      const _introBlindsLook = new THREE.Vector3();
+      const _introBlindsAway = new THREE.Vector3();
+      const _introArrivalTo = new THREE.Vector3();
+
+      function buildOfficeIntroRig() {
+        const box = (name) => {
+          const o = scene.getObjectByName(name);
+          return o ? new THREE.Box3().setFromObject(o) : null;
+        };
+        const table = box("tablePlate");
+        const musa = box("musa001");
+        const hand = box("handWalk");
+        const gumsTank = box("gumsTank");
+        const gumsStand = box("gumsStand");
+        const gumsMachine = ["gumsTank", "gumsStand", "gumsBody", "gumsCup", "gumsRamp"]
+          .map(box)
+          .filter(Boolean)
+          .reduce((acc, b) => (acc ? acc.union(b) : b.clone()), null);
+        const top = table ? table.max.y : tableSurfaceY;
+        const look = getCarCameraLookAtPoint(new THREE.Vector3());
+        const gums = gumsTank && gumsStand ? gumsTank.clone().union(gumsStand) : null;
+        // The window (with its blinds) nearest the car, horizontally.
+        let blinds = null;
+        let bestD = Infinity;
+        scene.traverse((o) => {
+          if (o.name !== "windowUnit") return;
+          const c = new THREE.Box3().setFromObject(o).getCenter(new THREE.Vector3());
+          const d = Math.hypot(c.x - look.x, c.z - look.z);
+          if (d < bestD) {
+            bestD = d;
+            blinds = c;
+          }
+        });
+        return {
+          blinds: blinds || look.clone().add(new THREE.Vector3(0, 4, -16)),
+          top,
+          minX: table ? table.min.x : look.x - 20,
+          width: table ? table.max.x - table.min.x : 40,
+          frontZ: table ? table.max.z : look.z + 5,
+          midZ: table ? (table.min.z + table.max.z) / 2 : look.z - 3,
+          musa: musa || new THREE.Box3().setFromCenterAndSize(look, new THREE.Vector3(2, 2, 2)),
+          hand: hand || musa || new THREE.Box3().setFromCenterAndSize(look, new THREE.Vector3(2, 2, 2)),
+          // The hand plus the space its green flame spreads into (sides and above).
+          handWithFx: (() => {
+            const b = (hand || musa || new THREE.Box3().setFromCenterAndSize(look, new THREE.Vector3(2, 2, 2))).clone();
+            const x = OFFICE_INTRO_HAND_FX_EXTENT;
+            b.min.x -= x.side;
+            b.max.x += x.side;
+            b.min.z -= x.side;
+            b.max.z += x.side;
+            b.max.y += x.up;
+            return b;
+          })(),
+          gumsMachine,
+          gumsBase: gums
+            ? gums.getCenter(new THREE.Vector3()).setY(gums.min.y)
+            : look.clone(),
+          gumsHeight: gums ? gums.max.y - gums.min.y : 4,
+        };
       }
 
-      function switchToCarCamera() {
-        if (camera === carCamera) return;
-        controls.dispose();
-        camera = carCamera;
-        camera.aspect = window.innerWidth / window.innerHeight;
-        camera.updateProjectionMatrix();
-        controls = createOrbitControls(camera);
-        if (car) {
-          getCarCameraLookAtPoint(_carMatrixLookAt);
-          controls.target.copy(_carMatrixLookAt);
-          syncCarOrbitCamAnglesFromPosition(camera);
-          configureOrbitControlsForCarView(camera);
+      function officeIntroShotPose(i, u, out) {
+        const rig = _officeIntroRig;
+        const name = OFFICE_INTRO_SHOTS[i].name;
+        if (name === "opening") {
+          // A slow low dolly with a crane rise; FOV and roll settle at the end.
+          const o = OFFICE_INTRO_OPENING;
+          const e = introSmoother(u);
+          out.pos.set(
+            rig.minX + rig.width * introLerp(o.fromX, o.toX, e),
+            rig.top + introLerp(o.height, o.heightEnd, e),
+            rig.frontZ + introLerp(o.front, o.frontEnd, e),
+          );
+          out.look.set(
+            rig.minX + rig.width * introLerp(o.lookFromX, o.lookToX, e),
+            rig.top + introLerp(o.lookY, o.lookYEnd, e),
+            rig.midZ,
+          );
+          out.fov = introLerp(o.fov, o.fovEnd, e);
+          out.roll = o.roll * (1 - e);
+          return out;
         }
-        controls.update();
-        renderScenePass.camera = camera;
+        if (name === "blinds") {
+          // The real car (the object the gameplay camera follows), kept in the centre
+          // of the frame: the camera aims at its bounding box's centre every frame.
+          const s = OFFICE_INTRO_BLINDS;
+          const e = introEaseSine(u);
+          const carBox = getCarBox(_introCarBox);
+          const center = carBox.getCenter(_introBlindsLook);
+          const away = _introBlindsAway.set(center.x - rig.blinds.x, 0, center.z - rig.blinds.z).normalize();
+          // Right-hand side when facing the window from the camera.
+          const sideX = away.z;
+          const sideZ = -away.x;
+          const dist = introLerp(s.dist, s.distEnd, e);
+          const side = introLerp(s.side, s.sideEnd, e);
+          out.pos.set(
+            center.x + away.x * dist + sideX * side,
+            center.y + introLerp(s.height, s.heightEnd, e),
+            center.z + away.z * dist + sideZ * side,
+          );
+          // Never closer than the distance that fits the whole car.
+          const fit = introFitDistance(carBox, s.fov, OFFICE_INTRO_CAR_MARGIN);
+          const off = _introCarOff.subVectors(out.pos, center);
+          if (off.length() < fit) {
+            off.setLength(fit);
+            out.pos.addVectors(center, off);
+          }
+          out.look.copy(center);
+          out.fov = s.fov;
+          out.roll = 0;
+          return out;
+        }
+        if (name === "musaHand") {
+          // One continuous move: musa → the hand → back out over the hand and its flame.
+          const s = OFFICE_INTRO_MUSA_HAND;
+          const path = getMusaHandPath();
+          const sPos = introSmoother(u); // share of the path's length travelled
+          path.pos.getPointAt(sPos, out.pos);
+          path.look.getPoint(path.lookParam(sPos), out.look);
+          out.fov = s.fov;
+          out.roll = 0;
+          return out;
+        }
+        if (name === "gums") {
+          const s = OFFICE_INTRO_GUMS;
+          const e = introEaseSine(u);
+          const box = rig.gumsMachine;
+          const c = box.getCenter(_introBlindsAway);
+          const h = box.max.y - box.min.y;
+          const d = introFitDistance(box, s.fov, OFFICE_INTRO_FRAME_MARGIN) * (1 - s.push * e);
+          const yaw = s.yaw + s.sweep * e;
+          out.pos.set(c.x + Math.sin(yaw) * d, c.y - h * s.low, c.z + Math.cos(yaw) * d);
+          out.look.copy(c);
+          out.fov = s.fov;
+          out.roll = 0;
+          return out;
+        }
+        // carOrbit: low around the car, then back and up onto camera 1, in one move.
+        const s = OFFICE_INTRO_CAR_ORBIT;
+        const e = introEase(u);
+        const pull = Math.pow(e, s.pullCurve);
+        const carBox = getCarBox(_introCarBox);
+        const carC = carBox.getCenter(_introOrbitCarC);
+        const endLook = getCarCameraLookAtPoint(_introOrbitEndLook);
+        const toOff = _introArrivalTo.copy(carCamera.position).sub(endLook);
+        const toDist = toOff.length();
+        const toYaw = Math.atan2(toOff.x, toOff.z);
+        const toElev = Math.asin(THREE.MathUtils.clamp(toOff.y / Math.max(toDist, 1e-6), -1, 1));
+        const r0 = introFitDistance(carBox, s.fov, OFFICE_INTRO_CAR_MARGIN) * s.fit;
+        const elev0 = Math.asin(THREE.MathUtils.clamp(s.height / r0, -1, 1));
+        // Both the start and camera 1 are measured around the car; the look point slides onto camera 1's.
+        const look = out.look.lerpVectors(carC, endLook, pull);
+        const yaw = toYaw + s.yawFrom * (1 - e);
+        const elev = introLerp(elev0, toElev, pull);
+        const dist = introLerp(r0, toDist, pull);
+        out.pos.set(
+          look.x + Math.sin(yaw) * Math.cos(elev) * dist,
+          look.y + Math.sin(elev) * dist,
+          look.z + Math.cos(yaw) * Math.cos(elev) * dist,
+        );
+        if (u >= 1) out.pos.copy(carCamera.position);
+        out.fov = introLerp(s.fov, carCamera.fov, pull);
+        out.roll = 0;
+        return out;
+      }
+      const _introOrbitCarC = new THREE.Vector3();
+      const _introOrbitEndLook = new THREE.Vector3();
+
+      /** Strong ease in and out (smootherstep). */
+      function introSmoother(t) {
+        const x = Math.min(1, Math.max(0, t));
+        return x * x * x * (x * (x * 6 - 15) + 10);
+      }
+      const _fitSize = new THREE.Vector3();
+      /** Distance from a box's centre that fits it in frame with the margin. */
+      function introFitDistance(box, fovDeg, margin) {
+        box.getSize(_fitSize);
+        const halfV = THREE.MathUtils.degToRad(fovDeg) / 2;
+        const halfH = Math.atan(Math.tan(halfV) * Math.max(0.3, carCamera.aspect || 1));
+        const w = Math.max(_fitSize.x, _fitSize.z);
+        const fitV = ((_fitSize.y / 2) * (1 + margin)) / Math.tan(halfV);
+        const fitH = ((w / 2) * (1 + margin)) / Math.tan(halfH);
+        return Math.max(fitV, fitH) + w / 2;
+      }
+      const _carMeshBox = new THREE.Box3();
+      /** Bounding box of the real player's car (its meshes; the object the gameplay camera follows). */
+      function getCarBox(out) {
+        out.makeEmpty();
+        car.updateMatrixWorld(true);
+        car.traverse((o) => {
+          if (!o.isMesh || !o.visible || !o.geometry) return;
+          _carMeshBox.setFromObject(o);
+          out.union(_carMeshBox);
+        });
+        if (out.isEmpty()) {
+          getCarCameraLookAtPoint(_fitSize);
+          out.setFromCenterAndSize(_fitSize, _carMeshBox.min.set(3, 2, 3));
+        }
+        return out;
+      }
+      const _introCarBox = new THREE.Box3();
+      const _introCarOff = new THREE.Vector3();
+      /** A pose looking at a box's centre from `yaw` (0 = from the desk's front), fitted with the margin. */
+      function introFramePose(box, yaw, rise, fov, out, distScale = 1, margin = OFFICE_INTRO_FRAME_MARGIN) {
+        const c = box.getCenter(_fitSize.clone());
+        const d = introFitDistance(box, fov, margin) * distScale;
+        out.pos.set(c.x + Math.sin(yaw) * d, c.y + d * rise, c.z + Math.cos(yaw) * d);
+        out.look.copy(c);
+        out.fov = fov;
+        out.roll = 0;
+        return out;
+      }
+      const _introPoseA = { pos: new THREE.Vector3(), look: new THREE.Vector3(), fov: 50, roll: 0 };
+      let _musaHandPath = null;
+      /**
+       * The musa → hand camera path (built once from their bounding boxes):
+       * positions through the three framings, look points through musa, the
+       * hand and the hand-with-flame centres, and when (share of the shot) the
+       * camera passes the hand.
+       */
+      function getMusaHandPath() {
+        if (_musaHandPath) return _musaHandPath;
+        const rig = _officeIntroRig;
+        const s = OFFICE_INTRO_MUSA_HAND;
+        const a = introFramePose(rig.musa, s.yaw, s.rise, s.fov, { pos: new THREE.Vector3(), look: new THREE.Vector3() }, 1, OFFICE_INTRO_MUSA_START_MARGIN);
+        const b = introFramePose(rig.hand, s.yaw, s.rise, s.fov, { pos: new THREE.Vector3(), look: new THREE.Vector3() });
+        const c = introFramePose(rig.handWithFx, s.yaw, s.rise, s.fov, { pos: new THREE.Vector3(), look: new THREE.Vector3() });
+        const pos = new THREE.CatmullRomCurve3([a.pos, b.pos, c.pos], false, "centripetal");
+        const look = new THREE.CatmullRomCurve3([a.look, b.look, c.look], false, "centripetal");
+        // Where the camera passes the hand along the path's length.
+        const lengths = pos.getLengths(200);
+        const total = lengths[lengths.length - 1] || 1;
+        let s1 = 0.5;
+        let best = Infinity;
+        const tmp = new THREE.Vector3();
+        for (let i = 0; i <= 200; i++) {
+          pos.getPoint(i / 200, tmp);
+          const d = tmp.distanceToSquared(b.pos);
+          if (d < best) {
+            best = d;
+            s1 = lengths[i] / total;
+          }
+        }
+        // A smooth map from path length to the look path, reaching the hand's centre at s1.
+        const q = THREE.MathUtils.clamp((0.5 - s1) / (s1 * s1 - s1 || -1), -0.9, 0.9);
+        const lookParam = (x) => THREE.MathUtils.clamp(q * x * x + (1 - q) * x, 0, 1);
+        // The shot time (share) when the eased progress reaches s1.
+        let lo = 0;
+        let hi = 1;
+        for (let i = 0; i < 30; i++) {
+          const mid = (lo + hi) / 2;
+          if (introSmoother(mid) < s1) lo = mid;
+          else hi = mid;
+        }
+        _musaHandPath = { pos, look, lookParam, arriveU: (lo + hi) / 2 };
+        return _musaHandPath;
+      }
+
+      const officeIntro = createCinematicIntro({
+        THREE,
+        getCamera: () => carCamera,
+        getMount: () => getOfficeSceneMount(),
+        shots: OFFICE_INTRO_SHOTS,
+        shotPose: officeIntroShotPose,
+        arrivalPose: null, // no "arrival" shot: the last shot itself ends on camera 1
+        blocksInput: () => _officeSceneRendering,
+      });
+
+      /** Behind the loader: car placed and gums settled, a few frames already drawn at the first shot. */
+      function updateOfficeSceneReady() {
+        if (_officeSceneReady || !_officeGameplayCam) return;
+        if (!_officeCarLoadedAt) _officeCarLoadedAt = performance.now();
+        const waitedSec = (performance.now() - _officeCarLoadedAt) / 1000;
+        if (!_gumsInitialSettleEmitted && waitedSec < OFFICE_READY_MAX_WAIT_SEC) return;
+        if (!_officeIntroRig) _officeIntroRig = buildOfficeIntroRig();
+        // Behind the loader: compile every light set that can show up later (see OFFICE_READY_WARMUP).
+        const step = OFFICE_READY_WARMUP[
+          Math.min(Math.floor(_officeReadyFrames / OFFICE_READY_WARMUP_STEP_FRAMES), OFFICE_READY_WARMUP.length - 1)
+        ];
+        lightBlendTarget = lightBlend = step.blend;
+        setDrawerPortalWarmup(!!step.portal);
+        // Compile every object in the scene for this light set, not just what this
+        // shot's camera draws (objects seen later from camera 1 compiled their
+        // "portal on" variant when the drawer opened, a 110 ms hitch).
+        if (_officeReadyFrames % OFFICE_READY_WARMUP_STEP_FRAMES === 0) {
+          applyLightBlend(step.blend);
+          try {
+            renderer.compile(scene, camera);
+          } catch (err) {
+            console.warn("[office] shader warm-up failed:", err);
+          }
+        }
+        _officeReadyFrames++;
+        if (_officeReadyFrames < OFFICE_READY_WARMUP_FRAMES) return;
+        _officeSceneReady = true;
+        emitOfficeSceneEvent("office-scene-ready");
+      }
+
+      /**
+       * Lights-out in the opening: the bright room fades down to a short dim
+       * moment, then the dark mode's accents and glows come up.
+       */
+      function updateOfficeIntroLightSwitch(t) {
+        const t0 = officeIntro.shotStart("blinds") + OFFICE_INTRO_DARK_SWITCH_DELAY;
+        const dt = t - t0;
+        if (dt <= 0 || _officeIntroDarkened) return;
+        if (dt >= OFFICE_INTRO_DARK_SWITCH_SEC) {
+          endOfficeIntroLightSwitch();
+          return;
+        }
+        // One shared progress for everything: the blinds and the daylight (lightBlend),
+        // the room's lights, and the dark mode's accents and glows (which follow 1 − lightBlend).
+        const p = introSmoother(dt / OFFICE_INTRO_DARK_SWITCH_SEC);
+        lightBlend = lightBlendTarget = 1 - p;
+        _gamingAccentLevel = 1;
+        _sceneExposure = 1 - OFFICE_INTRO_DARK_SWITCH_DIP * Math.sin(Math.PI * p);
+      }
+      /** The hand's green flame: from the moment the camera passes the hand until just before the cut. */
+      let _introHandFxStarted = false;
+      function updateOfficeIntroHandFx(t) {
+        if (!_officeIntroRig) return;
+        const start = officeIntro.shotStart("musaHand");
+        const sec = OFFICE_INTRO_SHOTS.find((sh) => sh.name === "musaHand").sec;
+        const on = start + getMusaHandPath().arriveU * sec;
+        const active = t >= on && t < start + sec - OFFICE_INTRO_HAND_FX_END_SEC;
+        if (active && !_introHandFxStarted) {
+          _introHandFxStarted = true;
+          initHandWalkSmallFxFlameOn();
+        }
+        _introHandFxDemo = active ? 1 : 0;
+      }
+
+      /** Dark mode fully on: gameplay continues in it. */
+      function endOfficeIntroLightSwitch() {
+        _officeIntroDarkened = true;
+        lightBlend = lightBlendTarget = 0;
+        _sceneExposure = 1;
+        _gamingAccentLevel = 1;
+      }
+
+      /** Advances the intro; returns this frame's camera pose (null once it's done or before the rig exists). */
+      function updateOfficeIntro(rawDt) {
+        const realDt = Math.min(rawDt, OFFICE_INTRO_MAX_STEP);
+        if (officeIntro.state === "done") {
+          officeIntro.updateLetterbox(realDt);
+          return null;
+        }
+        if (!_officeIntroRig) return null;
+        if (officeIntro.state === "playing") {
+          officeIntro.t += realDt;
+          updateOfficeIntroLightSwitch(officeIntro.t);
+          updateOfficeIntroHandFx(officeIntro.t);
+          if (officeIntro.t >= officeIntro.totalSec) {
+            officeIntro.state = "done";
+            officeIntro.t = officeIntro.totalSec;
+            endOfficeIntroLightSwitch();
+            _introHandFxDemo = 0;
+            emitOfficeSceneEvent("office-intro-done"); // the player has control (the page shows the controls guide)
+            setupOfficeGameplayCamera();
+            officeIntro.updateFade();
+            officeIntro.updateLetterbox(realDt);
+            return null;
+          }
+        }
+        officeIntro.updateFade();
+        officeIntro.updateLetterbox(realDt);
+        return officeIntro.poseAt(officeIntro.t);
       }
 
       // Lights + windowTris: one blend (lightBlend, 0→1) drives both.
@@ -1707,7 +2217,9 @@ let _officeSceneAnimationFrame = 0;
       dirBlue.position.set(-35, 40, -25);
       scene.add(dirBlue);
 
-      const carShadowLight = new THREE.DirectionalLight(0xffffff, 0.22);
+      /** Shadow-casting lights' strength in bright mode (dark mode: GAMING_DARK.shadowLights). */
+      const SHADOW_LIGHT_BRIGHT_INTENSITY = 0.22;
+      const carShadowLight = new THREE.DirectionalLight(0xffffff, SHADOW_LIGHT_BRIGHT_INTENSITY);
       carShadowLight.layers.set(TABLE_TOP_SHADOW_LAYER);
       carShadowLight.position.set(3, 20, 2);
       carShadowLight.castShadow = true;
@@ -1725,7 +2237,7 @@ let _officeSceneAnimationFrame = 0;
       scene.add(carShadowLight);
       scene.add(carShadowLight.target);
 
-      const wallShadowLight = new THREE.DirectionalLight(0xffffff, 0.22);
+      const wallShadowLight = new THREE.DirectionalLight(0xffffff, SHADOW_LIGHT_BRIGHT_INTENSITY);
       wallShadowLight.layers.set(TABLE_WALL_SHADOW_LAYER);
       wallShadowLight.castShadow = true;
       wallShadowLight.shadow.mapSize.width = 512;
@@ -1845,19 +2357,546 @@ let _officeSceneAnimationFrame = 0;
       darkPurpleFill.position.set(10, 25, -20);
       scene.add(darkPurpleFill);
 
-      const darkMode = {
-        background: 0x1a1a1a,
-        ambient: { color: 0x4a4460, intensity: 0.65 },
-        hemisphere: { sky: 0x88aaff, ground: 0xdd88aa, intensity: 0.5 },
-        dirPink: { color: 0xee77aa, intensity: 0.7 },
-        dirBlue: { color: 0x5588dd, intensity: 0.9 },
-        dirFillPink: { color: 0xdd88aa, intensity: 0.4 },
-        dirFillBlue: { color: 0x77aaff, intensity: 0.45 },
-        pointPink: { color: 0xee66aa, intensity: 0.5 },
-        pointBlue: { color: 0x5588dd, intensity: 0.5 },
+      // ---- Dark mode: a dramatic gaming setup at night --------------------
+      // Built from the scene's own colours: the portal / kitchen-transition
+      // blues and magentas (#165dff #2090ff #715cff #ff319d #d52cff), the car's
+      // pink-red and the charger's blue cue. Very little ambient light; the
+      // room is lit by a few coloured accents that pick out the desk, the car
+      // and the key objects, and the emissive parts glow against the dark.
+      // It's the dark end of lightBlend (O / P keys); bright mode is unchanged.
+      const GAMING_DARK = {
+        /** Room background (was 0x1a1a1a). */
+        background: 0x07060d,
+        /** General light, kept very low so most of the room falls into darkness (was 0x4a4460 @ 0.65). */
+        ambient: { color: 0x241c3a, intensity: 0.08 },
+        /** Was sky 0x88aaff / ground 0xdd88aa @ 0.5. */
+        hemisphere: { sky: 0x2b3f9e, ground: 0x3d0f33, intensity: 0.12 },
+        /** Two coloured rim lights from behind the desk (were 0xee77aa @ 0.7 and 0x5588dd @ 0.9). */
+        dirPink: { color: 0xff319d, intensity: 0.3 },
+        dirBlue: { color: 0x165dff, intensity: 0.38 },
+        /** Soft fills (were 0xdd88aa @ 0.4 and 0x77aaff @ 0.45). */
+        dirFillPink: { color: 0xd52cff, intensity: 0.06 },
+        dirFillBlue: { color: 0x2090ff, intensity: 0.06 },
+        /** Were 0xee66aa / 0x5588dd @ 0.5. */
+        pointPink: { color: 0xff319d, intensity: 0.15 },
+        pointBlue: { color: 0x2090ff, intensity: 0.15 },
         warmKey: { color: 0xfff0dd, intensity: 0 },
         warmFill: { color: 0xffe8cc, intensity: 0 },
+        /**
+         * The scene's four older dark-only lights, reused (no extra lights) as
+         * the under-desk glow, the wall glow and the desk objects' rim lights.
+         * They were: blue point 0x3366cc @ 2.5 at [0, 20, 0], blue fill dir
+         * 0x4488ee @ 1.4, pink point 0xff44aa @ 1.5 at [15, 18, -10], purple fill
+         * dir 0x8844cc @ 1.2.
+         */
+        // Violet under-desk glow on the floor and the legs (point).
+        underDeskGlow: { color: 0x715cff, intensity: 16, pos: [0, 3.5, 3], distance: 30, decay: 1.5 },
+        // Purple glow on the wall / blinds behind the desk (point).
+        wallGlow: { color: 0xd52cff, intensity: 18, pos: [2, 12, -15.5], distance: 34, decay: 1.4 },
+        // Rim lights for the desk objects, low from behind (directional, from `pos` toward the desk).
+        rimMagenta: { color: 0xff319d, intensity: 0.55, pos: [-24, 13, -17], target: [-6, 7.2, -6] },
+        rimBlue: { color: 0x2090ff, intensity: 0.55, pos: [26, 13, -17], target: [14, 7.2, -6] },
+        /**
+         * Accent lights (dark only, no shadows). spot: a light pool aimed at
+         * `target`; point: a glow around `pos`. Intensities are physical
+         * (they fall off with distance^decay).
+         */
+        accents: [
+          // Purple-magenta wash: now only a subtle tint, aimed at the back of the
+          // desk and the wall so the centre stays white (was intensity 26, target
+          // [-1, 6.25, -4]; before that 28 at [-8, 19, 2] → [-5, 6.25, -3], angle 0.62).
+          { type: "spot", color: 0xff319d, intensity: 8, pos: [-4, 30, 7], target: [-1, 6.25, -11], angle: 1.05, penumbra: 1, distance: 60, decay: 1.4 },
+          // Blue pool over the right of the desk (charger, gum machine, drawer side).
+          { type: "spot", color: 0x2090ff, intensity: 28, pos: [15, 19, 2], target: [16, 6.25, -4], angle: 0.6, penumbra: 0.85, distance: 40, decay: 1.4 },
+        ],
+        /**
+         * The objects on the desk keep the backup's (src/office) dark-mode
+         * lighting: these are its values. Only their materials get the
+         * difference between these and the live lights (in their shaders), so
+         * the room keeps the new dark mode. Directional lights shine from `pos`
+         * toward the origin, as in the backup.
+         */
+        deskRestore: {
+          ambient: { color: 0x4a4460, intensity: 0.65 },
+          hemisphere: { sky: 0x88aaff, ground: 0xdd88aa, intensity: 0.5 },
+          directional: {
+            dirPink: { color: 0xee77aa, intensity: 0.7, pos: [35, 45, 25] },
+            dirBlue: { color: 0x5588dd, intensity: 0.9, pos: [-35, 40, -25] },
+            dirFillPink: { color: 0xdd88aa, intensity: 0.4, pos: [-15, 25, 30] },
+            dirFillBlue: { color: 0x77aaff, intensity: 0.45, pos: [20, 30, -20] },
+            darkBlueFill: { color: 0x4488ee, intensity: 1.4, pos: [-10, 30, 15] },
+            darkPurpleFill: { color: 0x8844cc, intensity: 1.2, pos: [10, 25, -20] },
+          },
+          /** The two shadow-casting lights (backup: white @ 0.22, same direction as now). */
+          shadowLights: { color: 0xffffff, intensity: 0.22 },
+        },
+        /**
+         * The desk's surface reads white in dark mode: a soft neutral fill on
+         * the desk-top material only (added in its shader, no extra light):
+         * mostly from above (`top`), a little everywhere (`ambient`).
+         */
+        deskSurfaceFill: { color: 0xf2f4ff, top: 0.55, ambient: 0.12 },
+        /**
+         * The window glass is almost a mirror (roughness 0.02), so the spot
+         * lights' highlights showed on it as bright dots (the purple wash's
+         * from the blinds shot). The glass ignores the spot lights' direct light;
+         * everything else about it is unchanged.
+         */
+        windowGlassIgnoresSpots: true,
+        /**
+         * Lighting for single objects in dark mode, added in their materials'
+         * shaders (no real lights, so nothing else gets brighter; the scene has
+         * no environment map, so envMapIntensity can't help). Diffuse only, so
+         * colours stay true. key: white light from above and in front (for the
+         * car: its own front, so it follows the car); rim: from behind, in an
+         * accent colour; ambient: a little everywhere.
+         */
+        carFill: {
+          key: { color: 0xffffff, intensity: 1.15, forward: 0.55 },
+          rim: { color: 0x2090ff, intensity: 0.55, up: 0.5 },
+          ambient: 0.18,
+        },
+        coneFill: {
+          key: { color: 0xffffff, intensity: 1.0, dir: [0.2, 1, 0.7] },
+          ambient: 0.2,
+          /** The cones' white stripes catch the light like reflective tape (emissive, dark mode). */
+          stripeEmissive: { color: 0xffffff, intensity: 0.32 },
+        },
+        /** The duck's eyeballs: a soft white glow so they read white (bright mode / dark mode). */
+        eyeWhite: { bright: 0.18, dark: 0.42 },
+        /** The two shadow-casting lights (car on the desk, desk side wall): bright mode keeps white @ 0.22. */
+        shadowLights: { color: 0x9a8cff, intensity: 0.12 },
+        /** Emissive strength in dark mode (bright mode keeps its own values). */
+        /** (phoneChargerLight and headphonesLight are on the desk: back to the backup's 2.2 and 3.4; were 4.5 and 6.5.) */
+        emissive: { phoneChargerLight: 2.2, headphonesLight: 3.4, roomLight: 0.12 },
       };
+      const darkMode = {
+        background: GAMING_DARK.background,
+        ambient: GAMING_DARK.ambient,
+        hemisphere: GAMING_DARK.hemisphere,
+        dirPink: GAMING_DARK.dirPink,
+        dirBlue: GAMING_DARK.dirBlue,
+        dirFillPink: GAMING_DARK.dirFillPink,
+        dirFillBlue: GAMING_DARK.dirFillBlue,
+        pointPink: GAMING_DARK.pointPink,
+        pointBlue: GAMING_DARK.pointBlue,
+        warmKey: GAMING_DARK.warmKey,
+        warmFill: GAMING_DARK.warmFill,
+      };
+      const _gamingAccentLights = [];
+      /** 0..1 on top of the dark blend: the intro brings the accents up after its dim moment. */
+      let _gamingAccentLevel = 1;
+      /** Tone-mapping exposure (the intro dips it for the lights-out moment). */
+      let _sceneExposure = 1;
+      for (const a of GAMING_DARK.accents) {
+        const light =
+          a.type === "spot"
+            ? new THREE.SpotLight(a.color, 0, a.distance, a.angle, a.penumbra, a.decay)
+            : new THREE.PointLight(a.color, 0, a.distance, a.decay);
+        light.position.set(a.pos[0], a.pos[1], a.pos[2]);
+        light.castShadow = false;
+        if (a.type === "spot") {
+          light.target.position.set(a.target[0], a.target[1], a.target[2]);
+          scene.add(light.target);
+        }
+        light.userData.darkIntensity = a.intensity;
+        scene.add(light);
+        _gamingAccentLights.push(light);
+      }
+      // Reused dark-only lights: colour, place and reach from the config.
+      const _gamingReused = [
+        [darkBlueLight, GAMING_DARK.underDeskGlow],
+        [darkPinkLight, GAMING_DARK.wallGlow],
+        [darkPurpleFill, GAMING_DARK.rimMagenta],
+        [darkBlueFill, GAMING_DARK.rimBlue],
+      ];
+      for (const [light, cfg] of _gamingReused) {
+        light.color.setHex(cfg.color);
+        light.position.set(cfg.pos[0], cfg.pos[1], cfg.pos[2]);
+        if (cfg.distance != null) light.distance = cfg.distance;
+        if (cfg.decay != null) light.decay = cfg.decay;
+        if (cfg.target && light.target) {
+          light.target.position.set(cfg.target[0], cfg.target[1], cfg.target[2]);
+          scene.add(light.target);
+        }
+      }
+      /** Emissive materials brightened in dark mode: { material, bright, dark }. */
+      const _gamingEmissives = [];
+      function registerGamingEmissive(material, key) {
+        if (!material || _gamingEmissives.some((e) => e.material === material)) return;
+        _gamingEmissives.push({
+          material,
+          bright: material.emissiveIntensity,
+          dark: GAMING_DARK.emissive[key],
+        });
+        applyLightBlend(lightBlend);
+      }
+      /** Names of the objects found sitting on the desk (for the dark mode's desk lighting). */
+      let gamingDeskObjects = [];
+      /** Light blend the desk restore was last given (set by applyLightBlend). */
+      let _deskRestoreBlend = 0;
+      const _deskRestoreMaterials = [];
+      /**
+       * Materials whose shader we've patched (by instance: a clone copies
+       * userData but not the shader hook, so a flag in userData isn't enough).
+       */
+      const _shaderPatched = new WeakSet();
+      const DESK_RESTORE_DIRS = 10;
+      const _deskRestoreUniforms = {
+        uDeskAmbient: { value: new THREE.Vector3() },
+        uDeskHemiSky: { value: new THREE.Vector3() },
+        uDeskHemiGround: { value: new THREE.Vector3() },
+        uDeskUp: { value: new THREE.Vector3(0, 1, 0) },
+        uDeskDirColor: { value: Array.from({ length: DESK_RESTORE_DIRS }, () => new THREE.Vector3()) },
+        uDeskDirView: { value: Array.from({ length: DESK_RESTORE_DIRS }, () => new THREE.Vector3(0, 1, 0)) },
+      };
+
+      /** Adds the restore term to a desk material's lighting (diffuse, after the scene's own lights). */
+      function patchDeskRestoreMaterial(m) {
+        if (!m || !(m.isMeshStandardMaterial || m.isMeshPhysicalMaterial) || _shaderPatched.has(m)) return;
+        _shaderPatched.add(m);
+        m.userData.deskRestore = true;
+        const prevCompile = m.onBeforeCompile;
+        m.onBeforeCompile = (shader, renderer) => {
+          if (prevCompile) prevCompile(shader, renderer);
+          Object.assign(shader.uniforms, _deskRestoreUniforms);
+          shader.fragmentShader = shader.fragmentShader
+            .replace(
+              "#include <common>",
+              `#include <common>
+              uniform vec3 uDeskAmbient;
+              uniform vec3 uDeskHemiSky;
+              uniform vec3 uDeskHemiGround;
+              uniform vec3 uDeskUp;
+              uniform vec3 uDeskDirColor[${DESK_RESTORE_DIRS}];
+              uniform vec3 uDeskDirView[${DESK_RESTORE_DIRS}];`,
+            )
+            .replace(
+              "#include <lights_fragment_end>",
+              `#include <lights_fragment_end>
+              {
+                vec3 deskIrr = uDeskAmbient + mix(uDeskHemiGround, uDeskHemiSky, 0.5 * dot(normal, uDeskUp) + 0.5);
+                for (int i = 0; i < ${DESK_RESTORE_DIRS}; i++) {
+                  deskIrr += uDeskDirColor[i] * max(dot(normal, uDeskDirView[i]), 0.0);
+                }
+                reflectedLight.directDiffuse = max(reflectedLight.directDiffuse + deskIrr * BRDF_Lambert(material.diffuseColor), vec3(0.0));
+              }`,
+            );
+        };
+        const prevKey = m.customProgramCacheKey ? m.customProgramCacheKey.bind(m) : null;
+        m.customProgramCacheKey = () => (prevKey ? prevKey() : "") + "|deskRestore";
+        m.needsUpdate = true;
+        _deskRestoreMaterials.push(m);
+      }
+
+      const _deskSurfaceUniforms = {
+        uDeskSurfTop: { value: new THREE.Vector3() },
+        uDeskSurfAmb: { value: new THREE.Vector3() },
+        uDeskSurfUp: { value: new THREE.Vector3(0, 1, 0) },
+      };
+      /** The desk top's white fill in dark mode (diffuse, in its shader). */
+      function patchDeskSurfaceMaterial(m) {
+        if (!m || !(m.isMeshStandardMaterial || m.isMeshPhysicalMaterial) || _shaderPatched.has(m)) return;
+        _shaderPatched.add(m);
+        m.userData.deskSurfaceFill = true;
+        const prevCompile = m.onBeforeCompile;
+        m.onBeforeCompile = (shader, renderer) => {
+          if (prevCompile) prevCompile(shader, renderer);
+          Object.assign(shader.uniforms, _deskSurfaceUniforms);
+          shader.fragmentShader = shader.fragmentShader
+            .replace(
+              "#include <common>",
+              `#include <common>
+              uniform vec3 uDeskSurfTop;
+              uniform vec3 uDeskSurfAmb;
+              uniform vec3 uDeskSurfUp;`,
+            )
+            .replace(
+              "#include <lights_fragment_end>",
+              `#include <lights_fragment_end>
+              reflectedLight.directDiffuse += (uDeskSurfAmb + uDeskSurfTop * max(dot(normal, uDeskSurfUp), 0.0)) * BRDF_Lambert(material.diffuseColor);`,
+            );
+        };
+        const prevKey = m.customProgramCacheKey ? m.customProgramCacheKey.bind(m) : null;
+        m.customProgramCacheKey = () => (prevKey ? prevKey() : "") + "|deskSurface";
+        m.needsUpdate = true;
+      }
+      const _deskSurfC = new THREE.Color();
+      function updateDeskSurfaceFill(cam) {
+        const f = GAMING_DARK.deskSurfaceFill;
+        const k = (1 - _deskRestoreBlend) * _gamingAccentLevel;
+        _deskSurfC.setHex(f.color);
+        _deskSurfaceUniforms.uDeskSurfTop.value.set(_deskSurfC.r, _deskSurfC.g, _deskSurfC.b).multiplyScalar(f.top * k);
+        _deskSurfaceUniforms.uDeskSurfAmb.value.set(_deskSurfC.r, _deskSurfC.g, _deskSurfC.b).multiplyScalar(f.ambient * k);
+        _deskSurfaceUniforms.uDeskSurfUp.value.set(0, 1, 0).transformDirection(cam.matrixWorldInverse);
+      }
+
+      // Dark-mode fill for single objects (car, cones), in their shaders.
+      function makeDarkFillUniforms() {
+        return {
+          uDarkFillAmb: { value: new THREE.Vector3() },
+          uDarkFillKey: { value: new THREE.Vector3() },
+          uDarkFillKeyDir: { value: new THREE.Vector3(0, 1, 0) },
+          uDarkFillRim: { value: new THREE.Vector3() },
+          uDarkFillRimDir: { value: new THREE.Vector3(0, 1, 0) },
+        };
+      }
+      const _carFillUniforms = makeDarkFillUniforms();
+      const _coneFillUniforms = makeDarkFillUniforms();
+      function patchDarkFillMaterial(m, uniforms, key) {
+        if (!m || !(m.isMeshStandardMaterial || m.isMeshPhysicalMaterial) || _shaderPatched.has(m)) return;
+        _shaderPatched.add(m);
+        m.userData.darkFill = key;
+        const prevCompile = m.onBeforeCompile;
+        m.onBeforeCompile = (shader, renderer) => {
+          if (prevCompile) prevCompile(shader, renderer);
+          Object.assign(shader.uniforms, uniforms);
+          shader.fragmentShader = shader.fragmentShader
+            .replace(
+              "#include <common>",
+              `#include <common>
+              uniform vec3 uDarkFillAmb;
+              uniform vec3 uDarkFillKey;
+              uniform vec3 uDarkFillKeyDir;
+              uniform vec3 uDarkFillRim;
+              uniform vec3 uDarkFillRimDir;`,
+            )
+            .replace(
+              "#include <lights_fragment_end>",
+              `#include <lights_fragment_end>
+              reflectedLight.directDiffuse += (uDarkFillAmb
+                + uDarkFillKey * max(dot(normal, uDarkFillKeyDir), 0.0)
+                + uDarkFillRim * max(dot(normal, uDarkFillRimDir), 0.0)) * BRDF_Lambert(material.diffuseColor);`,
+            );
+        };
+        const prevKey = m.customProgramCacheKey ? m.customProgramCacheKey.bind(m) : null;
+        m.customProgramCacheKey = () => (prevKey ? prevKey() : "") + "|darkFill";
+        m.needsUpdate = true;
+      }
+      const _fillC = new THREE.Color();
+      const _fillV = new THREE.Vector3();
+      function _setFillColor(out, hex, intensity) {
+        _fillC.setHex(hex);
+        return out.set(_fillC.r, _fillC.g, _fillC.b).multiplyScalar(intensity);
+      }
+      /** The car's body, wheels and frame (not its lamps, which glow on their own). */
+      let _carFillPatched = false;
+      function patchCarDarkFill() {
+        if (_carFillPatched || !car || !_carBloomReady) return; // the car's meshes have loaded
+        _carFillPatched = true;
+        car.traverse((o) => {
+          if (!o.isMesh) return;
+          const ms = Array.isArray(o.material) ? o.material : [o.material];
+          for (const m of ms) {
+            if (!m || m._isCarLightMaterial || (m.emissive && m.emissive.getHex() !== 0)) continue;
+            patchDarkFillMaterial(m, _carFillUniforms, "car");
+          }
+        });
+      }
+      /** The cones (moved into their own groups, outside the model) and their stripes. */
+      const _coneStripeMats = [];
+      let _conesPatched = false;
+      function patchConesDarkFill() {
+        if (_conesPatched || !_officeIntroRig) return; // after the scene's setup (cones get their own cloned materials)
+        let found = 0;
+        scene.traverse((o) => {
+          if (!o.isMesh || !/^conus(Strips)?\d*$/.test(o.name)) return;
+          found++;
+          patchDarkFillMaterial(o.material, _coneFillUniforms, "cone");
+          if (/Strips/.test(o.name) && !_coneStripeMats.includes(o.material)) {
+            o.material.emissive.setHex(GAMING_DARK.coneFill.stripeEmissive.color);
+            o.material.emissiveIntensity = 0;
+            _coneStripeMats.push(o.material);
+          }
+        });
+        if (found) _conesPatched = true;
+      }
+      const _eyeWhiteMats = [];
+      /** The eyeballs' material (set by setupEyeTracking): white, with a soft white glow. */
+      function setupEyeWhite() {
+        eyeBallMaterial.color.setHex(0xffffff);
+        eyeBallMaterial.emissive.setHex(0xffffff);
+        _eyeWhiteMats.push(eyeBallMaterial);
+      }
+      /** Per frame, with the render camera: the fills follow the car / mode. */
+      function updateDarkFills(cam) {
+        patchCarDarkFill();
+        patchConesDarkFill();
+        const k = (1 - _deskRestoreBlend) * _gamingAccentLevel;
+        const view = cam.matrixWorldInverse;
+        const cf = GAMING_DARK.carFill;
+        if (car) {
+          const yaw = carState.angle + (carState.driftAngle || 0);
+          const fx = Math.sin(yaw);
+          const fz = Math.cos(yaw);
+          _setFillColor(_carFillUniforms.uDarkFillAmb.value, 0xffffff, cf.ambient * k);
+          _setFillColor(_carFillUniforms.uDarkFillKey.value, cf.key.color, cf.key.intensity * k);
+          _carFillUniforms.uDarkFillKeyDir.value.set(fx * cf.key.forward, 1, fz * cf.key.forward).normalize().transformDirection(view);
+          _setFillColor(_carFillUniforms.uDarkFillRim.value, cf.rim.color, cf.rim.intensity * k);
+          _carFillUniforms.uDarkFillRimDir.value.set(-fx, cf.rim.up, -fz).normalize().transformDirection(view);
+        }
+        const co = GAMING_DARK.coneFill;
+        _setFillColor(_coneFillUniforms.uDarkFillAmb.value, 0xffffff, co.ambient * k);
+        _setFillColor(_coneFillUniforms.uDarkFillKey.value, co.key.color, co.key.intensity * k);
+        _fillV.set(co.key.dir[0], co.key.dir[1], co.key.dir[2]);
+        _coneFillUniforms.uDarkFillKeyDir.value.copy(_fillV).normalize().transformDirection(view);
+        _coneFillUniforms.uDarkFillRim.value.set(0, 0, 0);
+        for (const m of _coneStripeMats) m.emissiveIntensity = co.stripeEmissive.intensity * k;
+        if (!_eyeWhiteMats.length) setupEyeWhite();
+        const ew = GAMING_DARK.eyeWhite;
+        const eyeGlow = ew.bright + (ew.dark - ew.bright) * k;
+        for (const m of _eyeWhiteMats) m.emissiveIntensity = eyeGlow;
+      }
+
+      /** Window glass: no direct light from spot lights (their highlights showed as dots on it). */
+      function patchGlassIgnoreSpots(m) {
+        if (!m || _shaderPatched.has(m)) return;
+        const chunk = THREE.ShaderChunk.lights_fragment_begin;
+        const spotInfo = /(getSpotLightInfo\([^;]*\);)/;
+        if (!spotInfo.test(chunk)) return;
+        _shaderPatched.add(m);
+        m.userData.ignoresSpots = true;
+        const prevCompile = m.onBeforeCompile;
+        m.onBeforeCompile = (shader, renderer) => {
+          if (prevCompile) prevCompile(shader, renderer);
+          shader.fragmentShader = shader.fragmentShader.replace(
+            "#include <lights_fragment_begin>",
+            chunk.replace(spotInfo, "$1\n\t\tdirectLight.color = vec3( 0.0 );"),
+          );
+        };
+        const prevKey = m.customProgramCacheKey ? m.customProgramCacheKey.bind(m) : null;
+        m.customProgramCacheKey = () => (prevKey ? prevKey() : "") + "|noSpots";
+        m.needsUpdate = true;
+      }
+
+      /**
+       * Dark mode desk lighting: finds what sits on the desk (from positions
+       * relative to its top, not a list) and gives their materials the
+       * backup's dark-mode lighting.
+       */
+      function setupGamingDeskLighting(model) {
+        const plate = model.getObjectByName("tablePlate");
+        if (!plate) return;
+        model.updateMatrixWorld(true);
+        const desk = new THREE.Box3().setFromObject(plate);
+        const top = desk.max.y;
+        const box = new THREE.Box3();
+        const found = new Set();
+        model.traverse((node) => {
+          if (!node.isMesh || !node.visible || node === plate) return;
+          if (/physic|phisic|trigger/i.test(node.name)) return; // physics / trigger helpers, not visible objects
+          box.setFromObject(node);
+          if (box.isEmpty()) return;
+          const cx = (box.min.x + box.max.x) / 2;
+          const cz = (box.min.z + box.max.z) / 2;
+          const onTop = box.min.y >= top - 0.15 && box.min.y <= top + 1.2 && box.max.y > top + 0.05;
+          const overDesk = cx >= desk.min.x && cx <= desk.max.x && cz >= desk.min.z && cz <= desk.max.z;
+          if (!onTop || !overDesk) return;
+          // Report the object (its top-level part under the model).
+          let part = node;
+          while (part.parent && part.parent !== model) part = part.parent;
+          found.add(part.name || node.name);
+          const mats = Array.isArray(node.material) ? node.material : [node.material];
+          for (const m of mats) patchDeskRestoreMaterial(m);
+        });
+        // The desk top: a white fill; the window glass: no spot highlights.
+        const plateMats = Array.isArray(plate.material) ? plate.material : [plate.material];
+        for (const m of plateMats) patchDeskSurfaceMaterial(m);
+        if (GAMING_DARK.windowGlassIgnoresSpots) {
+          scene.traverse((o) => {
+            if (o.name === "windowGlass" && o.material) patchGlassIgnoreSpots(o.material);
+          });
+        }
+        // The gums are one instanced mesh outside the model.
+        if (gumInstancedMesh) {
+          patchDeskRestoreMaterial(gumInstancedMesh.material);
+          found.add("gums");
+        }
+        gamingDeskObjects = [...found];
+      }
+
+      const _drC = new THREE.Color();
+      const _drC2 = new THREE.Color();
+      const _drV = new THREE.Vector3();
+      const _drDir = new THREE.Vector3();
+      const _drInvView = new THREE.Matrix3();
+      /** color (linear) × intensity into a vector */
+      function _lightVec(color, intensity, out) {
+        return out.set(color.r * intensity, color.g * intensity, color.b * intensity);
+      }
+      /** The backup's value at blend b (its dark preset ↔ the shared bright preset), as color × intensity. */
+      function _backupVec(darkHex, darkI, brightHex, brightI, b, out) {
+        _drC.setHex(darkHex);
+        _drC2.setHex(brightHex);
+        _drC.lerp(_drC2, b);
+        return _lightVec(_drC, darkI + (brightI - darkI) * b, out);
+      }
+      let _deskDirSlot = 0;
+      function _pushDeskDir(worldDir, vec, viewMat) {
+        if (_deskDirSlot >= DESK_RESTORE_DIRS) return;
+        _deskRestoreUniforms.uDeskDirView.value[_deskDirSlot].copy(worldDir).transformDirection(viewMat);
+        _deskRestoreUniforms.uDeskDirColor.value[_deskDirSlot].copy(vec);
+        _deskDirSlot++;
+      }
+      function _lightWorldDir(light, out) {
+        light.updateMatrixWorld();
+        light.target.updateMatrixWorld();
+        out.setFromMatrixPosition(light.matrixWorld);
+        _drV.setFromMatrixPosition(light.target.matrixWorld);
+        return out.sub(_drV).normalize();
+      }
+
+      /**
+       * Per frame (with the camera used for this render): the backup's light on
+       * the desk objects minus what the live lights give them.
+       */
+      function updateDeskRestore(cam) {
+        if (!_deskRestoreMaterials.length) return;
+        const R = GAMING_DARK.deskRestore;
+        const b = _deskRestoreBlend;
+        cam.updateMatrixWorld();
+        const view = cam.matrixWorldInverse;
+        const U = _deskRestoreUniforms;
+        // Ambient and hemisphere.
+        _backupVec(R.ambient.color, R.ambient.intensity, brightMode.ambient.color, brightMode.ambient.intensity, b, U.uDeskAmbient.value)
+          .sub(_lightVec(ambient.color, ambient.intensity, _drV));
+        _backupVec(R.hemisphere.sky, R.hemisphere.intensity, brightMode.hemisphere.sky, brightMode.hemisphere.intensity, b, U.uDeskHemiSky.value)
+          .sub(_lightVec(hemisphere.color, hemisphere.intensity, _drV));
+        _backupVec(R.hemisphere.ground, R.hemisphere.intensity, brightMode.hemisphere.ground, brightMode.hemisphere.intensity, b, U.uDeskHemiGround.value)
+          .sub(_lightVec(hemisphere.groundColor, hemisphere.intensity, _drV));
+        U.uDeskUp.value.set(0, 1, 0).transformDirection(view);
+        // Directional lights: + the backup's (its direction), − the live one (its direction).
+        _deskDirSlot = 0;
+        const dirs = [
+          ["dirPink", dirPink],
+          ["dirBlue", dirBlue],
+          ["dirFillPink", dirFillPink],
+          ["dirFillBlue", dirFillBlue],
+        ];
+        const tmp = new THREE.Vector3();
+        for (const [key, light] of dirs) {
+          const o = R.directional[key];
+          const live = _lightVec(light.color, light.intensity, tmp.clone());
+          const back = _backupVec(o.color, o.intensity, brightMode[key].color, brightMode[key].intensity, b, tmp.clone());
+          _pushDeskDir(_lightWorldDir(light, _drDir), back.sub(live), view);
+        }
+        // The two old dark-only fills (now reused as rims, other directions; dark only in both).
+        for (const [key, light] of [["darkBlueFill", darkBlueFill], ["darkPurpleFill", darkPurpleFill]]) {
+          const o = R.directional[key];
+          _drC.setHex(o.color);
+          _drDir.set(o.pos[0], o.pos[1], o.pos[2]).normalize();
+          _pushDeskDir(_drDir, _lightVec(_drC, o.intensity * (1 - b), tmp.clone()), view);
+          _pushDeskDir(_lightWorldDir(light, _drDir), _lightVec(light.color, light.intensity, tmp.clone()).multiplyScalar(-1), view);
+        }
+        // Shadow lights: the backup kept them white @ 0.22 in both modes.
+        _drC.setHex(R.shadowLights.color);
+        for (const light of [carShadowLight, wallShadowLight]) {
+          const back = _lightVec(_drC, R.shadowLights.intensity, tmp.clone());
+          _pushDeskDir(_lightWorldDir(light, _drDir), back.sub(_lightVec(light.color, light.intensity, _drV)), view);
+        }
+        for (; _deskDirSlot < DESK_RESTORE_DIRS; _deskDirSlot++) U.uDeskDirColor.value[_deskDirSlot].set(0, 0, 0);
+      }
+
       function applyDarkModePreset(src) {
         for (const k of Object.keys(src)) {
           const v = src[k];
@@ -1980,10 +3019,37 @@ let _officeSceneAnimationFrame = 0;
           brightMode.warmFill.intensity,
         );
         const darkBlueStr = 1 - b;
-        darkBlueLight.intensity = darkBlueStr * 2.5;
-        darkBlueFill.intensity = darkBlueStr * 1.4;
-        darkPinkLight.intensity = darkBlueStr * 1.5;
-        darkPurpleFill.intensity = darkBlueStr * 1.2;
+        const reusedK = darkBlueStr * _gamingAccentLevel;
+        darkBlueLight.intensity = reusedK * GAMING_DARK.underDeskGlow.intensity;
+        darkPinkLight.intensity = reusedK * GAMING_DARK.wallGlow.intensity;
+        darkPurpleFill.intensity = reusedK * GAMING_DARK.rimMagenta.intensity;
+        darkBlueFill.intensity = reusedK * GAMING_DARK.rimBlue.intensity;
+        _cDark.setHex(GAMING_DARK.shadowLights.color);
+        _cBright.setHex(0xffffff);
+        carShadowLight.color.lerpColors(_cDark, _cBright, b);
+        wallShadowLight.color.lerpColors(_cDark, _cBright, b);
+        carShadowLight.intensity = wallShadowLight.intensity = _blendBright(
+          GAMING_DARK.shadowLights.intensity,
+          SHADOW_LIGHT_BRIGHT_INTENSITY,
+        );
+        const accentK = darkBlueStr * _gamingAccentLevel;
+        for (let i = 0; i < _gamingAccentLights.length; i++) {
+          const l = _gamingAccentLights[i];
+          l.intensity = l.userData.darkIntensity * accentK;
+        }
+        _deskRestoreBlend = b;
+        // Lights at zero still cost per pixel: hide dark-only lights in bright mode and
+        // bright-only lights in dark mode (the three sets are compiled behind the loader).
+        const darkOn = b < 1 - 1e-4;
+        const brightOn = b > 1e-4;
+        for (let i = 0; i < _gamingAccentLights.length; i++) _gamingAccentLights[i].visible = darkOn;
+        for (let i = 0; i < _gamingReused.length; i++) _gamingReused[i][0].visible = darkOn;
+        warmKeyLight.visible = brightOn;
+        warmFillLight.visible = brightOn;
+        for (let i = 0; i < _gamingEmissives.length; i++) {
+          const e = _gamingEmissives[i];
+          e.material.emissiveIntensity = e.bright + (e.dark - e.bright) * accentK;
+        }
         for (let i = 0; i < _darkModeOnlyLights.length; i++) {
           const dl = _darkModeOnlyLights[i];
           if (!dl) continue;
@@ -2048,14 +3114,6 @@ let _officeSceneAnimationFrame = 0;
         }
       }
       document.addEventListener("keydown", (e) => {
-        if (e.code === "Digit1") {
-          e.preventDefault();
-          switchToCarCamera();
-        }
-        if (e.code === "Digit2") {
-          e.preventDefault();
-          switchToFreeInspectionCamera();
-        }
         if (e.code === "KeyO") {
           e.preventDefault();
           if (!compactSpacingActive) lightBlendTarget = 0; // dark + windowTris closed
@@ -2084,14 +3142,6 @@ let _officeSceneAnimationFrame = 0;
         }
         if (e.code === "KeyQ") {
           e.preventDefault();
-        }
-        if (e.code === "KeyM") {
-          e.preventDefault();
-          if (drawerGroup && _drawerState === "closed") {
-            _drawerState = "opening";
-            _drawerAnimStart = performance.now();
-            _drawerOrigZ = drawerGroup.position.z;
-          }
         }
         if (e.code === "KeyG") {
           e.preventDefault();
@@ -3911,8 +4961,15 @@ let _officeSceneAnimationFrame = 0;
         });
       }
 
+      /**
+       * The charger cup (phoneChargerCup, the drawer's trigger): a light grey
+       * instead of pure white (was 0xffffff), so it sits at the desk's
+       * brightness in both modes: a white, fully rough disc on top of the dark
+       * mode's desk fill read brighter than everything around it.
+       */
+      const PHONE_CHARGER_CUP = { color: 0xc0c0c8 };
       const phoneChargerCupMaterial = new THREE.MeshStandardMaterial({
-        color: 0xffffff,
+        color: PHONE_CHARGER_CUP.color,
         transparent: true,
         opacity: 0.88,
         roughness: 1,
@@ -4240,6 +5297,8 @@ let _officeSceneAnimationFrame = 0;
       let _handWalkTriggerWasInside = false;
       let _handTriggerInsideTime = 0;
       let _handWalkZPhase = 0;
+      /** 0..1: the intro shows the hand's green flame (set by the intro only). */
+      let _introHandFxDemo = 0;
       let _handWalkZMoveT = 0;
       let _handWalkZTriggeredThisVisit = false;
       const HAND_TRIGGER_HOLD_SEC = 3;
@@ -4294,6 +5353,8 @@ let _officeSceneAnimationFrame = 0;
         allowSleep: true,
       });
       physicsWorld.broadphase = new CANNON.SAPBroadphase(physicsWorld);
+      // Pair bodies by their boxes, not bounding spheres: a flat desk box's sphere covers every gum.
+      physicsWorld.broadphase.useBoundingBoxes = true;
       physicsWorld.solver.iterations = perfSettings.physicsIterations;
       physicsWorld.defaultContactMaterial.friction = 0.5;
       physicsWorld.defaultContactMaterial.restitution = 0.1;
@@ -4321,7 +5382,8 @@ let _officeSceneAnimationFrame = 0;
       let duckBodyPhysBody = null;
       let panHolderPhysBody = null;
 
-      const GUM_COUNT = 80;
+      /** Gums in the machine (80 filled about a third of the tank, 380 about 78%; 230 fills it to ~55%). */
+      const GUM_COUNT = 230;
       const GUM_PHYS_FIXED_STEP = 1 / 120;
       const GUM_PHYS_FIXED_STEP_DYNAMIC = 1 / 60;
       const GUM_PHYS_MAX_SUBSTEPS_FILL = 5;
@@ -6340,6 +7402,22 @@ let _officeSceneAnimationFrame = 0;
         syncStarFromPhysics();
       }
 
+      // Kitchen-transition light tunnel inside the portal: streaks in the kitchen
+      // palette rush out of the dark centre toward the rings, speeding up on the
+      // same curve as the kitchen loader's streaks.
+      /** Angular slots for streaks (about this many lanes around the portal). */
+      const DRAWER_PORTAL_WARP_LANES = 120;
+      /** Share of lanes that carry a streak (0..1). */
+      const DRAWER_PORTAL_WARP_FILL = 0.55;
+      /** Streak speed: start, gain and the seconds it takes to reach full speed (kitchen loader: 0.35, 2.65, 6.2). */
+      const DRAWER_PORTAL_WARP_SPEED_START = 0.35;
+      const DRAWER_PORTAL_WARP_SPEED_GAIN = 2.65;
+      const DRAWER_PORTAL_WARP_RAMP_SEC = 6.2;
+      /** Streak brightness (added light) and how dark the tunnel's centre gets (0 = no darkening). */
+      const DRAWER_PORTAL_WARP_INTENSITY = 2.1;
+      const DRAWER_PORTAL_WARP_CENTER_DARKEN = 0.55;
+      const glslFloat = (v) => (Number.isInteger(v) ? `${v}.0` : `${v}`);
+
       function createDrawerPortalMaterial(layer) {
         return new THREE.ShaderMaterial({
           uniforms: {
@@ -6368,11 +7446,27 @@ let _officeSceneAnimationFrame = 0;
             uniform float uOpacity;
 
             #define PI 3.14159265359
+            #define WARP_LANES ${glslFloat(DRAWER_PORTAL_WARP_LANES)}
+            #define WARP_FILL ${glslFloat(DRAWER_PORTAL_WARP_FILL)}
+            #define WARP_SPEED_START ${glslFloat(DRAWER_PORTAL_WARP_SPEED_START)}
+            #define WARP_SPEED_GAIN ${glslFloat(DRAWER_PORTAL_WARP_SPEED_GAIN)}
+            #define WARP_RAMP_SEC ${glslFloat(DRAWER_PORTAL_WARP_RAMP_SEC)}
+            #define WARP_INTENSITY ${glslFloat(DRAWER_PORTAL_WARP_INTENSITY)}
+            #define WARP_CENTER_DARKEN ${glslFloat(DRAWER_PORTAL_WARP_CENTER_DARKEN)}
 
             float hash21(vec2 p) {
               p = fract(p * vec2(123.34, 456.21));
               p += dot(p, p + 45.32);
               return fract(p.x * p.y);
+            }
+
+            // Kitchen transition palette (#165dff #2090ff #715cff #ff319d #d52cff), linear.
+            vec3 kitchenStreakColor(float i) {
+              if (i < 1.0) return vec3(0.008, 0.107, 1.0);
+              if (i < 2.0) return vec3(0.015, 0.279, 1.0);
+              if (i < 3.0) return vec3(0.165, 0.107, 1.0);
+              if (i < 4.0) return vec3(1.0, 0.030, 0.337);
+              return vec3(0.665, 0.025, 1.0);
             }
 
             float energyRing(float r, float center, float width) {
@@ -6454,9 +7548,37 @@ let _officeSceneAnimationFrame = 0;
               float halo =
                 exp(-abs(r - outerR) * 11.0) * 0.42 +
                 exp(-abs(r - innerR) * 14.0) * 0.3;
+              // Light tunnel (kitchen transition): dark centre, streaks racing outward.
+              float tunnelDepth = mix(1.0 - WARP_CENTER_DARKEN, 1.0, smoothstep(0.0, 0.7, r));
+              abyss *= tunnelDepth;
+              float rampT = min(uTime, WARP_RAMP_SEC);
+              float warpT =
+                WARP_SPEED_START * rampT +
+                WARP_SPEED_GAIN * WARP_RAMP_SEC / 3.2 * pow(rampT / WARP_RAMP_SEC, 3.2) +
+                (WARP_SPEED_START + WARP_SPEED_GAIN) * max(uTime - WARP_RAMP_SEC, 0.0);
+              float lanePos = (a + PI) / (2.0 * PI) * WARP_LANES;
+              float lane = floor(lanePos);
+              float laneRnd = hash21(vec2(lane, 7.13));
+              float laneSpeed = 0.55 + hash21(vec2(lane, 19.7)) * 0.9;
+              float depth = fract(warpT * laneSpeed * 0.42 + laneRnd);
+              float headR = mix(0.03, portalFillR, depth * depth);
+              float tailLen = 0.04 + 0.34 * depth * depth;
+              float alongStreak =
+                smoothstep(headR - tailLen, headR, r) *
+                (1.0 - smoothstep(headR, headR + 0.012, r));
+              float across = abs(fract(lanePos) - 0.5);
+              float streakCore = 1.0 - smoothstep(0.05, 0.12, across);
+              float streakGlow = 1.0 - smoothstep(0.1, 0.5, across);
+              float streak =
+                alongStreak * (streakCore + streakGlow * 0.4) *
+                smoothstep(0.0, 0.22, depth) *
+                step(1.0 - WARP_FILL, hash21(vec2(lane, 3.71))) *
+                portalMask * (uLayer < 0.5 ? 1.0 : 0.0);
+              vec3 streakColor = kitchenStreakColor(floor(laneRnd * 5.0));
               vec3 color =
                 abyss * portalMask * (uLayer < 0.5 ? 1.0 : 0.18) +
-                energyColor * (ringGlow + halo + sparks * 2.4);
+                energyColor * (ringGlow + halo + sparks * 2.4) +
+                streakColor * streak * WARP_INTENSITY;
               color +=
                 vec3(1.2, 0.08, 0.5) * outerCore +
                 vec3(0.03, 0.25, 1.05) * innerCore;
@@ -6924,7 +8046,6 @@ let _officeSceneAnimationFrame = 0;
               gl_FragColor = vec4(electricBlue * (0.8 + core * 1.6), alpha);
             }
           `,
-          vertexColors: true,
           transparent: true,
           blending: THREE.AdditiveBlending,
           depthWrite: false,
@@ -7106,6 +8227,16 @@ let _officeSceneAnimationFrame = 0;
         }
         _drawerEffectMesh.frustumCulled = false;
         _drawerEffectMesh.visible = false;
+      }
+
+      /**
+       * Shows the closed drawer's portal (fully transparent, its light at 0) so
+       * its shaders compile behind the loader instead of when the drawer opens.
+       */
+      function setDrawerPortalWarmup(on) {
+        if (!_drawerEffectMesh || _drawerState !== "closed") return;
+        _drawerEffectMesh.visible = on;
+        if (_drawerPortalPointLight) _drawerPortalPointLight.intensity = 0;
       }
 
       function setDrawerPortalActive(active) {
@@ -7403,6 +8534,10 @@ let _officeSceneAnimationFrame = 0;
         }
         _drawerOrigZ = drawerGroup.position.z;
         setupDrawerPortalEffect();
+        // The portal's light lives on the drawer (always shown, dark while closed)
+        // instead of the hidden portal mesh: the scene's light count then never
+        // changes when the drawer opens, so nothing has to recompile at that moment.
+        if (_drawerPortalPointLight) drawerGroup.attach(_drawerPortalPointLight);
       }
 
       function updateDrawerAnimation() {
@@ -7434,8 +8569,110 @@ let _officeSceneAnimationFrame = 0;
             drawerGroup.position.z = _drawerOrigZ;
             _drawerState = "closed";
             if (_drawerEffectMesh) _drawerEffectMesh.visible = false;
+            if (_drawerPortalPointLight) _drawerPortalPointLight.intensity = 0;
           }
         }
+      }
+
+      // The drawer opens when the car stands on phoneChargerCup (it used to be the M key).
+      /** Extra radius around the cup's top (world units) the car's centre may be within. */
+      const DRAWER_CUP_MARGIN = 0.35;
+      /** Seconds the car must stay on the cup before the drawer opens. */
+      const DRAWER_CUP_HOLD_SEC = 0.4;
+      /** Max gap between the car's wheels and the cup's top to count as touching it (not flying over). */
+      const DRAWER_CUP_CONTACT_TOLERANCE = 0.3;
+      /** Glow colour on the charger while the car is on it (the kitchen transition's blue). */
+      const DRAWER_CUP_CUE_COLOR = 0x2090ff;
+      /** Cup glow strength at full charge (emissive intensity; was 0.55, far below the bloom threshold). */
+      const DRAWER_CUP_CUE_CUP_EMISSIVE = 0.3;
+      /** Seconds for the glow to fade after the car leaves. */
+      const DRAWER_CUP_CUE_FADE_SEC = 0.35;
+      let _drawerCupHold = 0;
+      /** false after the cup opened the drawer, until the car has left the cup and the drawer has closed. */
+      let _drawerCupArmed = true;
+      let _drawerCupCue = 0;
+      let _drawerCupBoundsReady = false;
+      let _drawerCupRadius = 0;
+      let _drawerCupTopY = 0;
+      const _drawerCupCenter = new THREE.Vector3();
+      const _drawerCupBox = new THREE.Box3();
+      const _drawerCupLightBaseColor = new THREE.Color();
+      const _drawerCupLightBaseEmissive = new THREE.Color();
+      const _drawerCupCueColor = new THREE.Color(DRAWER_CUP_CUE_COLOR);
+
+      /** Same as the old M key: starts the drawer's opening animation (and everything after it). */
+      const _drawerErrorsLogged = new Set();
+      /** A problem in the drawer's trigger or animation is logged once, and the scene keeps running. */
+      function logDrawerErrorOnce(where, err) {
+        if (_drawerErrorsLogged.has(where)) return;
+        _drawerErrorsLogged.add(where);
+        console.error(`[office] drawer ${where} failed:`, err);
+      }
+
+      function openDrawerFromCharger() {
+        if (!drawerGroup || _drawerState !== "closed") return false;
+        _drawerState = "opening";
+        _drawerAnimStart = performance.now();
+        _drawerOrigZ = drawerGroup.position.z;
+        return true;
+      }
+
+      function isCarStandingOnChargerCup() {
+        if (!car || !phoneChargerCupMesh || carFalling) return false;
+        if (!_drawerCupBoundsReady) {
+          _drawerCupBox.setFromObject(phoneChargerCupMesh);
+          _drawerCupBox.getCenter(_drawerCupCenter);
+          _drawerCupRadius =
+            Math.max(
+              _drawerCupBox.max.x - _drawerCupBox.min.x,
+              _drawerCupBox.max.z - _drawerCupBox.min.z,
+            ) / 2;
+          _drawerCupTopY = _drawerCupBox.max.y;
+          _drawerCupLightBaseColor.copy(phoneChargerLightMaterial.color);
+          _drawerCupLightBaseEmissive.copy(phoneChargerLightMaterial.emissive);
+          _drawerCupBoundsReady = true;
+        }
+        const dx = car.position.x - _drawerCupCenter.x;
+        const dz = car.position.z - _drawerCupCenter.z;
+        if (dx * dx + dz * dz > (_drawerCupRadius + DRAWER_CUP_MARGIN) ** 2)
+          return false;
+        // Touching: on the ground (not in the air) with its wheels at the cup's top.
+        if (carState.velY !== 0) return false;
+        const wheelsY = car.position.y - carBottomOffsetY;
+        return Math.abs(wheelsY - _drawerCupTopY) <= DRAWER_CUP_CONTACT_TOLERANCE;
+      }
+
+      /** Per frame: hold timer, one opening per visit, and the glow cue on the charger. */
+      function updateDrawerCupTrigger(realDt) {
+        const onCup = officeIntro.state === "done" && isCarStandingOnChargerCup();
+        if (onCup) {
+          if (_drawerCupArmed && _drawerState === "closed") {
+            _drawerCupHold += realDt;
+            if (_drawerCupHold >= DRAWER_CUP_HOLD_SEC && openDrawerFromCharger()) {
+              _drawerCupArmed = false;
+            }
+          }
+        } else {
+          _drawerCupHold = 0;
+          if (!_drawerCupArmed && _drawerState === "closed") _drawerCupArmed = true;
+        }
+        // Cue: fills while holding, full while the drawer it opened is out.
+        const cueTarget = onCup
+          ? _drawerCupArmed
+            ? Math.min(1, _drawerCupHold / DRAWER_CUP_HOLD_SEC)
+            : 1
+          : 0;
+        _drawerCupCue =
+          cueTarget > _drawerCupCue
+            ? cueTarget
+            : Math.max(cueTarget, _drawerCupCue - realDt / DRAWER_CUP_CUE_FADE_SEC);
+        if (!_drawerCupBoundsReady) return;
+        const k = _drawerCupCue;
+        if (k === 0 && phoneChargerCupMaterial.emissiveIntensity === 0) return;
+        phoneChargerLightMaterial.color.lerpColors(_drawerCupLightBaseColor, _drawerCupCueColor, k);
+        phoneChargerLightMaterial.emissive.lerpColors(_drawerCupLightBaseEmissive, _drawerCupCueColor, k);
+        phoneChargerCupMaterial.emissive.copy(_drawerCupCueColor);
+        phoneChargerCupMaterial.emissiveIntensity = k * DRAWER_CUP_CUE_CUP_EMISSIVE;
       }
 
       function setupSimplePropPhysics(model, meshName, mass, shapeType) {
@@ -7883,7 +9120,7 @@ let _officeSceneAnimationFrame = 0;
       /** Neighbouring pieces overlap by this factor so gums can't slip through the seams. */
       const GUM_TANK_WALL_OVERLAP = 1.15;
       /** Wall pieces per physics body (8 = 90° arcs): balances broadphase bodies vs shapes tested per pair. */
-      const GUM_TANK_WALL_CELLS_PER_BODY = 8;
+      const GUM_TANK_WALL_CELLS_PER_BODY = 2;
       /** After a hit the world steps at this fixed rate (was one 1/60 step, max 2) so gums can't jump a wall in one step. */
       const GUM_HIT_PHYS_FIXED_STEP = 1 / 120;
       /** Same per-frame physics budget as before the fix (2 × 1/60 s), so slow frames can't snowball. */
@@ -8125,6 +9362,34 @@ let _officeSceneAnimationFrame = 0;
         }
       }
 
+      /**
+       * During a release every gum still in the tank stays fully dynamic and
+       * awake (no sleeping, no freezing) until it leaves through the bottom
+       * hole, so the whole pile sinks as the bottom drains.
+       */
+      function keepTankGumsAwakeForRelease() {
+        if (!_gumDispenserBecameDynamic && gumReleased.size === 0) return;
+        for (let i = 0; i < gumsAddedCount; i++) {
+          const b = gumBodies[i];
+          if (b._exitedGumTank) continue;
+          if (!_gumDispenserBecameDynamic && !gumReleased.has(i)) continue;
+          if (b.type === CANNON.Body.STATIC) {
+            b.type = CANNON.Body.DYNAMIC;
+            b.mass = 0.5;
+            b.updateMassProperties();
+          }
+          b.allowSleep = false;
+          if (b.sleepState !== CANNON.Body.AWAKE) b.wakeUp();
+        }
+      }
+
+      /** Gums out of the tank come to rest (STATIC) below this speed and spin (a gum rolling at 0.3 spins ~2 rad/s; was 0.3 and 1.0 and only slept, so slow rollers never stopped)... */
+      const GUM_EXITED_SLEEP_SPEED = 0.3;
+      const GUM_EXITED_SLEEP_SPIN = 3.0;
+      /** ...for this long in a row (s; was 0.5). */
+      const GUM_EXITED_SLEEP_SEC = 0.35;
+      /** Spin damping once a gum leaves the machine (was 0.55 after a hit; the cup release already used 0.90). */
+      const GUM_EXITED_ANGULAR_DAMPING = 0.9;
       function anyGumLeftInTank() {
         for (let i = 0; i < gumsAddedCount; i++) if (!gumBodies[i]._exitedGumTank) return true;
         return false;
@@ -8980,6 +10245,20 @@ let _officeSceneAnimationFrame = 0;
         metalness: 0,
       });
 
+      /**
+       * The monitors' power LEDs (leftScreenLight / rightScreenLight): clean,
+       * slightly cool white, the same in bright and dark mode, bright enough to
+       * glow (bloom) above the bloom threshold. (They were missing from the
+       * model; the shared material below they used before is white @ 3.)
+       */
+      const SCREEN_LED = { color: 0xf2f6ff, emissiveIntensity: 15 };
+      const screenLedMaterial = new THREE.MeshStandardMaterial({
+        color: SCREEN_LED.color,
+        emissive: SCREEN_LED.color,
+        emissiveIntensity: SCREEN_LED.emissiveIntensity,
+        roughness: 0.2,
+        metalness: 0,
+      });
       function applyScreenLightsMaterial(model) {
         model.traverse((node) => {
           if (!node.isMesh) return;
@@ -8987,7 +10266,17 @@ let _officeSceneAnimationFrame = 0;
             node.name === "leftScreenLight" ||
             (node.parent && node.parent.name === "leftScreenLight") ||
             node.name === "rightScreenLight" ||
-            (node.parent && node.parent.name === "rightScreenLight") ||
+            (node.parent && node.parent.name === "rightScreenLight")
+          ) {
+            if (Array.isArray(node.material)) {
+              for (let i = 0; i < node.material.length; i++) node.material[i] = screenLedMaterial;
+            } else {
+              node.material = screenLedMaterial;
+            }
+            node.frustumCulled = false;
+            return;
+          }
+          if (
             node.name === "tableButtonsLight" ||
             (node.parent && node.parent.name === "tableButtonsLight")
           ) {
@@ -9034,6 +10323,24 @@ let _officeSceneAnimationFrame = 0;
 
       let reflectionPlaneMesh = null;
       let tableReflector = null;
+      /** The car's light bars (lightBar1 and its copies), found once the car is in the scene. */
+      const _reflectionLightBars = [];
+      const _hiddenForReflection = [];
+      function _hideLightBarsForReflection() {
+        if (!_reflectionLightBars.length && car) {
+          car.traverse((n) => {
+            if (n.isMesh && n.name === "lightBar1") _reflectionLightBars.push(n);
+          });
+        }
+        _hiddenForReflection.length = 0;
+        for (let i = 0; i < _reflectionLightBars.length; i++) {
+          const m = _reflectionLightBars[i];
+          if (!m.visible) continue;
+          m.visible = false;
+          _hiddenForReflection.push(m);
+        }
+        return _hiddenForReflection;
+      }
       let reflectionPlaneWorldPosition = null;
       let reflectionPlaneSurfaceY = null;
       const _reflectionBox = new THREE.Box3();
@@ -9060,17 +10367,6 @@ let _officeSceneAnimationFrame = 0;
           if (!_reflectionBox.isEmpty()) return _reflectionBox.max.y;
         }
         return reflectionPlaneSurfaceY ?? tableSurfaceY;
-      }
-
-      function getMeshTableReflectionPoint(mesh, tableY, out) {
-        mesh.updateWorldMatrix(true, false);
-        _reflectionBox.setFromObject(mesh);
-        out.set(
-          (_reflectionBox.min.x + _reflectionBox.max.x) * 0.5,
-          tableY + 0.006,
-          (_reflectionBox.min.z + _reflectionBox.max.z) * 0.5,
-        );
-        return out;
       }
 
       function setupCarShadowPlane(fallbackSize, fallbackCenter, fallbackTopY) {
@@ -9296,6 +10592,16 @@ let _officeSceneAnimationFrame = 0;
         reflectionPlaneMesh.visible = false;
         model.add(reflector);
         tableReflector = reflector;
+        // The desk's mirror doesn't show the light bars (their glow stays on the car only).
+        const _reflectorRender = reflector.onBeforeRender;
+        reflector.onBeforeRender = function (...args) {
+          const hidden = _hideLightBarsForReflection();
+          try {
+            _reflectorRender.apply(this, args);
+          } finally {
+            for (let i = 0; i < hidden.length; i++) hidden[i].visible = true;
+          }
+        };
         if (!reflectionPlaneWorldPosition)
           reflectionPlaneWorldPosition = new THREE.Vector3();
         model.localToWorld(reflectionPlaneWorldPosition.copy(_reflectionPos));
@@ -10702,6 +12008,8 @@ let _officeSceneAnimationFrame = 0;
         bigPos,
       ) {
         _handWalkFxTime += dt;
+        // The intro's demonstration of the hand's green flame (no trigger, no walk).
+        if (_introHandFxDemo > 0) smallTarget = Math.max(smallTarget, _introHandFxDemo);
         _handWalkSmallFxFade +=
           (THREE.MathUtils.clamp(smallTarget, 0, 1) - _handWalkSmallFxFade) *
           Math.min(1, dt * 10);
@@ -11082,111 +12390,62 @@ let _officeSceneAnimationFrame = 0;
         scheduleRebuildBloomDarkenLists();
       }
 
+      // The car's head / tail lamp spot lights and table glows, shared with the
+      // kitchen (game/carLighting.js). The office desk writes no stencil, so the
+      // glows aren't masked to it.
+      const carLighting = createCarLighting({
+        THREE,
+        scene,
+        beamTextureUrl: officeAsset("textures/headlight-beam.png") + "?v=dim3",
+        stencilRef: null,
+      });
       let tableLightGlows = [];
-      let _tableLightGlowTex = null;
-
-      function getTableLightGlowTexture() {
-        if (_tableLightGlowTex) return _tableLightGlowTex;
-        const c = document.createElement("canvas");
-        c.width = 128;
-        c.height = 128;
-        const ctx = c.getContext("2d");
-        const g = ctx.createRadialGradient(64, 64, 0, 64, 64, 64);
-        g.addColorStop(0, "rgba(255,255,255,1)");
-        g.addColorStop(0.28, "rgba(255,255,255,0.42)");
-        g.addColorStop(0.62, "rgba(255,255,255,0.08)");
-        g.addColorStop(1, "rgba(255,255,255,0)");
-        ctx.fillStyle = g;
-        ctx.fillRect(0, 0, 128, 128);
-        _tableLightGlowTex = new THREE.CanvasTexture(c);
-        _tableLightGlowTex.needsUpdate = true;
-        return _tableLightGlowTex;
-      }
-
-      function createTableLightGlowSprite(tint, baseSize) {
-        const mat = new THREE.SpriteMaterial({
-          map: getTableLightGlowTexture(),
-          color: tint,
-          transparent: true,
-          opacity: 0,
-          depthWrite: false,
-          depthTest: true,
-          blending: THREE.AdditiveBlending,
-        });
-        const sprite = new THREE.Sprite(mat);
-        sprite.scale.set(baseSize, baseSize * 0.72, 1);
-        sprite.visible = false;
-        sprite.renderOrder = 4;
-        scene.add(sprite);
-        return sprite;
-      }
+      const _carLampSpots = [];
+      /** One centred spot per lamp (2 car spots instead of the kitchen's 4, same total light) to keep the office fast. */
+      const OFFICE_CAR_SPOTS_PER_LAMP = 1;
 
       function setupTableLightReflections(carRoot) {
         tableLightGlows = [];
-        const specs = [
-          { name: "frontLights", color: 0xffffff, size: 0.44, kind: "front" },
-          { name: "rearLights", color: 0xff3333, size: 0.36, kind: "rear" },
-          {
-            name: "mainRearBrakeLights",
-            color: 0xff0000,
-            size: 0.4,
-            kind: "brake",
-          },
-        ];
-        for (let si = 0; si < specs.length; si++) {
-          const spec = specs[si];
-          const mesh = carRoot.getObjectByName(spec.name);
-          if (!mesh) continue;
-          tableLightGlows.push({
-            mesh,
-            sprite: createTableLightGlowSprite(spec.color, spec.size),
-            kind: spec.kind,
-            baseSize: spec.size,
-          });
-        }
-        carRoot.traverse((node) => {
-          if (!node.isMesh || node.name !== "lightBar1") return;
-          tableLightGlows.push({
-            mesh: node,
-            sprite: createTableLightGlowSprite(0xff2222, 0.24),
-            kind: "bar",
-            baseSize: 0.24,
-          });
-        });
+        carLighting.setupTableLightReflections(carRoot, tableLightGlows);
         scheduleRebuildBloomDarkenLists();
       }
 
-      function updateTableLightReflections() {
-        if (!tableLightGlows.length || !car || !perfSettings.reflection || sceneBloomEnabled) {
-          for (let gi = 0; gi < tableLightGlows.length; gi++) {
-            tableLightGlows[gi].sprite.visible = false;
-          }
-          return;
-        }
-        const tableY = getTablePlaySurfaceY();
-        if (tableY == null) return;
-        for (let gi = 0; gi < tableLightGlows.length; gi++) {
-          const entry = tableLightGlows[gi];
-          let alpha = 0;
-          if (entry.kind === "front") alpha = 0.82;
-          else if (entry.kind === "rear") alpha = 0.52;
-          else if (entry.kind === "brake") alpha = keys.brake ? 0.92 : 0.18;
-          else if (entry.kind === "bar") alpha = 0.38;
-          if (alpha < 0.02) {
-            entry.sprite.visible = false;
-            continue;
-          }
-          getMeshTableReflectionPoint(entry.mesh, tableY, _v0);
-          entry.sprite.position.copy(_v0);
-          const heightAbove = Math.max(0.12, _reflectionBox.max.y - tableY);
-          const sc = entry.baseSize * (0.88 + heightAbove * 0.06);
-          entry.sprite.scale.set(sc, sc * 0.72, 1);
-          entry.sprite.material.opacity = alpha;
-          entry.sprite.visible = true;
-        }
+      /** Head / tail lamp spots, once the car is scaled and on the desk. */
+      function attachCarHeadTailSpotLights() {
+        if (!car || _carLampSpots.length) return;
+        carLighting.attachCarHeadTailSpotLights(car, car, _carLampSpots, {
+          halfL,
+          carScale: storedCarScale,
+          tableY: getTablePlaySurfaceY(),
+          spotsPerLamp: OFFICE_CAR_SPOTS_PER_LAMP,
+        });
       }
 
-      function setupScreenVideo(mesh, video, canvas, videoSrc) {
+      function updateTableLightReflections() {
+        if (!car) return;
+        const tableY = getTablePlaySurfaceY();
+        if (tableY == null) return;
+        carLighting.aimCarLampSpots(_carLampSpots, car, tableY);
+        if (!tableLightGlows.length || !perfSettings.reflection) {
+          carLighting.hideGlows(tableLightGlows);
+          return;
+        }
+        carLighting.drawCarTableGlows(
+          tableLightGlows,
+          carState.angle + (carState.driftAngle || 0),
+          keys.brake,
+          tableY,
+          Math.max(0.08, halfW * storedCarScale),
+        );
+      }
+
+      /**
+       * Video screens (leftScreen / rightScreen): share of the video's own
+       * colour that goes into the bloom (0..1), a subtle soft glow around the
+       * screen; the video's colours and sharpness aren't changed.
+       */
+      const SCREEN_BLOOM = { weight: 0.5 };
+            function setupScreenVideo(mesh, video, canvas, videoSrc) {
         if (!mesh) return null;
         video.src = videoSrc;
         video.loop = true;
@@ -11211,6 +12470,8 @@ let _officeSceneAnimationFrame = 0;
           color: 0xd8d8d8,
           side: THREE.DoubleSide,
         });
+        // A soft glow from the video's own light (the video itself is unchanged).
+        setBloomWeight(mesh.material, SCREEN_BLOOM.weight);
         return tex;
       }
 
@@ -11437,6 +12698,12 @@ let _officeSceneAnimationFrame = 0;
         );
       }
 
+      /**
+       * bookLeftPage's printed graphics: a very faint light from its own
+       * texture (emissive × the page image; was none) so its paper reads as
+       * light as the right page's, without glowing.
+       */
+      const BOOK_LEFT_PAGE = { emissiveIntensity: 0.12 };
       function setupBookLeftPageDecal(model) {
         const page = model.getObjectByName("bookLeftPage");
         if (!page?.isMesh || !page.geometry) return;
@@ -11577,6 +12844,11 @@ let _officeSceneAnimationFrame = 0;
             );
             decal.name = "bookLeftPageDecal";
             decal.renderOrder = 6;
+            // Same dark-mode desk light as the right page (it loads after that was set up, so it missed it).
+            patchDeskRestoreMaterial(decal.material);
+            decal.material.emissiveMap = tex;
+            decal.material.emissive.setHex(0xffffff);
+            decal.material.emissiveIntensity = BOOK_LEFT_PAGE.emissiveIntensity;
             page.add(decal);
             applyTextureAnisotropyToRoot(decal);
             scheduleRebuildBloomDarkenLists();
@@ -12421,12 +13693,54 @@ diffuseColor.a = 1.0;
         return found;
       }
 
+      /**
+       * Small parts missing from the embed94 export, taken from embed93 (same
+       * placement): the duck's pupils (eyePupleLeft / eyePupleRight, for the eye
+       * tracking) and the monitors' power LEDs (leftScreenLight / rightScreenLight).
+       */
+      const OFFICE_EXTRA_PARTS = [
+        { file: officeAsset("office-duck-pupils.gltf"), names: ["eyePupleLeft", "eyePupleRight"] },
+        { file: officeAsset("office-screen-lights.gltf"), names: ["leftScreenLight", "rightScreenLight"] },
+      ];
+
+      function withDuckPupils(model, done, index = 0) {
+        if (index >= OFFICE_EXTRA_PARTS.length) {
+          done();
+          return;
+        }
+        const next = () => withDuckPupils(model, done, index + 1);
+        const part = OFFICE_EXTRA_PARTS[index];
+        const missing = part.names.filter((name) => !modelHasNamedPart(model, name));
+        if (!missing.length) {
+          next();
+          return;
+        }
+        loader.load(
+          part.file,
+          (gltf) => {
+            gltf.scene.updateMatrixWorld(true);
+            model.updateMatrixWorld(true);
+            for (const partName of missing) {
+              const src = gltf.scene.getObjectByName(partName);
+              if (src) model.attach(src);
+            }
+            model.updateMatrixWorld(true);
+            next();
+          },
+          undefined,
+          (err) => {
+            console.warn("[office] extra parts GLTF failed:", part.file, err);
+            next();
+          },
+        );
+      }
+
       function withOfficeSupplementParts(model, done) {
         const missing = OFFICE_SUPPLEMENT_PART_NAMES.filter(
           (name) => !modelHasNamedPart(model, name),
         );
         if (!missing.length) {
-          done();
+          withDuckPupils(model, done);
           return;
         }
         loader.load(
@@ -12443,12 +13757,12 @@ diffuseColor.a = 1.0;
             }
             model.updateMatrixWorld(true);
             refreshShadowsAfterSupplement(model);
-            done();
+            withDuckPupils(model, done);
           },
           undefined,
           (err) => {
             console.warn("[office] supplement parts GLTF failed:", err);
-            done();
+            withDuckPupils(model, done);
           },
         );
       }
@@ -13596,6 +14910,10 @@ diffuseColor.a = 1.0;
           applyPhoneChargerMaterial(model);
           applyPhoneChargerCupMaterial(model);
           applyPhoneChargerLightMaterial(model);
+          // Dark mode: these glow brighter against the dark room.
+          registerGamingEmissive(phoneChargerLightMaterial, "phoneChargerLight");
+          registerGamingEmissive(headphonesLightMaterial, "headphonesLight");
+          registerGamingEmissive(roomLightMaterial, "roomLight");
           applyScreenLightsMaterial(model);
           applyTableControlScreenMaterial(model);
           applyPenMaterials(model);
@@ -13870,6 +15188,7 @@ diffuseColor.a = 1.0;
                         emissiveIntensity: 18.0,
                         roughness: 0.15,
                       });
+                      node.material._bloomGlow = BLOOM_EMISSIVE.lightBar; // above the bloom threshold
                       node.layers.enable(CAR_LIGHTS_BLOOM_LAYER);
                     }
                     if (node.name === "frontLights") {
@@ -14211,6 +15530,8 @@ diffuseColor.a = 1.0;
                 if (sceneBloomEnabled) renderCarLightsBloomComposer();
                 _carBloomReady = true;
                 car.visible = true;
+                attachCarHeadTailSpotLights();
+                setupOfficeGameplayCamera();
                 applyPerformanceShadowPolicy(car);
                 applyCastShadowsToObject3D(car, "both");
                 try {
@@ -14266,6 +15587,8 @@ diffuseColor.a = 1.0;
           controls.target.copy(_carMatrixLookAt);
           syncCarOrbitCamAnglesFromPosition(carCamera);
           configureOrbitControlsForCarView(carCamera);
+          // After every material is assigned: the desk objects keep the backup's dark-mode light.
+          setupGamingDeskLighting(model);
           applyTextureAnisotropyToRoot(model);
           scheduleRebuildBloomDarkenLists();
           });
@@ -15342,6 +16665,9 @@ diffuseColor.a = 1.0;
             if (clampGumInsideTankChute(body)) {
               body._inGumChute = false;
               body._exitedGumTank = true;
+              body.allowSleep = true; // out of the tank: may rest again
+              // Out of the machine: spin dies down like the cup release's gums, so they come to rest.
+              body.angularDamping = Math.max(body.angularDamping, GUM_EXITED_ANGULAR_DAMPING);
             }
             continue;
           }
@@ -15787,7 +17113,11 @@ diffuseColor.a = 1.0;
           syncHandPhysics();
           updateCupSlide();
           updateGumHitCupHide();
-          updateDrawerAnimation();
+          try {
+            updateDrawerAnimation();
+          } catch (err) {
+            logDrawerErrorOnce("drawer animation", err);
+          }
           if (gumsReadyToDrop && gumsAddedCount < gumBodies.length) {
             const now = performance.now();
             if (now >= nextGumDropTime) {
@@ -16056,6 +17386,7 @@ diffuseColor.a = 1.0;
                 _gumTankMwCached.copy(gumsTankPhysicObject.matrixWorld);
                 _invTankMwGumClamp.copy(_gumTankMwCached).invert();
               }
+              keepTankGumsAwakeForRelease();
               if (_gumDispenserBecameDynamic) {
                 if (_gumTankWallBodies && !anyGumLeftInTank()) retireGumTankThickWalls();
                 if (_gumTankWallBodies) {
@@ -16160,8 +17491,8 @@ diffuseColor.a = 1.0;
                  Math.abs(gumDispenserPhysBody.velocity.y) > 0.5 ||
                  Math.abs(gumDispenserPhysBody.velocity.z) > 0.5);
               if (_gumDispenserBecameDynamic && !_dispenserStillMoving) {
-                const dynSettleSpd2 = 0.3 * 0.3;
-                const dynSettleAng2 = 1.0 * 1.0;
+                const dynSettleSpd2 = GUM_EXITED_SLEEP_SPEED * GUM_EXITED_SLEEP_SPEED;
+                const dynSettleAng2 = GUM_EXITED_SLEEP_SPIN * GUM_EXITED_SLEEP_SPIN;
                 for (let gi = 0; gi < gumsAddedCount; gi++) {
                   const b = gumBodies[gi];
                   if (b.type !== CANNON.Body.DYNAMIC) continue;
@@ -16174,10 +17505,14 @@ diffuseColor.a = 1.0;
                   if (linSpd2 < dynSettleSpd2 && angSpd2 < dynSettleAng2) {
                     if (!b._dynSlowAccum) b._dynSlowAccum = 0;
                     b._dynSlowAccum += dt;
-                    if (b._dynSlowAccum >= 0.5) {
+                    if (b._dynSlowAccum >= GUM_EXITED_SLEEP_SEC) {
                       b.velocity.set(0, 0, 0);
                       b.angularVelocity.set(0, 0, 0);
-                      b.sleep();
+                      // Rest as STATIC (like settled tank gums): a sleeping gum in a pile the
+                      // ramp keeps feeding is woken every step. The car still wakes it on contact.
+                      b.type = CANNON.Body.STATIC;
+                      b.updateMassProperties();
+                      b._dynSlowAccum = 0;
                     }
                   } else {
                     b._dynSlowAccum = 0;
@@ -16201,6 +17536,7 @@ diffuseColor.a = 1.0;
                 const toFreeze = [];
                 for (const gi of gumReleased) {
                   const b = gumBodies[gi];
+                  if (!b._exitedGumTank) continue; // still in the tank: keeps falling toward the hole
                   if (forceFreeze) {
                     toFreeze.push(gi);
                     continue;
@@ -16553,7 +17889,7 @@ diffuseColor.a = 1.0;
             Math.min(1, dt / LIGHT_FADE_DURATION);
           applyLightBlend(lightBlend);
           _portalSceneDarkness = 0;
-          renderer.toneMappingExposure = 1;
+          renderer.toneMappingExposure = _sceneExposure;
           if (lightBlend > LIGHT_BLEND_TRIS_BRIGHT_THRESHOLD) {
             const targetBlend = compactSpacingActive ? 1 : 0;
             const elapsed = nowSec - compactSpacingAnimStart;
@@ -16594,6 +17930,11 @@ diffuseColor.a = 1.0;
             const touching =
               Math.sqrt(dx * dx + dz * dz) < CHARGER_TOUCH_RADIUS;
             updateChargerEffect(dt, chargerCupWorldPos, touching);
+          }
+          try {
+            updateDrawerCupTrigger(Math.min(rawDt, 0.1));
+          } catch (err) {
+            logDrawerErrorOnce("charger trigger", err);
           }
 
           const flameDelayS = FLAME_WAVE_DELAY_MS / 1000;
@@ -17041,6 +18382,13 @@ diffuseColor.a = 1.0;
               applyCarCameraLookAtCar();
             }
           }
+          // Intro: its camera only for this frame's render (camera 1 is restored right after).
+          updateOfficeSceneReady();
+          const introPose = updateOfficeIntro(rawDt);
+          if (introPose) officeIntro.applyCamera(introPose);
+          updateDeskRestore(camera);
+          updateDeskSurfaceFill(camera);
+          updateDarkFills(camera);
           // Shadow refresh due this frame; each pass below that changes materials/visibility gets its own refresh.
           const shadowRefresh = renderer.shadowMap.needsUpdate;
           if (sceneBloomEnabled) {
@@ -17061,9 +18409,24 @@ diffuseColor.a = 1.0;
             renderer.shadowMap.needsUpdate = true; // mac pass hid the screen
           finalComposer.render();
           if (sceneBloomEnabled) setCarLightsEmissiveForMainPass(false);
+          officeIntro.restoreCamera();
         } catch (e) {
+          officeIntro.restoreCamera();
           console.error("Animate error:", e);
         }
+      }
+      /** The page calls this once its loader is gone: the intro plays, then gameplay on camera 1. */
+      export function startOfficeIntro() {
+        if (!_officeSceneReady || officeIntro.state !== "pending") return;
+        setupOfficeGameplayCamera();
+        officeIntro.state = "playing";
+        officeIntro.t = 0;
+      }
+      export function isOfficeIntroDone() {
+        return officeIntro.state === "done";
+      }
+      export function isOfficeSceneReady() {
+        return _officeSceneReady;
       }
       export function setOfficeSceneRendering(active) {
         const shouldRender = Boolean(active);

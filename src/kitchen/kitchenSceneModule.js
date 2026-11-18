@@ -30,6 +30,8 @@ import {
 } from "./kitchenRace.js";
 import { SCENE_ROUTES, nextLevelPath } from "../game/sceneRoutes.js";
 import { createCinematicIntro, introEase, introEaseSine, introLerp } from "../game/cinematicIntro.js";
+import { createCarLighting } from "../game/carLighting.js";
+import { addThresholdBloom, keepBelowBloomThreshold } from "../game/thresholdBloom.js";
 import {
   CAR_MASS,
   CAR_BUMP_SLIDE_DECAY,
@@ -1324,6 +1326,9 @@ export function isKitchenSceneReady() {
       finalComposer.addPass(smaaPass);
       finalComposer.addPass(sharpenPass);
       finalComposer.addPass(outputPass);
+      // Selective bloom by threshold (shared with the office): the cars' light bars
+      // (lightBar1 and its copies, emissive 18) are the only parts above it.
+      const kitchenBloom = addThresholdBloom({ THREE, composer: finalComposer, afterPass: renderScenePass });
       // Slow-motion vignette (edge darkening): last, off unless a jump is slowed.
       const jumpVignettePass = new ShaderPass({
         uniforms: { tDiffuse: { value: null }, uStrength: { value: 0 } },
@@ -4034,19 +4039,6 @@ let _worldSwitched = false;
         return _raceTrack.pointAt(p, 0, { x: 0, z: 0, heading: 0 });
       }
 
-      /** A race car's lamp spots aimed at the table, as updateCarLampSpotAim does for the player. */
-      function aimRaceCarSpots(rc, tableY) {
-        if (!rc.spots || !rc.spots.length) return;
-        _raceTmpV.set(rc.root.position.x, tableY, rc.root.position.z);
-        rc.root.worldToLocal(_raceTmpV);
-        const tableLocalY = _raceTmpV.y;
-        for (const e of rc.spots) {
-          const spot = e.spot;
-          const aimY = e.kind === "front" ? tableLocalY : spot.position.y * 0.55 + tableLocalY * 0.45;
-          spot.target.position.set(spot.position.x, aimY, spot.position.z + e.zSign * e.aimAlong);
-        }
-      }
-
       /** AI car visuals (pose + wheels) and its prop bumper follow its drive state. */
       function syncRaceAiCar(rc, dt) {
         const st = rc.state;
@@ -6422,51 +6414,11 @@ let _worldSwitched = false;
 
       const _carLightFwd = new THREE.Vector3();
       const _carLightRight = new THREE.Vector3();
-      const _lightGlowBox = new THREE.Box3();
-      const _lightGlowCenter = new THREE.Vector3();
-      const _lightGlowCorner = new THREE.Vector3();
 
       function updateCarLightAxes() {
         const yaw = carState.angle + (carState.driftAngle || 0);
         _carLightFwd.set(Math.sin(yaw), 0, Math.cos(yaw));
         _carLightRight.set(_carLightFwd.z, 0, -_carLightFwd.x);
-      }
-
-      function getMeshTableReflectionPoint(entry, tableY, out) {
-        const mesh = entry.mesh || entry;
-        mesh.updateWorldMatrix(true, false);
-        const geometry = mesh.geometry;
-        if (geometry && !geometry.boundingBox) geometry.computeBoundingBox();
-        const box = geometry && geometry.boundingBox;
-        if (!box) {
-          mesh.getWorldPosition(out);
-          out.y = tableY;
-          if (entry && entry !== mesh) {
-            entry._worldLampSpan = entry.baseSize || 0.12;
-          }
-          return out;
-        }
-        const sizeX = box.max.x - box.min.x;
-        const sizeZ = box.max.z - box.min.z;
-        const axis = sizeX >= sizeZ ? "x" : "z";
-        const span = axis === "x" ? sizeX : sizeZ;
-        out.set(
-          (box.min.x + box.max.x) * 0.5,
-          (box.min.y + box.max.y) * 0.5,
-          (box.min.z + box.max.z) * 0.5,
-        );
-        const side = (entry && entry.side) || 0;
-        if (side !== 0 && span > 1e-4) {
-          out[axis] = box.min[axis] + span * (side < 0 ? 0.12 : 0.88);
-        }
-        mesh.localToWorld(out);
-        if (entry && entry !== mesh) {
-          mesh.getWorldScale(_lightGlowCorner);
-          const axisScale = axis === "x" ? _lightGlowCorner.x : _lightGlowCorner.z;
-          entry._worldLampSpan = Math.max(0.04, span * Math.abs(axisScale));
-        }
-        out.y = tableY;
-        return out;
       }
 
       const TRASH_FX_PARTICLE_COUNT = 900;
@@ -6979,10 +6931,6 @@ let _worldSwitched = false;
 
       let tableLightGlows = [];
       let _tableLightGlowTex = null;
-      let _tableHeadlightBeamTex = null;
-      let _tableLightGlowGeo = null;
-      let _tableHeadlightBeamGeo = null;
-      const HEADLIGHT_BEAM_ASPECT = 652 / 326;
 
       function getTableLightGlowTexture() {
         if (_tableLightGlowTex) return _tableLightGlowTex;
@@ -7002,182 +6950,21 @@ let _worldSwitched = false;
         return _tableLightGlowTex;
       }
 
-      function getTableHeadlightBeamGeometry() {
-        if (_tableHeadlightBeamGeo) return _tableHeadlightBeamGeo;
-        const geometry = new THREE.PlaneGeometry(1, 1);
-        geometry.rotateX(-Math.PI / 2);
-        const uv = geometry.attributes.uv;
-        const pos = geometry.attributes.position;
-        for (let i = 0; i < uv.count; i++) {
-          uv.setXY(i, pos.getZ(i) + 0.5, pos.getX(i) + 0.5);
-        }
-        uv.needsUpdate = true;
-        _tableHeadlightBeamGeo = geometry;
-        return _tableHeadlightBeamGeo;
-      }
-
-      function getTableHeadlightBeamTexture() {
-        if (_tableHeadlightBeamTex) return _tableHeadlightBeamTex;
-        const loader = new THREE.TextureLoader();
-        _tableHeadlightBeamTex = loader.load(
-          officeAsset("textures/headlight-beam.png") + "?v=dim3",
-        );
-        _tableHeadlightBeamTex.wrapS = THREE.ClampToEdgeWrapping;
-        _tableHeadlightBeamTex.wrapT = THREE.ClampToEdgeWrapping;
-        _tableHeadlightBeamTex.anisotropy = 8;
-        return _tableHeadlightBeamTex;
-      }
-
-      function createTableLightGlowSprite(tint, baseSize, kind = "") {
-        if (!_tableLightGlowGeo) {
-          _tableLightGlowGeo = new THREE.PlaneGeometry(1, 1);
-          _tableLightGlowGeo.rotateX(-Math.PI / 2);
-        }
-        const mat = new THREE.MeshBasicMaterial({
-          map:
-            kind === "front"
-              ? getTableHeadlightBeamTexture()
-              : getTableLightGlowTexture(),
-          color: kind === "front" ? 0xffffff : tint,
-          transparent: true,
-          opacity: 0,
-          depthWrite: false,
-          depthTest: true,
-          blending: THREE.AdditiveBlending,
-          side: THREE.DoubleSide,
-          toneMapped: false,
-          polygonOffset: true,
-          polygonOffsetFactor: -4,
-          polygonOffsetUnits: -4,
-          stencilWrite: true,
-          stencilWriteMask: 0x00,
-          stencilRef: 1,
-          stencilFunc: THREE.EqualStencilFunc,
-          stencilFail: THREE.KeepStencilOp,
-          stencilZFail: THREE.KeepStencilOp,
-          stencilZPass: THREE.KeepStencilOp,
-        });
-        const glowPlane = new THREE.Mesh(
-          kind === "front" ? getTableHeadlightBeamGeometry() : _tableLightGlowGeo,
-          mat,
-        );
-        glowPlane.scale.set(baseSize, 1, baseSize * 0.72);
-        glowPlane.visible = false;
-        glowPlane.renderOrder = 4;
-        scene.add(glowPlane);
-        return glowPlane;
-      }
-
+      // Head / tail lamp spot lights and table glows: shared with the office (game/carLighting.js).
+      const carLighting = createCarLighting({
+        THREE,
+        scene,
+        beamTextureUrl: officeAsset("textures/headlight-beam.png") + "?v=dim3",
+        stencilRef: 1,
+      });
       const _carLampSpots = [];
-      const _carLampTablePoint = new THREE.Vector3();
-      const _lampCarBox = new THREE.Box3();
-      const _lampCarCorner = new THREE.Vector3();
-      function getMeshBoxInCarLocal(mesh, outBox) {
-        mesh.updateWorldMatrix(true, false);
-        if (!mesh.geometry.boundingBox) mesh.geometry.computeBoundingBox();
-        const box = mesh.geometry.boundingBox;
-        outBox.makeEmpty();
-        for (let ix = 0; ix < 2; ix++) {
-          for (let iy = 0; iy < 2; iy++) {
-            for (let iz = 0; iz < 2; iz++) {
-              _lampCarCorner.set(
-                ix ? box.max.x : box.min.x,
-                iy ? box.max.y : box.min.y,
-                iz ? box.max.z : box.min.z,
-              );
-              mesh.localToWorld(_lampCarCorner);
-              car.worldToLocal(_lampCarCorner);
-              outBox.expandByPoint(_lampCarCorner);
-            }
-          }
-        }
-        return outBox;
-      }
-      function getCarLocalTableY() {
-        const tableWorldY = getTablePlaySurfaceY();
-        const y = tableWorldY == null ? car.position.y : tableWorldY;
-        _carLampTablePoint.set(car.position.x, y, car.position.z);
-        car.worldToLocal(_carLampTablePoint);
-        return _carLampTablePoint.y;
-      }
-      function updateCarLampSpotAim() {
-        if (!_carLampSpots.length) return;
-        const tableLocalY = getCarLocalTableY();
-        for (let i = 0; i < _carLampSpots.length; i++) {
-          const entry = _carLampSpots[i];
-          const spot = entry.spot;
-          const aimY =
-            entry.kind === "front"
-              ? tableLocalY
-              : spot.position.y * 0.55 + tableLocalY * 0.45;
-          spot.target.position.set(
-            spot.position.x,
-            aimY,
-            spot.position.z + entry.zSign * entry.aimAlong,
-          );
-        }
-      }
       function attachCarHeadTailSpotLights(carRoot) {
         _carLampSpots.length = 0;
-        const worldLen = Math.max(0.3, halfL * storedCarScale * 2);
-        const distance = worldLen * 3.4;
-        attachCarLampSpots(
-          carRoot.getObjectByName("frontLights"),
-          0xfff1d0,
-          1,
-          "front",
-          6.2,
-          distance,
-          Math.PI / 3.15,
-        );
-        attachCarLampSpots(
-          carRoot.getObjectByName("rearLights"),
-          0xff2a2a,
-          -1,
-          "rear",
-          2.4,
-          distance * 0.72,
-          Math.PI / 5.2,
-        );
-      }
-      function attachCarLampSpots(
-        mesh,
-        color,
-        zSign,
-        kind,
-        intensity,
-        distance,
-        angle,
-      ) {
-        if (!mesh || !mesh.geometry) return;
-        getMeshBoxInCarLocal(mesh, _lampCarBox);
-        const sizeX = _lampCarBox.max.x - _lampCarBox.min.x;
-        const midY = (_lampCarBox.min.y + _lampCarBox.max.y) * 0.5;
-        const lampZ = kind === "front" ? _lampCarBox.max.z : _lampCarBox.min.z;
-        const halfSpan = sizeX * 0.5;
-        const sides = halfSpan > 0.04 ? [-1, 1] : [0];
-        const aimAlong = Math.max(1.4, halfL * (kind === "front" ? 0.95 : 1.4));
-        const tableLocalY = getCarLocalTableY();
-        for (let si = 0; si < sides.length; si++) {
-          const side = sides[si];
-          const px = side * halfSpan * 0.76;
-          const pz = lampZ;
-          const spot = new THREE.SpotLight(color, intensity, distance, angle, 0.78, 1.45);
-          const target = new THREE.Object3D();
-          spot.name = kind === "front" ? "carFrontSpot" : "carRearSpot";
-          target.name = spot.name + "Target";
-          spot.position.set(px, midY, pz);
-          const aimY =
-            kind === "front"
-              ? tableLocalY
-              : midY * 0.55 + tableLocalY * 0.45;
-          target.position.set(px, aimY, pz + zSign * aimAlong);
-          spot.target = target;
-          spot.castShadow = false;
-          car.add(spot);
-          car.add(target);
-          _carLampSpots.push({ spot, kind, zSign, aimAlong });
-        }
+        carLighting.attachCarHeadTailSpotLights(car, carRoot, _carLampSpots, {
+          halfL,
+          carScale: storedCarScale,
+          tableY: getTablePlaySurfaceY(),
+        });
       }
       /** Table glows of a car's lamps (the player's by default, or into `list` for a race car). */
       function setupTableLightReflections(carRoot, list) {
@@ -7185,58 +6972,7 @@ let _worldSwitched = false;
           tableLightGlows = [];
           list = tableLightGlows;
         }
-        const specs = [
-          { name: "frontLights", color: 0xffffff, size: 0.44, kind: "front" },
-          { name: "rearLights", color: 0xff3333, size: 0.36, kind: "rear" },
-          {
-            name: "mainRearBrakeLights",
-            color: 0xff0000,
-            size: 0.4,
-            kind: "brake",
-          },
-        ];
-        for (let si = 0; si < specs.length; si++) {
-          const spec = specs[si];
-          const mesh = carRoot.getObjectByName(spec.name);
-          if (!mesh) continue;
-          if (spec.kind === "front") {
-            list.push({
-              mesh,
-              sprite: createTableLightGlowSprite(
-                spec.color,
-                spec.size,
-                spec.kind,
-              ),
-              kind: spec.kind,
-              baseSize: spec.size,
-              side: 0,
-            });
-            continue;
-          }
-          for (let side = -1; side <= 1; side += 2) {
-            list.push({
-              mesh,
-              sprite: createTableLightGlowSprite(
-                spec.color,
-                spec.size * 0.72,
-                spec.kind,
-              ),
-              kind: spec.kind,
-              baseSize: spec.size * 0.72,
-              side,
-            });
-          }
-        }
-        carRoot.traverse((node) => {
-          if (!node.isMesh || node.name !== "lightBar1") return;
-          list.push({
-            mesh: node,
-            sprite: createTableLightGlowSprite(0xff2222, 0.24),
-            kind: "bar",
-            baseSize: 0.24,
-            side: 0,
-          });
-        });
+        carLighting.setupTableLightReflections(carRoot, list);
       }
 
       const _beamFrontPoint = new THREE.Vector3();
@@ -7251,12 +6987,27 @@ let _worldSwitched = false;
           if (!rear && (e.kind === "rear" || e.kind === "brake")) rear = e;
         }
         if (!front || !rear) return 2.4 * car.scale.x;
-        getMeshTableReflectionPoint(front, tableY, _beamFrontPoint);
-        getMeshTableReflectionPoint(rear, tableY, _beamRearPoint);
+        carLighting.getMeshTableReflectionPoint(front, tableY, _beamFrontPoint);
+        carLighting.getMeshTableReflectionPoint(rear, tableY, _beamRearPoint);
         return Math.max(0.5, _beamFrontPoint.distanceTo(_beamRearPoint));
       }
 
+      /**
+       * The table top's sharp highlights (the cars' lamp spot lights, e.g. the
+       * red rear lamps' streak behind each car) are far above the bloom
+       * threshold; keep the table under it so they don't bloom into a glow on
+       * the table (looks the same after tone mapping).
+       */
+      function keepTableTopBelowBloom() {
+        for (const mesh of [_kitchenCoverTopMesh, tablePlateMesh]) {
+          if (!mesh) continue;
+          const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+          for (const m of mats) keepBelowBloomThreshold(m);
+        }
+      }
+
       function updateTableLightReflections() {
+        keepTableTopBelowBloom();
         if (!tableLightGlows.length || !car || !_kitchenWorldActive) {
           for (let gi = 0; gi < tableLightGlows.length; gi++) {
             tableLightGlows[gi].sprite.visible = false;
@@ -7268,51 +7019,16 @@ let _worldSwitched = false;
         }
         const tableY = getTablePlaySurfaceY();
         if (tableY == null) return;
-        updateCarLampSpotAim();
+        carLighting.aimCarLampSpots(_carLampSpots, car, tableY);
         updateCarLightAxes();
-        drawCarTableGlows(tableLightGlows, carState.angle + (carState.driftAngle || 0), keys.brake, tableY);
+        carLighting.drawCarTableGlows(tableLightGlows, carState.angle + (carState.driftAngle || 0), keys.brake, tableY, Math.max(0.08, halfW * storedCarScale));
         for (let ri = 0; ri < _raceCars.length; ri++) {
           const rc = _raceCars[ri];
           if (rc.isPlayer || !rc.glows) continue;
-          aimRaceCarSpots(rc, tableY);
-          drawCarTableGlows(rc.glows, rc.state.angle, false, tableY);
+          carLighting.aimCarLampSpots(rc.spots, rc.root, tableY);
+          carLighting.drawCarTableGlows(rc.glows, rc.state.angle, false, tableY, Math.max(0.08, halfW * storedCarScale));
         }
       }
-
-      const _glowFwd = new THREE.Vector3();
-      /** Place a car's table glows (headlight beam, tail / brake / light bar glows). */
-      function drawCarTableGlows(glows, carYaw, brakeOn, tableY) {
-        const worldHalfW = Math.max(0.08, halfW * storedCarScale);
-        _glowFwd.set(Math.sin(carYaw), 0, Math.cos(carYaw));
-        for (let gi = 0; gi < glows.length; gi++) {
-          const entry = glows[gi];
-          let alpha = 0;
-          if (entry.kind === "front") alpha = 0.08;
-          else if (entry.kind === "rear") alpha = 0.52;
-          else if (entry.kind === "brake") alpha = brakeOn ? 0.92 : 0.18;
-          else if (entry.kind === "bar") alpha = 0.38;
-          if (alpha < 0.02) {
-            entry.sprite.visible = false;
-            continue;
-          }
-          getMeshTableReflectionPoint(entry, tableY, _v0);
-          entry.sprite.rotation.set(0, carYaw, 0);
-          const lampSpan = entry._worldLampSpan || worldHalfW * 0.5;
-          if (entry.kind === "front") {
-            const beamWidth = Math.max(0.55, lampSpan * 2.4);
-            const beamLength = beamWidth * HEADLIGHT_BEAM_ASPECT;
-            _v0.addScaledVector(_glowFwd, beamLength * 0.58);
-            entry.sprite.scale.set(beamWidth * 1.2, 1, beamLength);
-          } else {
-            const sc = Math.max(0.1, Math.min(lampSpan * 0.45, worldHalfW * 0.5));
-            entry.sprite.scale.set(sc, 1, sc * 0.85);
-          }
-          entry.sprite.position.copy(_v0);
-          entry.sprite.material.opacity = alpha;
-          entry.sprite.visible = true;
-        }
-      }
-
 
       function setupExhaustEffects(carScene) {
         exhaustEffects = [];
