@@ -120,9 +120,11 @@
   border-radius: 14px;
   min-width: 15rem;
 }
+/* A block (the label is inline-flex), so the space under the line really applies: same space above and below it. */
 .wx-start-pages-head {
-  padding-bottom: var(--wx-space-3);
-  margin-bottom: var(--wx-space-3);
+  display: flex;
+  padding-bottom: var(--wx-space-4);
+  margin-bottom: var(--wx-space-4);
   border-bottom: 1px solid var(--wx-hairline);
   width: 100%;
 }
