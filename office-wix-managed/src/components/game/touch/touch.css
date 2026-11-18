@@ -1,7 +1,9 @@
-/* Touch driving: no page gestures on the 3D view, and the finger feedback. */
+/* Touch driving: no page gestures on the 3D view, and the control's visual. */
 :root {
-  --wx-touch-ring: 44px; /* ring under the finger (TOUCH_DRIVE.ringPx) */
-  --wx-touch-line-opacity: 0.28; /* faint line from the car to the finger */
+  --wx-touch-line: 1.5px; /* outline width (the controls guide / menu icon line) */
+  --wx-touch-neon: #4d97ff; /* lit arc + knob (Wix Blue, lifted for dark) */
+  --wx-touch-glow: rgba(12, 110, 252, 0.9);
+  --wx-touch-fade: 180ms; /* TOUCH_VISUAL.fadeSec */
 }
 
 .wx-touch-surface,
@@ -13,39 +15,53 @@
   overscroll-behavior: none; /* no pull-to-refresh */
 }
 
+/* Overlay: the ring around the car (projected on the ground) and the knob. */
 .wx-touch-fx {
-  position: absolute;
-  inset: 0;
-  z-index: 4; /* over the canvas, under the HUD (5) */
-  pointer-events: none;
-  opacity: 0;
-  transition: opacity 160ms var(--wx-ease-out, ease-out);
-}
-.wx-touch-fx.is-on { opacity: 1; }
-.wx-touch-ring {
-  position: absolute;
-  left: calc(var(--wx-touch-ring) / -2);
-  top: calc(var(--wx-touch-ring) / -2);
-  width: var(--wx-touch-ring);
-  height: var(--wx-touch-ring);
-  border: 1.5px solid rgba(255, 255, 255, 0.9);
-  border-radius: 50%;
-  box-shadow: 0 0 12px rgba(12, 110, 252, 0.45), inset 0 0 8px rgba(12, 110, 252, 0.25);
-  will-change: transform;
-}
-.wx-touch-line {
+  --wx-touch-power: 0; /* drag progress 0..1, set per frame */
   position: absolute;
   inset: 0;
   width: 100%;
   height: 100%;
+  z-index: 4; /* over the canvas, under the HUD (5) */
   overflow: visible;
-}
-.wx-touch-line line {
-  stroke: #fff;
-  stroke-width: 1.5;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity var(--wx-touch-fade) var(--wx-ease-out, ease-out);
+  fill: none;
   stroke-linecap: round;
-  stroke-dasharray: 2 6;
-  opacity: var(--wx-touch-line-opacity);
+  stroke-linejoin: round;
+}
+.wx-touch-fx.is-on { opacity: 1; }
+
+/* Base: thin white outline ring (full speed radius), faint dashed inner circle (dead zone / tap zone). */
+.wx-touch-ring { stroke: rgba(255, 255, 255, 0.85); stroke-width: var(--wx-touch-line); }
+.wx-touch-inner { stroke: rgba(255, 255, 255, 0.4); stroke-width: 1; stroke-dasharray: 2 5; }
+
+/* The ring's part toward the drag (or the back arc in reverse), glowing stronger with the drag. */
+.wx-touch-lit {
+  stroke: var(--wx-touch-neon);
+  stroke-width: calc(var(--wx-touch-line) + 1.5px);
+  opacity: calc(0.35 + 0.65 * var(--wx-touch-power));
+  filter: drop-shadow(0 0 calc(2px + 8px * var(--wx-touch-power)) var(--wx-touch-glow));
+}
+
+/* Knob: outline with a very subtle frosted fill; lights up while driving. */
+.wx-touch-knob {
+  fill: rgba(255, 255, 255, 0.08);
+  stroke: #fff;
+  stroke-width: var(--wx-touch-line);
+  transition: stroke var(--wx-dur-fast, 140ms) ease;
+}
+.wx-touch-fx.is-driving .wx-touch-knob {
+  stroke: var(--wx-touch-neon);
+  filter: drop-shadow(0 0 calc(3px + 6px * var(--wx-touch-power)) var(--wx-touch-glow));
+}
+
+/* Tap on the car: a short pulse of the inner circle. */
+.wx-touch-fx.is-tap { animation: wx-touch-tap 420ms var(--wx-ease-out, ease-out); }
+@keyframes wx-touch-tap {
+  0% { opacity: 1; }
+  100% { opacity: 0; }
 }
 
 html,

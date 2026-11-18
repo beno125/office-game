@@ -26,10 +26,11 @@
   -webkit-font-smoothing: antialiased;
 }
 
+/* Top right (was top left): the game menu icon owns the top left corner. */
 .wx-hud {
   position: absolute;
-  top: var(--wx-hud-inset);
-  left: var(--wx-hud-inset);
+  top: max(var(--wx-hud-inset), env(safe-area-inset-top));
+  right: max(var(--wx-hud-inset), env(safe-area-inset-right));
   display: flex;
   max-width: calc(100% - 2 * var(--wx-hud-inset));
   padding: var(--wx-space-3) 0;

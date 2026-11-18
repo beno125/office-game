@@ -1,36 +1,52 @@
 /**
- * Touch driving (phones / tablets), shared by every level: one finger drags
- * anywhere and the car drives toward it; a quick tap on the car does the
- * Space action (brake). It only writes the level's own `keys` object (the same
- * forward / reverse / left / right / brake flags the keyboard sets), so the
- * car's physics, the intros / countdown gating and everything else stay as
- * they are. The keyboard keeps working everywhere.
+ * Touch driving (phones / tablets), shared by every level. Same logic and
+ * values as Bruno Simon's folio-2025 "Nipple" input (MIT,
+ * github.com/brunosimon/folio-2025, sources/Game/Inputs/Nipple.js + Player.js),
+ * adapted to our cars:
  *
- * Steering: the finger's point on the car's driving plane, compared with the
- * car's heading (forward = sin(angle), cos(angle); "left" turns the angle up).
- * Throttle: the finger's on-screen distance from the car, as a duty cycle on
- * `forward` (the physics only knows full / off). A finger behind the car makes
- * it turn around (full steer, driving forward), like an RC car; it never
- * reverses on its own.
+ * - The control is anchored on the car. The finger is projected onto the
+ *   ground at the car's height; the direction car → finger is where the car
+ *   steers, the distance sets the speed.
+ * - Speed: progress = (distance − inner) / (outer − inner), clamped 0..1, then
+ *   cubed (inner / outer radii in car lengths: 2 / 4.5 on a ~2.9-long car).
+ * - Steering: full lock once the finger is 45° off the heading (gradual below).
+ * - Reverse: a finger within ±45° behind the car drives backward (steering
+ *   flipped like a real car). Hysteresis added: back to forward only past 53°.
+ * - Tap: a touch that starts inside the inner radius and never leaves it is a
+ *   tap on the car → the level's Space action (brake).
+ * - A second finger is ignored (never breaks the drive).
+ *
+ * Our physics only reads on / off flags, so the amounts become duty cycles on
+ * the same `keys` the keyboard writes (forward / reverse / left / right /
+ * brake): the car behaves exactly as with the keyboard. Reverse uses the
+ * `reverse` flag, so the car brakes first and then backs up, like holding Down.
  */
 import "./touch.css";
 
-/** Tuning (distances are shares of the screen's shorter side). */
+/** Control values (reference values; radii in car lengths). */
 export const TOUCH_DRIVE = {
-  deadZone: 0.06, // finger this close to the car: no throttle
-  fullThrottleAt: 0.32, // finger this far: full speed
-  minThrottle: 0.35, // throttle just past the dead zone
-  steerDeadDeg: 7, // heading error under this: drive straight
-  steerHoldDeg: 3, // …and once steering, keep it until under this (no flicker)
-  behindDeg: 160, // finger this far behind: keep turning the same way
-  aimSmooth: 14, // finger aim smoothing (1/s; higher = snappier)
-  tapMaxMs: 220, // a tap: shorter than this…
-  tapMaxMovePx: 12, // …and moving less than this
-  tapBrakeSec: 0.45, // the Space action from a tap: brake held this long
-  ringPx: 44, // feedback ring size under the finger
+  innerRadius: 0.7, // dead zone + tap zone around the car (reference: 2 world units)
+  outerRadius: 1.55, // full speed here (reference: 4.5)
+  speedCurve: 3, // progress^3 (reference)
+  fullSteerDeg: 45, // full steering lock at this heading error (reference: (360° − 270°) / 2)
+  reverseConeDeg: 45, // finger within ± this behind the car → reverse (reference: forward arc 270°)
+  reverseHysteresisDeg: 8, // once reversing, stay until the finger is past cone + this
+  fullDuty: 0.97, // a duty above this holds the key down
+  tapBrakeSec: 0.45, // Space action from a tap: brake held this long
 };
 
-const TOUCH_EVENT = "wx-touch-drive"; // window event: { kind: "drive", dt } | { kind: "tap" }
+/** Visual values (screen px / seconds). */
+export const TOUCH_VISUAL = {
+  ringSegments: 64, // ground ring resolution
+  knobRadius: 13,
+  litArcDeg: 70, // lit part of the ring toward the drag (forward)
+  reverseArcDeg: 90, // lit back arc while reversing (the reverse cone)
+  fadeSec: 0.18,
+};
+
+const TOUCH_EVENT = "wx-touch-drive"; // window event: { kind: "drive", dt, reverse } | { kind: "tap" }
+const DEG = Math.PI / 180;
+const wrapAngle = (a) => Math.atan2(Math.sin(a), Math.cos(a));
 
 /** True on phones / tablets (a coarse pointer without hover). */
 export function isTouchDevice() {
@@ -46,91 +62,125 @@ export function onTouchDrive(fn) {
   return () => window.removeEventListener(TOUCH_EVENT, h);
 }
 
-const wrapAngle = (a) => Math.atan2(Math.sin(a), Math.cos(a));
-const DEG = Math.PI / 180;
-
 /**
  * @param {object} o
  * @param {typeof import("three")} o.THREE
- * @param {HTMLElement} o.mount      the level's mount (touches on the UI above it never reach it)
+ * @param {HTMLElement} o.mount       the level's mount (touches on the UI above it never reach it)
  * @param {() => import("three").Camera} o.getCamera
- * @param {() => import("three").Object3D|null} o.getCar   the player's car (position, raycast target)
- * @param {() => number} o.getAngle   the car's heading (carState.angle)
- * @param {() => object} o.getKeys    the input object the keyboard writes
- * @param {() => boolean} o.enabled   the player may drive now (scene running, intro over)
+ * @param {() => import("three").Object3D|null} o.getCar   the player's car
+ * @param {() => number} o.getAngle    the car's heading (carState.angle; forward = sin, cos; "left" turns it up)
+ * @param {() => number} o.getCarLength the car's length in world units
+ * @param {() => object} o.getKeys     the input object the keyboard writes
+ * @param {() => boolean} o.enabled    the player may drive now (scene running, intro over)
  */
 export function createTouchDrive(o) {
   const { THREE, mount } = o;
   const T = TOUCH_DRIVE;
+  const V = TOUCH_VISUAL;
   const raycaster = new THREE.Raycaster();
   const ndc = new THREE.Vector2();
   const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
   const carWorld = new THREE.Vector3();
   const hit = new THREE.Vector3();
-  const aimLocal = new THREE.Vector3();
-  const proj = new THREE.Vector3();
+  const local = new THREE.Vector3();
+  const p3 = new THREE.Vector3();
 
-  // Feedback: a white outline ring under the finger and a faint line from the car.
-  const fx = document.createElement("div");
-  fx.className = "wx-touch-fx";
+  // ---- Visual: ground ring around the car + a knob under the finger (SVG) ----
+  const fx = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  fx.setAttribute("class", "wx-touch-fx");
   fx.setAttribute("aria-hidden", "true");
-  fx.innerHTML = `<svg class="wx-touch-line"><line x1="0" y1="0" x2="0" y2="0" /></svg><span class="wx-touch-ring"></span>`;
-  const ring = fx.querySelector(".wx-touch-ring");
-  const line = fx.querySelector("line");
+  fx.innerHTML =
+    '<path class="wx-touch-inner" /><path class="wx-touch-ring" /><path class="wx-touch-lit" />' +
+    '<circle class="wx-touch-knob" r="' + V.knobRadius + '" />';
+  const innerPath = fx.querySelector(".wx-touch-inner");
+  const ringPath = fx.querySelector(".wx-touch-ring");
+  const litPath = fx.querySelector(".wx-touch-lit");
+  const knob = fx.querySelector(".wx-touch-knob");
   mount.appendChild(fx);
 
-  let touch = null; // { id, x, y, x0, y0, t0, driving }
+  let touch = null; // { id, x, y, tapCandidate }
   let raf = 0;
   let last = 0;
-  let aimAngle = null; // smoothed target heading (radians)
-  let steer = 0; // -1 right, 0, 1 left
-  let duty = 0; // throttle duty accumulator
+  let reversing = false;
+  let dutyThrottle = 0;
+  let dutySteer = 0;
   let brakeLeft = 0;
-  let wrote = false; // we set flags this touch (so release clears only ours)
+  let wrote = false;
+  let state = null; // last computed drive state (for the visual)
 
   const rect = () => mount.getBoundingClientRect();
   const keys = () => o.getKeys && o.getKeys();
+  const carLength = () => Math.max(1e-4, o.getCarLength ? o.getCarLength() : 1);
 
-  function setKeys(fwd, left, right, brake) {
+  function setKeys(fwd, rev, left, right) {
     const k = keys();
     if (!k) return;
     k.forward = fwd;
+    k.reverse = rev;
     k.left = left;
     k.right = right;
-    k.brake = brake;
+    k.brake = brakeLeft > 0;
     wrote = true;
   }
 
   function release() {
-    if (wrote) setKeys(false, false, false, brakeLeft > 0);
+    if (wrote) setKeys(false, false, false, false);
     wrote = brakeLeft > 0;
     touch = null;
-    aimAngle = null;
-    steer = 0;
-    duty = 0;
+    reversing = false;
+    dutyThrottle = 0;
+    dutySteer = 0;
+    state = null;
     fx.classList.remove("is-on");
   }
 
-  function carOnScreen(r) {
+  /** Finger (client px) → point on the car's ground plane, in the car's parent space. */
+  function groundPoint(clientX, clientY, r, out) {
     const car = o.getCar();
     const cam = o.getCamera();
-    if (!car || !cam) return null;
+    if (!car || !cam) return false;
     car.getWorldPosition(carWorld);
-    proj.copy(carWorld).project(cam);
-    return { x: (proj.x * 0.5 + 0.5) * r.width, y: (-proj.y * 0.5 + 0.5) * r.height };
+    plane.constant = -carWorld.y;
+    ndc.set(((clientX - r.left) / r.width) * 2 - 1, -((clientY - r.top) / r.height) * 2 + 1);
+    raycaster.setFromCamera(ndc, cam);
+    if (!raycaster.ray.intersectPlane(plane, hit)) return false;
+    out.copy(hit);
+    if (car.parent) car.parent.worldToLocal(out);
+    return true;
   }
 
-  function rayFrom(x, y, r) {
-    ndc.set((x / r.width) * 2 - 1, -(y / r.height) * 2 + 1);
-    raycaster.setFromCamera(ndc, o.getCamera());
-  }
-
-  function tapHitsCar(x, y) {
+  /** The drive from the current finger: progress, heading error, reverse. */
+  function compute(r) {
     const car = o.getCar();
-    if (!car || !o.getCamera()) return false;
-    const r = rect();
-    rayFrom(x - r.left, y - r.top, r);
-    return raycaster.intersectObject(car, true).length > 0;
+    if (!car || !groundPoint(touch.x, touch.y, r, local)) return null;
+    const dx = local.x - car.position.x;
+    const dz = local.z - car.position.z;
+    const L = carLength();
+    const inner = T.innerRadius * L;
+    const outer = T.outerRadius * L;
+    const dist = Math.hypot(dx, dz);
+    const progress = Math.min(1, Math.max(0, (dist - inner) / (outer - inner)));
+    const heading = o.getAngle();
+    const target = Math.atan2(dx, dz);
+    const delta = wrapAngle(target - heading);
+    // Reverse cone behind the car, with hysteresis.
+    const behind = Math.PI - Math.abs(delta); // 0 = straight behind
+    const limit = (T.reverseConeDeg + (reversing ? T.reverseHysteresisDeg : 0)) * DEG;
+    if (progress > 0) reversing = behind < limit;
+    // Steering amount: full lock at fullSteerDeg (measured from the rear when reversing).
+    const err = reversing ? wrapAngle(target - (heading + Math.PI)) : delta;
+    const steerAmount = Math.min(1, Math.abs(err) / (T.fullSteerDeg * DEG));
+    // Forward: err > 0 → "left" turns the heading up. Reverse: the opposite key.
+    const steerLeft = reversing ? err < 0 : err > 0;
+    return { progress, speed: Math.pow(progress, T.speedCurve), steerAmount, steerLeft, target, heading, inner, outer, dist };
+  }
+
+  function duty(acc, amount) {
+    if (amount >= T.fullDuty) return [acc, true];
+    if (amount <= 0) return [acc, false];
+    acc += amount;
+    if (acc >= 1) return [acc - 1, true];
+    return [acc, false];
   }
 
   function step(now) {
@@ -144,77 +194,69 @@ export function createTouchDrive(o) {
         if (!touch) wrote = false;
       }
     }
-    if (touch && touch.driving && o.enabled()) drive(dt);
-    else if (touch && touch.driving) {
-      // Not allowed right now (e.g. the level paused): hold nothing.
-      setKeys(false, false, false, brakeLeft > 0);
+    if (touch && o.enabled()) {
+      const r = rect();
+      state = compute(r);
+      if (state) {
+        if (state.progress > 0) touch.tapCandidate = false;
+        let fwd = false;
+        let steer = false;
+        [dutyThrottle, fwd] = duty(dutyThrottle, state.speed);
+        [dutySteer, steer] = duty(dutySteer, state.progress > 0 ? state.steerAmount : 0);
+        setKeys(fwd && !reversing, fwd && reversing, steer && state.steerLeft, steer && !state.steerLeft);
+        draw(r);
+        if (state.progress > 0) {
+          window.dispatchEvent(new CustomEvent(TOUCH_EVENT, { detail: { kind: "drive", dt, reverse: reversing } }));
+        }
+      }
+    } else if (touch) {
+      // Not allowed right now (paused, intro…): hold nothing.
+      setKeys(false, false, false, false);
       fx.classList.remove("is-on");
     }
     if (touch || brakeLeft > 0) raf = requestAnimationFrame(step);
   }
 
-  function drive(dt) {
-    const r = rect();
-    const fx0 = touch.x - r.left;
-    const fy0 = touch.y - r.top;
-    const c = carOnScreen(r);
+  // ---- Drawing (projected ground ring, lit arc, knob) ----
+  function toScreen(x, z, r) {
     const car = o.getCar();
-    if (!c || !car) return;
-    // Feedback.
+    p3.set(x, car.position.y, z);
+    if (car.parent) car.parent.localToWorld(p3);
+    p3.project(o.getCamera());
+    return [((p3.x * 0.5 + 0.5) * r.width).toFixed(1), ((-p3.y * 0.5 + 0.5) * r.height).toFixed(1)];
+  }
+  function arcPath(radius, from, to, r, closed) {
+    const car = o.getCar();
+    const n = Math.max(4, Math.round((V.ringSegments * (to - from)) / (Math.PI * 2)));
+    let d = "";
+    for (let i = 0; i <= n; i++) {
+      const a = from + ((to - from) * i) / n;
+      const [sx, sy] = toScreen(car.position.x + Math.sin(a) * radius, car.position.z + Math.cos(a) * radius, r);
+      d += (i ? "L" : "M") + sx + " " + sy;
+    }
+    return d + (closed ? "Z" : "");
+  }
+  function draw(r) {
+    const s = state;
+    const car = o.getCar();
     fx.classList.add("is-on");
-    ring.style.transform = `translate(${fx0}px, ${fy0}px)`;
-    line.setAttribute("x1", c.x.toFixed(1));
-    line.setAttribute("y1", c.y.toFixed(1));
-    line.setAttribute("x2", fx0.toFixed(1));
-    line.setAttribute("y2", fy0.toFixed(1));
-
-    // Throttle from the on-screen distance.
-    const minSide = Math.max(1, Math.min(r.width, r.height));
-    const dist = Math.hypot(fx0 - c.x, fy0 - c.y) / minSide;
-    let throttle = 0;
-    if (dist > T.deadZone) {
-      const k = Math.min(1, (dist - T.deadZone) / Math.max(1e-3, T.fullThrottleAt - T.deadZone));
-      throttle = T.minThrottle + (1 - T.minThrottle) * k;
-    }
-
-    // Aim: the finger's point on the car's driving plane, in the car's parent space.
-    plane.constant = -carWorld.y;
-    rayFrom(fx0, fy0, r);
-    let left = false;
-    let right = false;
-    if (raycaster.ray.intersectPlane(plane, hit)) {
-      aimLocal.copy(hit);
-      if (car.parent) car.parent.worldToLocal(aimLocal);
-      const dx = aimLocal.x - car.position.x;
-      const dz = aimLocal.z - car.position.z;
-      if (dx * dx + dz * dz > 1e-8) {
-        const target = Math.atan2(dx, dz);
-        aimAngle = aimAngle === null ? target : aimAngle + wrapAngle(target - aimAngle) * (1 - Math.exp(-T.aimSmooth * dt));
-        const err = wrapAngle(aimAngle - o.getAngle());
-        const a = Math.abs(err);
-        if (a > T.behindDeg * DEG && steer !== 0) {
-          // Straight behind: keep turning the way it already turns.
-        } else if (a > T.steerDeadDeg * DEG || (steer !== 0 && a > T.steerHoldDeg * DEG)) {
-          steer = err > 0 ? 1 : -1;
-        } else {
-          steer = 0;
-        }
-        left = steer > 0;
-        right = steer < 0;
-      }
-    }
-    // Duty cycle: forward is on for `throttle` of the frames.
-    let fwd = false;
-    if (throttle >= 0.97) fwd = true;
-    else if (throttle > 0) {
-      duty += throttle;
-      if (duty >= 1) {
-        duty -= 1;
-        fwd = true;
-      }
-    }
-    setKeys(fwd, left && throttle > 0, right && throttle > 0, brakeLeft > 0);
-    window.dispatchEvent(new CustomEvent(TOUCH_EVENT, { detail: { kind: "drive", dt: fwd || throttle > 0 ? dt : 0 } }));
+    fx.style.setProperty("--wx-touch-power", s.progress.toFixed(3));
+    fx.classList.toggle("is-reverse", reversing && s.progress > 0);
+    fx.classList.toggle("is-driving", s.progress > 0);
+    innerPath.setAttribute("d", arcPath(s.inner, 0, Math.PI * 2, r, true));
+    ringPath.setAttribute("d", arcPath(s.outer, 0, Math.PI * 2, r, true));
+    if (s.progress > 0) {
+      const half = (reversing ? V.reverseArcDeg : V.litArcDeg) * 0.5 * DEG;
+      const centre = reversing ? s.heading + Math.PI : s.target;
+      litPath.setAttribute("d", arcPath(s.outer, centre - half, centre + half, r, false));
+    } else litPath.setAttribute("d", "");
+    // Knob: the finger, held inside the ring.
+    const k = Math.min(1, s.outer / Math.max(1e-6, s.dist));
+    const kx = car.position.x + (local.x - car.position.x) * k;
+    const kz = car.position.z + (local.z - car.position.z) * k;
+    const [sx, sy] = toScreen(kx, kz, r);
+    knob.setAttribute("cx", sx);
+    knob.setAttribute("cy", sy);
   }
 
   function kick() {
@@ -224,21 +266,26 @@ export function createTouchDrive(o) {
     }
   }
 
-  // Capture on the mount: runs before the canvas's own handlers (e.g. orbit
-  // controls), so a driving finger never also moves the camera.
+  // Capture on the mount: before the canvas's own handlers, so a driving finger
+  // never also moves a camera.
   const onDown = (e) => {
     if (e.pointerType !== "touch") return;
-    // Only touches on the 3D view drive (the menu, buttons and popups sit above it).
-    if (!(e.target instanceof HTMLCanvasElement)) return;
+    if (!(e.target instanceof HTMLCanvasElement)) return; // the UI above the view never drives
     if (touch) {
-      // Only the first finger drives; others are ignored.
-      e.stopPropagation();
+      e.stopPropagation(); // a second finger is ignored
+      e.preventDefault();
       return;
     }
     if (!o.enabled()) return;
     e.stopPropagation();
     e.preventDefault();
-    touch = { id: e.pointerId, x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY, t0: performance.now(), driving: false };
+    touch = { id: e.pointerId, x: e.clientX, y: e.clientY, tapCandidate: false };
+    // A tap must start inside the inner radius (on / right around the car).
+    const car = o.getCar();
+    if (car && groundPoint(e.clientX, e.clientY, rect(), local)) {
+      const d = Math.hypot(local.x - car.position.x, local.z - car.position.z);
+      touch.tapCandidate = d <= T.innerRadius * carLength();
+    }
     try {
       mount.setPointerCapture(e.pointerId);
     } catch {
@@ -251,31 +298,27 @@ export function createTouchDrive(o) {
     e.preventDefault();
     touch.x = e.clientX;
     touch.y = e.clientY;
-    if (!touch.driving && Math.hypot(touch.x - touch.x0, touch.y - touch.y0) > T.tapMaxMovePx) touch.driving = true;
   };
   const onUp = (e) => {
     if (!touch || e.pointerId !== touch.id) return;
-    const quick = performance.now() - touch.t0 < T.tapMaxMs;
-    const still = Math.hypot(e.clientX - touch.x0, e.clientY - touch.y0) <= T.tapMaxMovePx;
-    const wasDriving = touch.driving;
+    const tap = e.type === "pointerup" && touch.tapCandidate && o.enabled();
     release();
-    if (e.type === "pointerup" && !wasDriving && quick && still && o.enabled() && tapHitsCar(e.clientX, e.clientY)) {
+    if (tap) {
       brakeLeft = T.tapBrakeSec;
       const k = keys();
       if (k) {
         k.brake = true;
         wrote = true;
       }
+      fx.classList.remove("is-tap");
+      void fx.getBoundingClientRect();
+      fx.classList.add("is-tap");
       window.dispatchEvent(new CustomEvent(TOUCH_EVENT, { detail: { kind: "tap" } }));
       kick();
     }
   };
-  // A finger held still past the tap time starts driving too.
-  const holdCheck = window.setInterval(() => {
-    if (touch && !touch.driving && performance.now() - touch.t0 >= T.tapMaxMs) touch.driving = true;
-  }, 50);
   const noMenu = (e) => {
-    if (touch || (e.pointerType === "touch")) e.preventDefault();
+    if (touch || e.pointerType === "touch") e.preventDefault();
   };
 
   mount.addEventListener("pointerdown", onDown, { capture: true, passive: false });
@@ -286,13 +329,11 @@ export function createTouchDrive(o) {
   mount.classList.add("wx-touch-surface");
 
   return {
-    /** Let go (e.g. the menu opened or the level left). */
     release() {
       release();
     },
     dispose() {
       release();
-      window.clearInterval(holdCheck);
       if (raf) cancelAnimationFrame(raf);
       mount.removeEventListener("pointerdown", onDown, true);
       mount.removeEventListener("pointermove", onMove, true);

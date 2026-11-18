@@ -843,6 +843,11 @@ createTouchDrive({
   getCamera: () => camera,
   getCar: () => (_playerCarCtx && _playerCarCtx.car) || car,
   getAngle: () => ((_playerCarCtx && _playerCarCtx.carState) || carState).angle,
+  // The player's car length (its own context while another car's is loaded).
+  getCarLength: () => {
+    const c = _activeCarCtx === _playerCarCtx || !_playerCarCtx.car ? null : _playerCarCtx;
+    return 2 * (c ? c.halfL : halfL) * (c ? c.storedCarScale : storedCarScale);
+  },
   getKeys: () => playerKeys,
   enabled: () => _meetingRoomSceneRendering && (!_mrIntro.enabled || _mrIntro.state === "done"),
 });

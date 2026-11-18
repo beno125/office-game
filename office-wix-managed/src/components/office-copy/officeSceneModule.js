@@ -3797,6 +3797,7 @@ let _officeSceneAnimationFrame = 0;
         getCamera: () => camera,
         getCar: () => car,
         getAngle: () => carState.angle,
+        getCarLength: () => 2 * halfL * storedCarScale,
         getKeys: () => keys,
         enabled: () => _officeSceneRendering && isOfficeIntroDone() && !!car,
       });

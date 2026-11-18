@@ -1,6 +1,14 @@
 /* General game menu (GameMenu.jsx): air-intake icon, panel, leave confirmation. */
 :root {
-  --wx-menu-inset: 16px; /* icon distance from the top right corner */
+  --wx-menu-inset: 16px; /* icon distance from the top left corner */
+  /* …plus the safe areas (notch, system bars) on phones. */
+  --wx-menu-top: max(var(--wx-menu-inset), env(safe-area-inset-top));
+  --wx-menu-left: max(var(--wx-menu-inset), env(safe-area-inset-left));
+  --wx-menu-open-ms: 240ms; /* modal fade + panel scale in */
+  --wx-menu-close-ms: 180ms; /* …and out (matches MENU_CLOSE_MS) */
+  --wx-menu-from-scale: 0.96;
+  --wx-menu-dim: rgba(7, 8, 12, 0.5); /* backdrop dim */
+  --wx-menu-backdrop-blur: 6px;
   --wx-menu-icon-w: 44px; /* icon size (SVG viewBox 44 × 24) */
   --wx-menu-icon-h: 24px;
   --wx-menu-button-pad: 10px 12px;
@@ -16,26 +24,39 @@
   --wx-menu-z: 25; /* above the HUD (5) and results popup (12), under the loaders (30) */
 }
 
+/* Icon: fixed top left on every screen and level (safe-area aware), never moves. */
 .wx-menu {
-  position: absolute;
-  top: var(--wx-menu-inset);
-  right: var(--wx-menu-inset);
+  position: fixed;
+  top: var(--wx-menu-top);
+  left: var(--wx-menu-left);
   z-index: var(--wx-menu-z);
+}
+.wx-menu-button {
   opacity: 0;
-  transform: translateY(-6px);
-  transition:
-    opacity var(--wx-dur) var(--wx-ease-out),
-    transform var(--wx-dur) var(--wx-ease-out);
   pointer-events: none;
 }
-.wx-menu.is-visible { opacity: 1; transform: none; pointer-events: auto; }
+.wx-menu.is-visible .wx-menu-button { opacity: 1; pointer-events: auto; }
 
-/* Click-outside catcher (also keeps clicks off the paused scene). */
-.wx-menu-backdrop {
+/* Centered modal: dimmed, slightly blurred backdrop + the panel in the middle. */
+.wx-menu-modal {
   position: fixed;
   inset: 0;
-  z-index: 0;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  padding: var(--wx-space-4);
+  animation: wx-menu-fade-in var(--wx-menu-open-ms) var(--wx-ease-out) both;
 }
+.wx-menu-modal.is-closing { animation: wx-menu-fade-out var(--wx-menu-close-ms) var(--wx-ease-out) both; }
+.wx-menu-backdrop {
+  position: absolute;
+  inset: 0;
+  background: var(--wx-menu-dim);
+  backdrop-filter: blur(var(--wx-menu-backdrop-blur));
+  -webkit-backdrop-filter: blur(var(--wx-menu-backdrop-blur));
+}
+@keyframes wx-menu-fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes wx-menu-fade-out { to { opacity: 0; } }
 
 /* ---------- Icon button ---------- */
 
@@ -52,6 +73,7 @@
   cursor: pointer;
   -webkit-tap-highlight-color: transparent;
   transition:
+    opacity var(--wx-dur) var(--wx-ease-out),
     color var(--wx-dur-fast) var(--wx-ease-out),
     border-color var(--wx-dur-fast) var(--wx-ease-out),
     box-shadow var(--wx-dur-fast) var(--wx-ease-out),
@@ -93,27 +115,23 @@
 /* ---------- Panel ---------- */
 
 .wx-menu-panel {
-  position: absolute;
-  z-index: 1;
-  top: calc(100% + var(--wx-space-2));
-  right: 0;
-  width: min(19rem, calc(100vw - 2 * var(--wx-menu-inset)));
-  max-height: calc(100vh - 90px);
+  position: relative;
+  width: min(20rem, 100%);
+  max-height: calc(100vh - 2 * var(--wx-space-6));
   overflow-y: auto;
   padding: var(--wx-space-5);
   display: grid;
   gap: var(--wx-space-3);
   background: var(--wx-surface-strong);
-  transform-origin: top right;
-  animation: wx-menu-in var(--wx-dur) var(--wx-ease-snap) both;
+  animation: wx-menu-in var(--wx-menu-open-ms) var(--wx-ease-out) both;
 }
-.wx-menu-panel.is-closing { animation: wx-menu-out 180ms var(--wx-ease-out) both; }
+.wx-menu-modal.is-closing .wx-menu-panel { animation: wx-menu-out var(--wx-menu-close-ms) var(--wx-ease-out) both; }
 @keyframes wx-menu-in {
-  from { opacity: 0; transform: translate(8px, -8px) scale(0.96); }
+  from { opacity: 0; transform: scale(var(--wx-menu-from-scale)); }
   to { opacity: 1; transform: none; }
 }
 @keyframes wx-menu-out {
-  to { opacity: 0; transform: translate(8px, -8px) scale(0.96); }
+  to { opacity: 0; transform: scale(var(--wx-menu-from-scale)); }
 }
 .wx-menu-title { margin-bottom: var(--wx-space-1); }
 .wx-menu-section { margin-top: var(--wx-space-1); }
@@ -194,8 +212,10 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .wx-menu-modal,
+  .wx-menu-modal.is-closing,
   .wx-menu-panel,
-  .wx-menu-panel.is-closing,
+  .wx-menu-modal.is-closing .wx-menu-panel,
   .wx-menu-confirm,
   .wx-menu-confirm-layer { animation: none; }
   .wx-menu-cap { transition: none; }

@@ -171,7 +171,6 @@ export default function GameMenu({ level, getState, onPause }) {
   return (
     <div className={"wx-menu" + (visible ? " is-visible" : "")} onKeyDown={open ? onMenuKeyDown : undefined}>
       <LandscapeHint show={visible && !open} />
-      {open && <div className="wx-menu-backdrop" onPointerDown={() => closeMenu()} aria-hidden="true" />}
       <button
         ref={iconRef}
         type="button"
@@ -186,10 +185,13 @@ export default function GameMenu({ level, getState, onPause }) {
       </button>
 
       {open && (
+        <div className={"wx-menu-modal" + (closing ? " is-closing" : "")}>
+          {/* Dimmed, slightly blurred backdrop: a click closes the menu. */}
+          <div className="wx-menu-backdrop" onPointerDown={() => closeMenu()} aria-hidden="true" />
         <div
           id="wx-game-menu"
           ref={panelRef}
-          className={"wx-panel wx-menu-panel" + (closing ? " is-closing" : "")}
+          className="wx-panel wx-menu-panel"
           role="dialog"
           aria-modal="true"
           aria-label="Game menu"
@@ -235,7 +237,7 @@ export default function GameMenu({ level, getState, onPause }) {
               );
             })}
           </ul>
-
+        </div>
         </div>
       )}
 

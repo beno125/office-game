@@ -4,10 +4,11 @@ import "./touchGuide.css";
 
 /**
  * Touch version of the controls guide (phones / tablets), in the keyboard
- * guide's white outline style: "Drag to drive" (a finger with its path) and
- * "Tap the car to brake" (a car with a tap ring). Each part lights up in the
- * guide's neon once done; after both (driven for a moment + one tap on the
- * car), it fades out and stays gone for the browser session.
+ * guide's white outline style, matching the touch control (a ring around
+ * the car): "Drag from the car to drive", "Drag behind it to reverse" and
+ * "Tap the car to brake". Each part lights up in the neon once used; after
+ * driving for a moment and one tap on the car, it fades out and stays gone
+ * for the browser session (reversing is shown, not required).
  */
 
 /** Seconds of driving that count as "drag to drive" done. */
@@ -39,14 +40,17 @@ function writeDone() {
   }
 }
 
-function DragIcon() {
+/** The control: a ring around the car (seen from above), the knob dragged ahead (or behind). */
+function RingIcon({ reverse }) {
+  const kx = reverse ? 12 : 52;
   return (
     <svg className="wx-tguide-icon" viewBox="0 0 64 48" aria-hidden="true">
-      {/* the finger's path, then the touch point */}
-      <path d="M8 38 C 20 38, 22 14, 40 14" strokeDasharray="2 5" />
-      <path d="M36 9 L 42 14 L 36 19" />
-      <circle cx="50" cy="14" r="7" />
-      <circle cx="50" cy="14" r="2.2" />
+      <ellipse cx="32" cy="24" rx="22" ry="17" />
+      <ellipse cx="32" cy="24" rx="9" ry="7" strokeDasharray="2 4" />
+      {/* the car, pointing right */}
+      <path d="M27 21 H 35 L 38 24 L 35 27 H 27 Z" />
+      <circle cx={kx} cy="24" r="5" />
+      <path d={reverse ? "M22 24 H 16" : "M42 24 H 48"} strokeDasharray="2 3" />
     </svg>
   );
 }
@@ -69,6 +73,7 @@ export default function TouchControlsGuide({ active }) {
   const [done] = useState(readDone);
   const [drove, setDrove] = useState(false);
   const [tapped, setTapped] = useState(false);
+  const [reversed, setReversed] = useState(false);
   const [phase, setPhase] = useState("hidden"); // hidden | in | out | gone
   const driveSec = useRef(0);
   const timers = useRef([]);
@@ -84,6 +89,7 @@ export default function TouchControlsGuide({ active }) {
     return onTouchDrive((d) => {
       if (d.kind === "tap") setTapped(true);
       else if (d.kind === "drive") {
+        if (d.reverse) setReversed(true);
         driveSec.current += d.dt || 0;
         if (driveSec.current >= TOUCH_DRIVE_DONE_SEC) setDrove(true);
       }
@@ -112,8 +118,12 @@ export default function TouchControlsGuide({ active }) {
       }}
     >
       <div className={"wx-tguide-step" + (drove ? " is-done" : "")}>
-        <DragIcon />
-        <span>Drag to drive</span>
+        <RingIcon />
+        <span>Drag from the car to drive</span>
+      </div>
+      <div className={"wx-tguide-step" + (reversed ? " is-done" : "")}>
+        <RingIcon reverse />
+        <span>Drag behind it to reverse</span>
       </div>
       <div className={"wx-tguide-step" + (tapped ? " is-done" : "")}>
         <TapCarIcon />
