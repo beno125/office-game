@@ -124,6 +124,8 @@ controls.listenToKeyEvents = () => {};
 
 let _model = null;
 let _freeCable = null;
+/** Set by the intro's cable shot (see _mrIntroCable): { aim, alert, phase, lunge }; null otherwise. */
+let _cableIntroDrive = null;
 const clock = new THREE.Clock();
 
 // Dark Mode = gaming arena: near-black room, little even fill, restrained
@@ -469,8 +471,8 @@ function applyLightBlend(b) {
     carRimLight.color.lerpColors(_cDark, _cBright, b);
     carRimLight.intensity = blendChannel(0.3, 0.7, b);
   }
-  for (let i = 0; i < _carLampSpots.length; i++) {
-    const entry = _carLampSpots[i];
+  for (let i = 0; i < _allCarLampSpots.length; i++) {
+    const entry = _allCarLampSpots[i];
     entry.spot.intensity = blendChannel(
       entry.kind === "front" ? 1.8 : 1.5,
       entry.kind === "front" ? 0.7 : 0.5,
@@ -643,7 +645,38 @@ const carRimLight = new THREE.PointLight(0x9b3dff, 0.5, 8, 2);
 carRimLight.position.set(1.5, 2.4, -2.2);
 carRimLight.name = "meetingRoomCarRimLight";
 car.add(carRimLight);
-const _carLampSpots = [];
+/**
+ * Real head / tail lamp spot lights on the opponents too? Off: the two extra
+ * cars' 8 spot lights halved the frame rate (47.6 → 23.7 fps); they get the
+ * same glowing lamps and table light cones (beam, tail, brake glows) instead.
+ */
+const ARENA_OPPONENT_LAMP_SPOTS = false;
+/**
+ * Without spot lights, the opponents' table glows are stronger and larger, to
+ * show the same light on the table as the player's lamps (spot + glow):
+ * opacity × and size × per kind.
+ */
+const ARENA_OPPONENT_GLOW = { front: 3.5, rear: 1.8, brake: 1.4, frontScale: 1.25, rearScale: 1.2 };
+/**
+ * …and the shine of their lamps on the glossy table (what the player's spot
+ * lights show): a streak where each lamp's reflection is seen from the camera,
+ * only inside the lamp's cone and reach, as strong as the player's spots in
+ * each light mode. Size in world units; cone half angles in radians.
+ */
+const ARENA_OPPONENT_LAMP_SHINE = {
+  front: { color: 0xfff1d0, opacity: 1, halfAngle: Math.PI / 6.3, reach: 3.4 },
+  rear: { color: 0xff3a2a, opacity: 1, halfAngle: Math.PI / 10.4, reach: 3.4 * 0.72 },
+  coneSoft: 0.3, // soft edge outside the cone (radians)
+  width: 0.075,
+  length: 0.2,
+  stretchMax: 3, // longer at low (grazing) camera angles, up to this ×
+};
+let tableLightGlows = []; // the loaded car's table glows (each car keeps its own, see _saveCarCtx)
+/** Every car's table glows (hidden from the table's mirror). */
+const _allTableLightGlows = [];
+let _carLampSpots = []; // the loaded car's head / tail lamp spots (each car keeps its own)
+/** Every car's lamp spots (their intensity follows the light mode). */
+const _allCarLampSpots = [];
 let carState = {
   speed: 0,
   angle: 0,
@@ -1826,6 +1859,8 @@ function _saveCarCtx(c) {
   c._exhFlickerTargets = _exhFlickerTargets;
   c._exhFlickerValues = _exhFlickerValues;
   c._exhFlickerNextChange = _exhFlickerNextChange;
+  c.tableLightGlows = tableLightGlows;
+  c._carLampSpots = _carLampSpots;
 }
 
 function _loadCarCtx(c) {
@@ -1872,6 +1907,8 @@ function _loadCarCtx(c) {
   _exhFlickerTargets = c._exhFlickerTargets;
   _exhFlickerValues = c._exhFlickerValues;
   _exhFlickerNextChange = c._exhFlickerNextChange;
+  tableLightGlows = c.tableLightGlows;
+  _carLampSpots = c._carLampSpots;
 }
 
 function _newCarCtx(group, keyState) {
@@ -1919,6 +1956,8 @@ function _newCarCtx(group, keyState) {
     _exhFlickerTargets: [1, 1],
     _exhFlickerValues: [1, 1],
     _exhFlickerNextChange: [0, 0],
+    tableLightGlows: [],
+    _carLampSpots: [],
     ready: false,
     isPlayer: false,
     ai: null,
@@ -2125,7 +2164,6 @@ function updateExhaustEffects(dt) {
   }
 }
 
-let tableLightGlows = [];
 const _carLightBarMeshes = [];
 let _tableLightGlowTex = null;
 let _tableRearLightGlowTex = null;
@@ -2338,10 +2376,28 @@ function setupTableLightReflections(carRoot) {
       });
     }
   }
-  _carLightBarMeshes.length = 0;
+  // No lamp spots on this car (an opponent): their shine on the table instead.
+  if (!_carLampSpots.length) {
+    const S = ARENA_OPPONENT_LAMP_SHINE;
+    for (const [name, kind, zSign] of [["frontLights", "front", 1], ["rearLights", "rear", -1]]) {
+      const mesh = carRoot.getObjectByName(name);
+      if (!mesh || !mesh.geometry) continue;
+      mesh.updateWorldMatrix(true, false);
+      if (!mesh.geometry.boundingBox) mesh.geometry.computeBoundingBox();
+      const lampH = mesh.geometry.boundingBox.getCenter(new THREE.Vector3()).applyMatrix4(mesh.matrixWorld).y - tableSurfaceY;
+      for (let side = -1; side <= 1; side += 2) {
+        const sprite = createTableLightGlowSprite(S[kind].color, 0.1, "shine");
+        const entry = { mesh, sprite, kind: "shine", shine: kind, zSign, side, lampH: Math.max(0.01, lampH), lamp: new THREE.Vector3(), fwd: new THREE.Vector3(), strength: 0, reach: 1, tableY: tableSurfaceY };
+        sprite.onBeforeRender = (r, sc, cam) => _placeLampShine(entry, cam);
+        tableLightGlows.push(entry);
+      }
+    }
+  }
+  for (const e of tableLightGlows) _allTableLightGlows.push(e);
+  // Every car's light bars (not only this one's): none of them shows in the table's mirror.
   carRoot.traverse((node) => {
     if (!node.isMesh || node.name !== "lightBar1") return;
-    _carLightBarMeshes.push(node);
+    if (_carLightBarMeshes.indexOf(node) < 0) _carLightBarMeshes.push(node);
   });
 }
 
@@ -2359,10 +2415,66 @@ function getHeadlightBeamCarLength(tableY) {
   return Math.max(0.12, _beamFrontPoint.distanceTo(_beamRearPoint));
 }
 
+/** Each car's lamp spots and table glows follow that car (its own heading and brake). */
+function updateArenaCarLights() {
+  for (let i = 0; i < arenaCars.length; i++) {
+    const c = arenaCars[i];
+    if (!c.ready && c !== _playerCarCtx) continue;
+    withCar(c, updateTableLightReflections);
+  }
+}
+
+const _shineCam = new THREE.Vector3();
+const _shineP = new THREE.Vector3();
+/** An opponent lamp's shine: where its reflection on the table is seen from `cam`. */
+function _placeLampShine(entry, cam) {
+  const S = ARENA_OPPONENT_LAMP_SHINE;
+  const K = S[entry.shine];
+  const sprite = entry.sprite;
+  const ty = entry.tableY;
+  _shineCam.setFromMatrixPosition(cam.matrixWorld);
+  const L = entry.lamp;
+  const camH = _shineCam.y - ty;
+  let a = 0;
+  if (camH > 0.002) {
+    // The lamp mirrored under the table, and the point on the table on the line to it.
+    const mirY = ty - (L.y - ty);
+    const t = camH / (_shineCam.y - mirY);
+    _shineP.set(
+      _shineCam.x + (L.x - _shineCam.x) * t,
+      ty,
+      _shineCam.z + (L.z - _shineCam.z) * t,
+    );
+    const vx = _shineP.x - L.x;
+    const vz = _shineP.z - L.z;
+    const d = Math.hypot(vx, vz);
+    if (d > 1e-4 && d < entry.reach) {
+      const cosA = (vx * entry.fwd.x + vz * entry.fwd.z) / d;
+      const edge0 = Math.cos(K.halfAngle + S.coneSoft);
+      const edge1 = Math.cos(K.halfAngle);
+      const cone = THREE.MathUtils.smoothstep(cosA, edge0, edge1);
+      const fall = Math.pow(1 - d / entry.reach, 1.5);
+      a = K.opacity * entry.strength * cone * fall;
+    }
+  }
+  sprite.material.opacity = Math.min(1, a);
+  if (a <= 0.003) return;
+  const dx = _shineCam.x - _shineP.x;
+  const dz = _shineCam.z - _shineP.z;
+  const flat = Math.hypot(dx, dz);
+  const stretch = Math.min(S.stretchMax, flat / Math.max(1e-3, camH));
+  sprite.position.copy(_shineP);
+  sprite.rotation.set(0, Math.atan2(dx, dz), 0);
+  sprite.scale.set(S.width, 1, S.length * Math.max(1, stretch));
+  sprite.updateMatrixWorld(true);
+}
+
 function updateTableLightReflections() {
   const tableY = tableSurfaceY;
   const dark = 1 - lightBlend;
-  if (!tableLightGlows.length || !_carReady) {
+  // An opponent knocked off the table: no glows left on the table.
+  const offTable = !_activeCarCtx.isPlayer && (!car.visible || car.position.y < tableSurfaceY - 0.05);
+  if (!tableLightGlows.length || !_carReady || offTable) {
     for (let gi = 0; gi < tableLightGlows.length; gi++) {
       tableLightGlows[gi].sprite.visible = false;
     }
@@ -2374,11 +2486,29 @@ function updateTableLightReflections() {
     const worldHalfL = Math.max(0.04, halfL * storedCarScale);
     for (let gi = 0; gi < tableLightGlows.length; gi++) {
       const entry = tableLightGlows[gi];
+      if (entry.kind === "shine") {
+        // The lamp's position and aim now; placed for the camera when drawn.
+        getMeshTableReflectionPoint(entry, tableY, entry.lamp);
+        entry.lamp.y = tableY + entry.lampH;
+        entry.fwd.copy(_carLightFwd).multiplyScalar(entry.zSign);
+        entry.tableY = tableY;
+        entry.reach = worldHalfL * 2 * ARENA_OPPONENT_LAMP_SHINE[entry.shine].reach;
+        // As strong as the player's spot of this kind in this light mode.
+        entry.strength =
+          entry.shine === "front"
+            ? blendChannel(1.8, 0.7, lightBlend) / 1.8
+            : blendChannel(1.5, 0.5, lightBlend) / 1.5;
+        entry.sprite.visible = true;
+        continue;
+      }
       let alpha = 0;
       if (entry.kind === "front") alpha = 0.045 + dark * 0.07;
       else if (entry.kind === "rear") alpha = 0.3;
       else if (entry.kind === "brake") alpha = keys.brake ? 0.92 : 0.18;
       else if (entry.kind === "bar") alpha = 0.38;
+      // No lamp spots on this car (an opponent): its glows stand in for their light.
+      const G = _carLampSpots.length ? null : ARENA_OPPONENT_GLOW;
+      if (G) alpha = Math.min(1, alpha * (G[entry.kind] || 1));
       if (alpha < 0.02) {
         entry.sprite.visible = false;
         continue;
@@ -2387,12 +2517,12 @@ function updateTableLightReflections() {
       entry.sprite.rotation.set(0, carYaw, 0);
       const lampSpan = entry._worldLampSpan || worldHalfW * 0.5;
       if (entry.kind === "front") {
-        const beamWidth = Math.max(0.36, lampSpan * 2.4);
+        const beamWidth = Math.max(0.36, lampSpan * 2.4) * (G ? G.frontScale : 1);
         const beamLength = beamWidth * HEADLIGHT_BEAM_ASPECT;
         _lightGlowPoint.addScaledVector(_carLightFwd, beamLength * 0.58);
         entry.sprite.scale.set(beamWidth * 1.2, 1, beamLength);
       } else if (entry.kind === "rear") {
-        const sc = Math.max(0.2, Math.min(lampSpan * 1.55, worldHalfW * 1.7));
+        const sc = Math.max(0.2, Math.min(lampSpan * 1.55, worldHalfW * 1.7)) * (G ? G.rearScale : 1);
         _lightGlowPoint.addScaledVector(
           _carLightFwd,
           -Math.max(0.09, worldHalfL * 0.42),
@@ -2445,7 +2575,7 @@ function updateCarLampSpotAim() {
 }
 
 function attachCarHeadTailSpotLights(carRoot) {
-  _carLampSpots.length = 0;
+  _carLampSpots = [];
   const worldLen = Math.max(0.3, halfL * storedCarScale * 2);
   const distance = worldLen * 3.4;
   attachCarLampSpots(
@@ -2527,6 +2657,7 @@ function attachCarLampSpots(
     car.add(spot);
     car.add(target);
     _carLampSpots.push({ spot, kind, zSign, aimAlong });
+    _allCarLampSpots.push(_carLampSpots[_carLampSpots.length - 1]);
   }
 }
 
@@ -2834,10 +2965,10 @@ function buildArenaCar(carScene, opts = {}) {
         car.updateMatrixWorld(true);
         syncCarBodyFromMesh();
       }
-      if (isPlayer) {
-        attachCarHeadTailSpotLights(car);
-        setupTableLightReflections(car);
-      }
+      // Every car: its lamps' glows on the table (headlight beam, tail and brake
+      // glows). Real spot lights only on the player's car (see ARENA_OPPONENT_LAMP_SPOTS).
+      if (isPlayer || ARENA_OPPONENT_LAMP_SPOTS) attachCarHeadTailSpotLights(car);
+      setupTableLightReflections(car);
       setupCarHitSparks();
       patchCarMaterialLighting(car);
       _activeCarCtx.ready = true;
@@ -3772,8 +3903,8 @@ function setupTablePlateReflector(root) {
     table.visible = true;
     if (tableBase) tableBase.visible = true;
     for (let i = 0; i < belowTable.length; i++) belowTable[i].visible = belowTableVisible[i];
-    for (let i = 0; i < tableLightGlows.length; i++) {
-      const sprite = tableLightGlows[i].sprite;
+    for (let i = 0; i < _allTableLightGlows.length; i++) {
+      const sprite = _allTableLightGlows[i].sprite;
       if (sprite && sprite.userData._reflVis !== undefined) {
         sprite.visible = sprite.userData._reflVis;
       }
@@ -3796,8 +3927,8 @@ function setupTablePlateReflector(root) {
       belowTableVisible[i] = belowTable[i].visible;
       belowTable[i].visible = false;
     }
-    for (let i = 0; i < tableLightGlows.length; i++) {
-      const sprite = tableLightGlows[i].sprite;
+    for (let i = 0; i < _allTableLightGlows.length; i++) {
+      const sprite = _allTableLightGlows[i].sprite;
       if (sprite) sprite.userData._reflVis = sprite.visible;
       if (sprite) sprite.visible = false;
     }
@@ -6904,7 +7035,13 @@ function updateFreeCableAssembly(dt) {
   const cable = _freeCable;
   if (!cable || !cable.ready) return;
   const time = clock.elapsedTime;
-  if (_carReady) {
+  // The intro's cable shot drives it (aim, alert, phase); no car is involved then.
+  const drive = _cableIntroDrive;
+  const carLive = _carReady && !drive;
+  if (drive) {
+    cable.contactHeld = false;
+    cable.carAim.copy(drive.aim);
+  } else if (_carReady) {
     const holdContact =
       cable.phase === "lunge" || cable.phase === "hold";
     if (holdContact && cable.contactHeld && carPhysBody) {
@@ -6950,14 +7087,12 @@ function updateFreeCableAssembly(dt) {
     cable.carAim.x - cable.smoothTip.x,
     cable.carAim.z - cable.smoothTip.z,
   );
-  const dist = _carReady
+  const dist = carLive
     ? Math.min(distAnchor, distTip)
     : FREE_CABLE_ATTACK_OUTER + 1;
-  const target = _cableSmoothstep(
-    FREE_CABLE_ATTACK_OUTER,
-    FREE_CABLE_ATTACK_INNER,
-    dist,
-  );
+  const target = drive
+    ? drive.alert
+    : _cableSmoothstep(FREE_CABLE_ATTACK_OUTER, FREE_CABLE_ATTACK_INNER, dist);
   const st = cable.strike || {};
   const followMul = st.followMul || 1;
   const follow = (target > cable.attack ? 2.8 : 1.7) * followMul;
@@ -6982,7 +7117,7 @@ function updateFreeCableAssembly(dt) {
   }
   const turnMul = st.turnMul || 1;
   const turnRate = (cable.phase === "lunge" ? 4.2 : 7.8) * turnMul;
-  if (dt > 0 && _carReady && alert > 0.12) {
+  if (dt > 0 && (carLive || drive) && alert > 0.12) {
     _cableRotateDir(cable.aimDir, cable.vA, dt * turnRate);
   }
   const dir = cable.aimDir;
@@ -6994,7 +7129,13 @@ function updateFreeCableAssembly(dt) {
   const retractDur = st.retractDur || 0.4;
   const midRetract = st.midRetract || 0.38;
 
-  if (alert < 0.18) {
+  if (drive) {
+    // The shot sets the phase and the strike (lunge) itself.
+    if (drive.phase !== cable.phase) cable.phaseT = 0;
+    cable.phase = drive.phase;
+    cable.phaseT += Math.max(0, dt);
+    cable.lunge = drive.lunge;
+  } else if (alert < 0.18) {
     cable.phase = "rest";
     cable.phaseT = 0;
     cable.lunge += (0 - cable.lunge) * (dt <= 0 ? 1 : 1 - Math.exp(-dt * 4));
@@ -7056,7 +7197,7 @@ function updateFreeCableAssembly(dt) {
     }
   }
   const lunge = _cableClamp01(cable.lunge);
-  if (_carReady && carPhysBody && lunge > 0.45) {
+  if (carLive && carPhysBody && lunge > 0.45) {
     if (!cable.contactHeld) {
       closestPointOnCarObb(cable.smoothTip, cable.carAim);
       _physQuat.set(
@@ -7282,7 +7423,7 @@ function updateFreeCableAssembly(dt) {
   main.geometry.computeBoundingSphere();
 
   poseCableHead(cable, liveTip, pts, alert);
-  if (lunge > 0.75 && _carReady) {
+  if (lunge > 0.75 && carLive) {
     getCableTipWorld(_carSurfN);
     _carSurfPt.copy(cable.carAim).sub(_carSurfN);
     const snapLen = _carSurfPt.length();
@@ -7293,7 +7434,7 @@ function updateFreeCableAssembly(dt) {
       poseCableHead(cable, liveTip, pts, alert);
     }
   }
-  if (dt > 0) updateCableCarImpactAll(dt);
+  if (dt > 0 && !drive) updateCableCarImpactAll(dt);
   updateFreeCableSparks(cable, dt, alert);
 }
 
@@ -9806,10 +9947,12 @@ const _rec = {
 //      wood back wall (backWallWood) until it's centred
 //   3. lights out — a still, wide view of the cars while the room switches to
 //      Dark Mode (a short dim moment, then the dark lights and glows come up)
-//   4. rivals — a low angle on the opponents from the front, facing the player
-//   5. air intake — close on the player car's hood blower while its intake
+//   4. cable — low and close on the free power cable: it rises off the table
+//      like a snake, crackling, and strikes once with a burst of sparks
+//   5. rivals — a low angle on the opponents from the front, facing the player
+//   6. air intake — close on the player car's hood blower while its intake
 //      flaps (airIn1–3) open and close
-//   6. player's car — a close, low orbit ending behind it and flowing straight
+//   7. player's car — a close, low orbit ending behind it and flowing straight
 //      into the gameplay camera (no fade): the level starts in Dark Mode
 // Meanwhile the round is held (no countdown, cars and AI still, HUD hidden,
 // no knock-offs) and input does nothing. Not replayed on "Play again".
@@ -9819,6 +9962,7 @@ const _rec = {
 const MR_INTRO_OPENING_SEC = 3.0;
 const MR_INTRO_ROOM_SEC = 3.8;
 const MR_INTRO_LIGHTS_OUT_SEC = 2.7;
+const MR_INTRO_CABLE_SEC = 4.2; // was 3.0
 const MR_INTRO_RIVALS_SEC = 2.5;
 const MR_INTRO_AIR_IN_SEC = 3.0;
 const MR_INTRO_PLAYER_SEC = 3.0;
@@ -9826,6 +9970,7 @@ const MR_INTRO_SHOTS = [
   { name: "opening", sec: MR_INTRO_OPENING_SEC },
   { name: "room", sec: MR_INTRO_ROOM_SEC, fade: true },
   { name: "lightsOut", sec: MR_INTRO_LIGHTS_OUT_SEC, fade: true },
+  { name: "cable", sec: MR_INTRO_CABLE_SEC, fade: true },
   { name: "rivals", sec: MR_INTRO_RIVALS_SEC, fade: true },
   { name: "airIn", sec: MR_INTRO_AIR_IN_SEC, fade: true },
   { name: "playerOrbit", sec: MR_INTRO_PLAYER_SEC, fade: true }, // ends on the gameplay camera
@@ -9913,6 +10058,51 @@ const MR_INTRO_PLAYER = {
   fovFrom: 44,
   rollDeg: 4,
   handover: 0.45, // from here the orbit flows into the gameplay camera
+};
+/**
+ * 4. Cable: the free power cable (freeCableMain + its frayed head) does its own
+ * coil / strike, driven by the shot instead of a nearby car (no car is touched).
+ * Times are seconds into the shot.
+ */
+const MR_INTRO_CABLE = {
+  riseAt: 0.35, // after the fade-in: the cable starts to lift… (was 0.3)
+  riseSec: 2.0, // …and is fully up (coiled, crackling) after this long (was 1.4: a slower rise)
+  strikeAt: 2.75, // one strike toward the front: lunge, hold, pull back (was 1.95)
+  lungeSec: 0.16,
+  holdSec: 0.24,
+  retractSec: 0.45,
+  crackleAt: 3.75, // one more crackle (a flash and a burst of sparks) before the shot ends
+  crackleBurst: 0.6, // its strength (the strike's is 1)
+  aimAhead: 0.8, // the strike's aim: this far along the cable's direction (× its length)…
+  aimHeight: 0.2, // …and this high above the table
+  riseMul: 1.25, // the cable's own coil shape, fixed for the shot (it's random in play)
+  archMul: 1.15,
+  // Camera: low, to the side of the cable, looking up at the raised head.
+  camYawDeg: 35, // from the cable's direction (in front of its head), round toward the table's centre
+  camDistFrom: 0.9, // from the head (horizontal), a slow push-in…
+  camDistTo: 0.72,
+  camHeight: 0.13, // above the table (the intro's lowest is 0.12)
+  follow: 3.2, // the view follows the cable's live head, smoothed (per second)
+  lookRise: 0.8, // looks at this share of the head's height above the table…
+  lookBack: 0.15, // …a little back along the cable (more of it in frame)
+  fovFrom: 38,
+  fovTo: 33,
+  shake: 0.005, // camera shake on the strike's flash (world units)…
+  shakeSec: 0.35, // …fading over this long
+  shakeHz: 38,
+};
+/** Spark particles flying off the cable's head during its shot (removed when the shot ends). */
+const MR_INTRO_CABLE_SPARKS = {
+  max: 72,
+  color: 0xcfeaff, // cold, bright white-blue
+  size: 0.012, // world units
+  rate: 34, // per second at full crackle
+  strikeBurst: 22, // extra on the strike
+  speedMin: 0.18,
+  speedMax: 0.5,
+  lifeMin: 0.16,
+  lifeMax: 0.5,
+  gravity: 1.8,
 };
 /** The switch to Dark Mode (seconds) and its short dim moment (exposure × (1 − this) at its deepest). */
 const MR_INTRO_DARK_SEC = 1.3;
@@ -10003,6 +10193,7 @@ function _mrIntroBuildRig() {
   }
   return {
     airIn,
+    cable: _mrIntroCableRig(centre),
     room,
     centre,
     surf: tableSurfaceY,
@@ -10077,6 +10268,33 @@ function _mrIntroShotPose(i, u, o) {
     o.look.y = R.surf + V.lookHeight;
     o.fov = introLerp(V.fovFrom, V.fovTo, e);
     o.roll = V.rollDeg * _mrIntroDeg * Math.sin(Math.PI * u);
+  } else if (name === "cable") {
+    const V = MR_INTRO_CABLE;
+    const C = R.cable;
+    if (!C) {
+      // No cable: a calm view of the table instead.
+      o.pos.set(R.centre.x + Math.sin(R.gAngle) * R.gRadius * 0.7, R.surf + 0.6, R.centre.z + Math.cos(R.gAngle) * R.gRadius * 0.7);
+      o.look.copy(R.carsCentre);
+      o.fov = 46;
+    } else {
+      // Framed on the cable's live head (smoothed), from the side, low.
+      const head = _mrCableLookValid ? _mrCableLook : C.head;
+      const dist = introLerp(V.camDistFrom, V.camDistTo, e);
+      o.look.copy(head).addScaledVector(C.dir, -C.length * V.lookBack);
+      o.look.y = R.surf + Math.max(0, head.y - R.surf) * V.lookRise;
+      o.pos.copy(o.look).addScaledVector(C.camDir, dist);
+      o.pos.y = R.surf + V.camHeight;
+      o.fov = introLerp(V.fovFrom, V.fovTo, e);
+      // A small shake on the strike's flash.
+      const k = (u * MR_INTRO_CABLE_SEC - V.strikeAt) / V.shakeSec;
+      if (k > 0 && k < 1) {
+        const a = V.shake * (1 - k) * (1 - k);
+        const t = u * MR_INTRO_CABLE_SEC * V.shakeHz;
+        o.pos.x += Math.sin(t * 1.0 + 0.3) * a;
+        o.pos.y += Math.sin(t * 1.37 + 1.1) * a * 0.6;
+        o.pos.z += Math.sin(t * 0.83 + 2.2) * a;
+      }
+    }
   } else if (name === "airIn") {
     const V = MR_INTRO_AIR_IN;
     const A = R.airIn;
@@ -10152,6 +10370,8 @@ function applyMeetingRoomIntroCamera(dt) {
   if (!_mrIntro.rig) {
     _mrIntro.rig = _mrIntroBuildRig();
     if (!_mrIntro.rig) return false;
+    // The cable shot's sparks: made (and their shader compiled) now, not on the shot's first frame.
+    if (_mrIntro.rig.cable) _mrIntroCableFxCreate();
   }
   if (_mrIntro.state === "playing") {
     _mrIntro.t += dt;
@@ -10162,9 +10382,210 @@ function applyMeetingRoomIntroCamera(dt) {
   }
   _mrIntroLighting();
   _mrIntroAirIn();
+  _mrIntroCable(dt);
   _mrIntro.updateFade();
   _mrIntro.applyCamera(_mrIntro.poseAt(_mrIntro.t, _mrIntroPose));
   return true;
+}
+
+/** The cable shot's frame, from the cable's own rest pose and size (null: no cable). */
+function _mrIntroCableRig(centre) {
+  const c = _freeCable;
+  if (!c || !c.ready) return null;
+  const V = MR_INTRO_CABLE;
+  const dir = c.drapeDir.clone().setY(0);
+  if (dir.lengthSq() < 1e-8) return null;
+  dir.normalize();
+  // Where its head ends up when fully raised (the cable's own coil pose at full alert).
+  const head = c.anchorWorld.clone().addScaledVector(dir, c.restLength * 0.4);
+  head.y = c.tableY + 0.3 * V.riseMul;
+  // The camera's side: the cable's direction turned toward the table's centre.
+  const side = new THREE.Vector3(-dir.z, 0, dir.x);
+  if (side.x * (centre.x - head.x) + side.z * (centre.z - head.z) < 0) side.negate();
+  const yaw = V.camYawDeg * _mrIntroDeg;
+  const camDir = dir.clone().multiplyScalar(Math.cos(yaw)).addScaledVector(side, Math.sin(yaw)).normalize();
+  const aim = c.anchorWorld.clone().addScaledVector(dir, c.restLength * V.aimAhead);
+  aim.y = c.tableY + V.aimHeight;
+  return { dir, head, camDir, aim, length: c.restLength };
+}
+
+const _mrCableDrive = { aim: new THREE.Vector3(), alert: 0, phase: "rest", lunge: 0 };
+let _mrCableFx = null;
+let _mrCableSavedStrike = null;
+let _mrCableCrackled = false;
+const _mrCableTip = new THREE.Vector3();
+/** The cable's head as the shot's camera follows it (smoothed). */
+const _mrCableLook = new THREE.Vector3();
+let _mrCableLookValid = false;
+
+/** The cable during its shot: rise, crackle, one strike; then it settles back by itself. */
+function _mrIntroCable(dt) {
+  const cable = _freeCable;
+  const C = _mrIntro.rig && _mrIntro.rig.cable;
+  if (!cable || !C) return;
+  const V = MR_INTRO_CABLE;
+  const local = (_mrIntro.state === "playing" ? _mrIntro.t : -1) - _mrIntro.shotStart("cable");
+  const inShot = local >= 0 && local < MR_INTRO_CABLE_SEC;
+  if (inShot) {
+    if (_cableIntroDrive !== _mrCableDrive) {
+      // The shot's own coil shape (no sideways whip: it stays facing the same way);
+      // its own (random) one comes back afterwards, so it rests exactly as before.
+      _mrCableSavedStrike = cable.strike;
+      _mrCableCrackled = false;
+      _cableRollStrike(cable);
+      Object.assign(cable.strike, { riseMul: V.riseMul, archMul: V.archMul, poseMul: 1, whipYaw: 0, followMul: 1, tipRateMul: 1 });
+      _cableIntroDrive = _mrCableDrive;
+    }
+    if (cable.spark && cable.spark.group) {
+      cable.spark.group.getWorldPosition(_mrCableTip);
+      if (!_mrCableLookValid) _mrCableLook.copy(_mrCableTip);
+      else _mrCableLook.lerp(_mrCableTip, 1 - Math.exp(-Math.max(0, dt) * V.follow));
+      _mrCableLookValid = true;
+    }
+    // One more crackle near the end.
+    if (!_mrCableCrackled && local >= V.crackleAt && cable.spark) {
+      _mrCableCrackled = true;
+      cable.spark.burst = Math.max(cable.spark.burst, V.crackleBurst);
+      cable.spark.nextFlash = 0;
+      if (_mrCableFx) _mrCableFx.acc += MR_INTRO_CABLE_SPARKS.strikeBurst * V.crackleBurst;
+    }
+    const D = _mrCableDrive;
+    D.aim.copy(C.aim);
+    D.alert = introEaseSine(Math.min(1, Math.max(0, (local - V.riseAt) / V.riseSec)));
+    const s = local - V.strikeAt;
+    if (D.alert < 0.05) {
+      D.phase = "rest";
+      D.lunge = 0;
+    } else if (s < 0) {
+      D.phase = "coil";
+      D.lunge = 0;
+    } else if (s < V.lungeSec) {
+      D.phase = "lunge";
+      D.lunge = _cableEaseOutCubic(s / V.lungeSec);
+    } else if (s < V.lungeSec + V.holdSec) {
+      D.phase = "hold";
+      D.lunge = 1;
+    } else if (s < V.lungeSec + V.holdSec + V.retractSec) {
+      D.phase = "retract";
+      D.lunge = 1 - _cableEaseInOut((s - V.lungeSec - V.holdSec) / V.retractSec);
+    } else {
+      D.phase = "coil";
+      D.lunge = 0;
+    }
+  } else if (_cableIntroDrive === _mrCableDrive) {
+    _mrCableLookValid = false;
+    // After the shot: back down on its own (eased), still not reacting to the cars.
+    _mrCableDrive.alert = 0;
+    _mrCableDrive.lunge = 0;
+    _mrCableDrive.phase = "coil";
+    if (cable.attack < 0.05) _mrIntroCableRelease(false);
+  }
+  _mrIntroCableSparks(dt, inShot, local >= MR_INTRO_CABLE_SEC);
+}
+
+/** The cable back to normal play (rest, its own coil shape); `now`: at once (the intro ended). */
+function _mrIntroCableRelease(now) {
+  if (_cableIntroDrive === _mrCableDrive) {
+    _cableIntroDrive = null;
+    const cable = _freeCable;
+    if (cable) {
+      if (now) cable.attack = 0;
+      cable.phase = "rest";
+      cable.phaseT = 0;
+      cable.lunge = 0;
+      if (_mrCableSavedStrike) cable.strike = _mrCableSavedStrike;
+      else _cableRollStrike(cable);
+      _mrCableSavedStrike = null;
+    }
+  }
+  if (now) _mrIntroCableFxDispose();
+}
+
+/** The spark particles' pool (all dark until the cable shot), in the scene. */
+function _mrIntroCableFxCreate() {
+  if (_mrCableFx) return;
+  const S = MR_INTRO_CABLE_SPARKS;
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(S.max * 3), 3).setUsage(THREE.DynamicDrawUsage));
+  geo.setAttribute("color", new THREE.BufferAttribute(new Float32Array(S.max * 3), 3).setUsage(THREE.DynamicDrawUsage));
+  const mat = new THREE.PointsMaterial({
+    size: S.size,
+    vertexColors: true,
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    toneMapped: false,
+  });
+  const points = new THREE.Points(geo, mat);
+  points.name = "introCableSparks";
+  points.frustumCulled = false;
+  points.renderOrder = 8;
+  scene.add(points);
+  if (renderer.compileAsync) renderer.compileAsync(points, camera, scene).catch(() => {});
+  _mrCableFx = { points, geo, mat, vel: new Float32Array(S.max * 3), life: new Float32Array(S.max), max: new Float32Array(S.max), next: 0, acc: 0, lastPhase: "", base: new THREE.Color(S.color) };
+}
+
+/** Spark particles off the cable's head during its shot; removed once it's over and they've faded. */
+function _mrIntroCableSparks(dt, inShot, after) {
+  const cable = _freeCable;
+  const S = MR_INTRO_CABLE_SPARKS;
+  if (!_mrCableFx) return;
+  const F = _mrCableFx;
+  const spark = cable && cable.spark;
+  const pos = F.geo.attributes.position.array;
+  const col = F.geo.attributes.color.array;
+  let count = 0;
+  if (inShot && spark && spark.group && dt > 0) {
+    spark.group.getWorldPosition(_mrCableTip);
+    const live = Math.min(1.5, spark.intensity + spark.flash);
+    F.acc += S.rate * live * dt;
+    if (cable.phase === "lunge" && F.lastPhase !== "lunge") F.acc += S.strikeBurst;
+    F.lastPhase = cable.phase;
+    for (; F.acc >= 1; F.acc -= 1) {
+      const i = F.next;
+      F.next = (F.next + 1) % S.max;
+      const az = Math.random() * Math.PI * 2;
+      const el = Math.random() * 1.2 - 0.2;
+      const sp = S.speedMin + Math.random() * (S.speedMax - S.speedMin);
+      F.vel[i * 3] = Math.cos(az) * Math.cos(el) * sp;
+      F.vel[i * 3 + 1] = Math.sin(el) * sp;
+      F.vel[i * 3 + 2] = Math.sin(az) * Math.cos(el) * sp;
+      pos[i * 3] = _mrCableTip.x;
+      pos[i * 3 + 1] = _mrCableTip.y;
+      pos[i * 3 + 2] = _mrCableTip.z;
+      F.max[i] = F.life[i] = S.lifeMin + Math.random() * (S.lifeMax - S.lifeMin);
+    }
+  }
+  const floorY = cable ? cable.tableY : -Infinity;
+  for (let i = 0; i < S.max; i++) {
+    if (F.life[i] <= 0) {
+      col[i * 3] = col[i * 3 + 1] = col[i * 3 + 2] = 0;
+      continue;
+    }
+    F.life[i] -= dt;
+    F.vel[i * 3 + 1] -= S.gravity * dt;
+    pos[i * 3] += F.vel[i * 3] * dt;
+    pos[i * 3 + 1] = Math.max(floorY + 0.002, pos[i * 3 + 1] + F.vel[i * 3 + 1] * dt);
+    pos[i * 3 + 2] += F.vel[i * 3 + 2] * dt;
+    const k = Math.max(0, F.life[i] / F.max[i]);
+    const b = k * k * 1.6;
+    col[i * 3] = F.base.r * b;
+    col[i * 3 + 1] = F.base.g * b;
+    col[i * 3 + 2] = F.base.b * b;
+    if (F.life[i] > 0) count++;
+  }
+  F.geo.attributes.position.needsUpdate = true;
+  F.geo.attributes.color.needsUpdate = true;
+  // Gone once the shot is over and the last spark has faded.
+  if (after && count === 0) _mrIntroCableFxDispose();
+}
+
+function _mrIntroCableFxDispose() {
+  if (!_mrCableFx) return;
+  scene.remove(_mrCableFx.points);
+  _mrCableFx.geo.dispose();
+  _mrCableFx.mat.dispose();
+  _mrCableFx = null;
 }
 
 /** The intake flaps during their shot: closed, open (after the fade-in), held, closed again. */
@@ -10182,6 +10603,7 @@ function finishMeetingRoomIntro() {
   if (_mrIntro.state === "done") return;
   _mrIntro.state = "done";
   _introAirInTarget = null;
+  _mrIntroCableRelease(true);
   _mrIntro.updateFade(); // no fade left over
   // Dark Mode from here on (the countdown and the game).
   lightBlend = 0;
@@ -11643,7 +12065,7 @@ function animate() {
   updateArenaRound(dt);
   syncCarCamera();
   updateCameraDirector(dt);
-  updateTableLightReflections();
+  updateArenaCarLights();
   updateCarShadowLight();
   updateArenaCable(dt);
   updateArenaCarEffects(dt);

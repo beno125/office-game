@@ -3755,6 +3755,12 @@ let _worldSwitched = false;
         };
       }
 
+      /**
+       * Real head / tail lamp spot lights on the AI cars? Off (was on): their 8
+       * spot lights cost about a third of the frame rate (68.4 → 42.9 fps); the
+       * table glows and glowing lamps stay, as on the meeting room's opponents.
+       */
+      const RACE_AI_LAMP_SPOTS = false;
       function createRaceAiCar(cfg) {
         const root = new THREE.Group();
         root.name = "raceCar" + cfg.name;
@@ -3778,9 +3784,11 @@ let _worldSwitched = false;
           o.material = paint;
         });
         root.add(model);
-        // Same head / tail lamps as the player's car: spot lights + table glows.
+        // Same head / tail lamps as the player's car: glowing lamps and their table
+        // glows (headlight beam, tail and brake glows); real spot lights only if
+        // RACE_AI_LAMP_SPOTS.
         const spots = [];
-        for (const e of _carLampSpots) {
+        if (RACE_AI_LAMP_SPOTS) for (const e of _carLampSpots) {
           const src = e.spot;
           const spot = new THREE.SpotLight(src.color, src.intensity, src.distance, src.angle, src.penumbra, src.decay);
           spot.name = src.name;
@@ -3828,6 +3836,11 @@ let _worldSwitched = false;
           ai: new RaceAIDriver(_raceTrack, cfg),
           tracker: new LapTracker(_raceTrack),
           wheels,
+          // Its own brake lights (the player's lit / unlit materials), on while it slows down.
+          brakeMesh: model.getObjectByName("mainRearBrakeLights") || null,
+          braking: false,
+          brakeDecel: 0,
+          prevSpeed: 0,
           spots,
           glows,
           bumper,
@@ -4164,6 +4177,27 @@ let _worldSwitched = false;
         }
       }
 
+      /**
+       * The AI cars never press "brake": they slow down by letting off (and
+       * reverse when stuck). Their brake lights come on while they slow down
+       * this hard (speed units per second², smoothed), and go off below `off`.
+       */
+      const RACE_AI_BRAKE_LIGHT = { on: 6, off: 3, smooth: 10 };
+      function updateRaceCarBrakeLights(rc, input, dt) {
+        if (dt <= 0) return;
+        const speed = rc.state.speed;
+        const decel = speed > 0.3 ? (rc.prevSpeed - speed) / dt : 0;
+        rc.prevSpeed = speed;
+        rc.brakeDecel += (decel - rc.brakeDecel) * (1 - Math.exp(-dt * RACE_AI_BRAKE_LIGHT.smooth));
+        const hard = input.brake || (input.reverse && speed > 0.3);
+        if (hard || rc.brakeDecel > RACE_AI_BRAKE_LIGHT.on) rc.braking = true;
+        else if (rc.brakeDecel < RACE_AI_BRAKE_LIGHT.off) rc.braking = false;
+        const src = car && car.userData.brakeLightMesh;
+        if (rc.brakeMesh && src && src._brakeMat && src._offMat) {
+          rc.brakeMesh.material = rc.braking ? src._brakeMat : src._offMat;
+        }
+      }
+
       /** Per car step (after the player's updateCar): AI driving and car contacts. */
       function stepKitchenRaceCars(dt) {
         if (!_raceTrack) return;
@@ -4177,6 +4211,7 @@ let _worldSwitched = false;
             input = rc.ai.computeInput(rc.pos, rc.state, dt, rc.input, _raceOthers);
           }
           stepCarDrive(rc.state, input, rc.pos, false, dt);
+          updateRaceCarBrakeLights(rc, input, dt);
           integrateRaceCarBump(rc.pos, rc.state, dt);
           raceCarVerticalStep(rc, dt);
           collideCarWithRails(rc.pos, rc.state, dt);
@@ -7026,7 +7061,7 @@ let _worldSwitched = false;
           const rc = _raceCars[ri];
           if (rc.isPlayer || !rc.glows) continue;
           carLighting.aimCarLampSpots(rc.spots, rc.root, tableY);
-          carLighting.drawCarTableGlows(rc.glows, rc.state.angle, false, tableY, Math.max(0.08, halfW * storedCarScale));
+          carLighting.drawCarTableGlows(rc.glows, rc.state.angle, rc.braking, tableY, Math.max(0.08, halfW * storedCarScale));
         }
       }
 
