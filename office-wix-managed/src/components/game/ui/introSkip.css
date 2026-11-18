@@ -1,0 +1,40 @@
+/* "Skip intro" button (cinematicIntro.js): on the bottom letterbox bar, right side. */
+:root {
+  --wx-intro-skip-inset: 16px; /* from the right edge and the bottom */
+}
+
+.wx-intro-skip {
+  position: absolute;
+  right: max(var(--wx-intro-skip-inset), env(safe-area-inset-right));
+  bottom: max(var(--wx-intro-skip-inset), env(safe-area-inset-bottom));
+  z-index: 5; /* over the letterbox bars (4) */
+  font-weight: 400; /* not bold */
+  color: var(--wx-text-2);
+  background: rgba(255, 255, 255, 0.04);
+  border-color: var(--wx-hairline-strong);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(6px);
+  transition:
+    opacity var(--wx-dur) var(--wx-ease-out),
+    transform var(--wx-dur) var(--wx-ease-out),
+    background-color var(--wx-dur-fast) var(--wx-ease-out),
+    border-color var(--wx-dur-fast) var(--wx-ease-out),
+    color var(--wx-dur-fast) var(--wx-ease-out),
+    box-shadow var(--wx-dur-fast) var(--wx-ease-out);
+}
+.wx-intro-skip.is-on { opacity: 1; pointer-events: auto; transform: none; }
+.wx-intro-skip:hover { color: var(--wx-text); }
+
+/* Skip's fade to black (over everything in the level, under the page UI). */
+.wx-intro-skip-fade {
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  background: #000;
+  opacity: 0;
+  pointer-events: none;
+  transition-property: opacity;
+  transition-timing-function: var(--wx-ease-out);
+}
+.wx-intro-skip-fade.is-on { opacity: 1; }

@@ -6,13 +6,25 @@
  * defines its shots (durations, `fade` flags, a pose per shot and the final
  * arrival onto its gameplay camera) and its own hooks around it.
  *
- * Used by the kitchen and the meeting room intros.
+ * Used by the office, the kitchen and the meeting room intros. Every intro
+ * also gets a "Skip intro" button (design system): a short fade to black, the
+ * intro jumps to its end (each level finishes it its normal way: camera,
+ * lights, HUD), then the fade lifts on the gameplay camera.
  */
+import "./ui/ui.css";
+import "./ui/introSkip.css";
+import { loadWixFonts } from "./ui/fonts.js";
 
 /** Fade to black between shots (seconds): out, fully black, in. Within the shots' times. */
 export const INTRO_FADE = { outSec: 0.35, holdSec: 0.06, inSec: 0.38 };
 /** Letterbox bars: height (share of the view, each) and slide in / out times. */
 export const INTRO_LETTERBOX = { height: 0.11, inSec: 0.9, outSec: 0.7 };
+/**
+ * Skip intro: the button shows this long into the intro (s); skipping fades to
+ * black over `fadeOutSec`, ends the intro, waits `holdSec` (the gameplay camera
+ * is drawn) and fades back in over `fadeInSec`.
+ */
+export const INTRO_SKIP = { showAfterSec: 0.8, fadeOutSec: 0.3, holdSec: 0.08, fadeInSec: 0.45, label: "Skip intro" };
 
 export function introEase(t) {
   return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
@@ -57,6 +69,9 @@ export function createCinematicIntro(o) {
     barsK: 0, // 0 = out, 1 = in
     barsSet: undefined,
     fadeEl: null,
+    skipBtn: null, // "Skip intro" button
+    skipEl: null, // skip's own fade to black
+    skipping: false,
 
     /** Start time (seconds) of the named shot. */
     shotStart(name) {
@@ -146,6 +161,7 @@ export function createCinematicIntro(o) {
 
     /** Letterbox bars: in while the intro plays, out once it's done (every frame). */
     updateLetterbox(dt) {
+      intro.updateSkip();
       const mount = getMount();
       if (!intro.bars) {
         if (intro.state !== "playing" || !mount) return;
@@ -183,6 +199,70 @@ export function createCinematicIntro(o) {
       }
     },
 
+    /** "Skip intro" button: shown while the intro plays (every frame, with the letterbox). */
+    updateSkip() {
+      const mount = getMount();
+      const playing = intro.state === "playing";
+      if (playing && !intro.skipping && !intro.skipBtn && mount) {
+        loadWixFonts();
+        const b = document.createElement("button");
+        b.type = "button";
+        b.className = "wx-btn wx-btn-secondary wx-btn-sm wx-intro-skip";
+        b.textContent = INTRO_SKIP.label; // text only
+        b.addEventListener("click", () => intro.skip());
+        b.addEventListener("keydown", (e) => {
+          if (e.key === "Enter" || e.code === "Space") {
+            e.preventDefault();
+            intro.skip();
+          }
+        });
+        mount.appendChild(b);
+        intro.skipBtn = b;
+      }
+      if (intro.skipBtn) {
+        const show = playing && !intro.skipping && intro.t >= INTRO_SKIP.showAfterSec;
+        intro.skipBtn.classList.toggle("is-on", show);
+        intro.skipBtn.tabIndex = show ? 0 : -1;
+        if (!playing) {
+          intro.skipBtn.remove();
+          intro.skipBtn = null;
+        }
+      }
+    },
+
+    /** Fade to black, jump to the intro's end (the level finishes it), fade back in. */
+    skip() {
+      if (intro.state !== "playing" || intro.skipping) return;
+      const mount = getMount();
+      if (!mount) return;
+      intro.skipping = true;
+      const el = document.createElement("div");
+      el.className = "wx-intro-skip-fade";
+      el.style.transitionDuration = `${INTRO_SKIP.fadeOutSec}s`;
+      mount.appendChild(el);
+      intro.skipEl = el;
+      requestAnimationFrame(() => el.classList.add("is-on"));
+      window.setTimeout(() => {
+        // Past the end: the level's own update finishes the intro on its next frame.
+        intro.t = intro.totalSec + 1;
+        const lift = () => {
+          if (intro.state !== "done") {
+            requestAnimationFrame(lift);
+            return;
+          }
+          window.setTimeout(() => {
+            el.style.transitionDuration = `${INTRO_SKIP.fadeInSec}s`;
+            el.classList.remove("is-on");
+            window.setTimeout(() => {
+              el.remove();
+              if (intro.skipEl === el) intro.skipEl = null;
+            }, INTRO_SKIP.fadeInSec * 1000 + 50);
+          }, INTRO_SKIP.holdSec * 1000);
+        };
+        requestAnimationFrame(lift);
+      }, INTRO_SKIP.fadeOutSec * 1000);
+    },
+
     /** Puts the camera at `p` for this frame's render (see restoreCamera). */
     applyCamera(p) {
       const camera = getCamera();
@@ -217,11 +297,14 @@ export function createCinematicIntro(o) {
   };
 
   // While the intro hasn't finished, keys, clicks and the wheel stop here,
-  // before any game handler sees them (no skipping, nothing queued for later).
+  // before any game handler sees them (nothing queued for later; only the
+  // "Skip intro" button skips).
   // Browser shortcuts still work.
   const blocksInput = o.blocksInput || (() => true);
   const block = (e) => {
     if (intro.state === "done" || !blocksInput()) return;
+    // The "Skip intro" button keeps its own clicks and keys.
+    if (intro.skipBtn && e.target instanceof Node && intro.skipBtn.contains(e.target)) return;
     e.stopImmediatePropagation();
     if (e.type === "keydown" && !e.metaKey && !e.ctrlKey && !e.altKey) e.preventDefault();
   };
