@@ -3,6 +3,7 @@
 export const SCENE_ROUTES = {
   game: "/",
   office: "/office",
+  officeCopy: "/office-copy", // experimental copy of the office (not in LEVEL_ORDER)
   kitchen: "/kitchen",
   meetingRoom: "/meeting-room",
 };
