@@ -26,7 +26,7 @@
   -webkit-font-smoothing: antialiased;
 }
 
-/* Top right (was top left): the game menu icon owns the top left corner. */
+/* Opposite corner to the game menu icon: top right on touch devices, top left on desktop. */
 .wx-hud {
   position: absolute;
   top: max(var(--wx-hud-inset), env(safe-area-inset-top));
@@ -38,6 +38,9 @@
   border: 1px solid var(--wx-hairline);
   border-radius: 14px;
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+}
+@media (hover: hover) and (pointer: fine) {
+  .wx-hud { right: auto; left: max(var(--wx-hud-inset), env(safe-area-inset-left)); }
 }
 .wx-hud-stat {
   display: grid;

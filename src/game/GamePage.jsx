@@ -24,9 +24,11 @@ const overlayBase = {
 const LOADER_DARKEN_MS = 250;
 const LOADER_REVEAL_MS = 750;
 
+/** Paths that go straight to the office (no start screen), with the "Get ready" loader until it's ready. */
+const DIRECT_PLAY_PATHS = ["/play", "/office", "/office-copy"];
 function pathIsPlay() {
   if (typeof window === "undefined") return false;
-  return window.location.pathname.replace(/\/$/, "") === "/play";
+  return DIRECT_PLAY_PATHS.includes(window.location.pathname.replace(/\/$/, ""));
 }
 
 /** Intro → loader → play, all on one URL (no navigation). */

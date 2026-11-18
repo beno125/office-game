@@ -1,0 +1,75 @@
+/* Desktop controls guide (ControlsGuide.jsx), in the design system. */
+:root {
+  --wx-cguide-bottom: 5vh; /* near the bottom centre, as before */
+  --wx-cguide-w: clamp(96px, 70px + 3.4vw, 132px); /* each key group's width, with the screen */
+  --wx-cguide-surface: rgba(16, 18, 26, 0.42); /* soft frosted surface, no border */
+  --wx-cguide-enter: var(--wx-dur-slow); /* snap into place */
+  --wx-cguide-leave: 360ms; /* soft fade out (GUIDE_LEAVE_SEC) */
+}
+
+.wx-cguide {
+  position: absolute;
+  left: 50%;
+  bottom: var(--wx-cguide-bottom);
+  z-index: 6;
+  display: flex;
+  align-items: flex-end;
+  gap: var(--wx-space-5);
+  padding: var(--wx-space-3) var(--wx-space-5);
+  border-radius: var(--wx-radius-panel);
+  background: var(--wx-cguide-surface);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  pointer-events: none;
+  transform: translateX(-50%);
+  animation: wx-cguide-in var(--wx-cguide-enter) var(--wx-ease-snap) both;
+}
+.wx-cguide.is-out { animation: wx-cguide-out var(--wx-cguide-leave) var(--wx-ease-out) both; }
+@keyframes wx-cguide-in {
+  from { opacity: 0; transform: translate(calc(-50% + var(--wx-snap-offset)), calc(var(--wx-snap-offset) * 0.6)); }
+  to { opacity: 1; transform: translateX(-50%); }
+}
+@keyframes wx-cguide-out {
+  to { opacity: 0; transform: translate(-50%, 6px); }
+}
+
+.wx-cguide-group {
+  display: grid;
+  justify-items: center;
+  gap: var(--wx-space-2);
+}
+.wx-cguide-divider {
+  align-self: stretch;
+  width: 1px;
+  margin: var(--wx-space-1) 0 calc(var(--wx-space-5) + 2px);
+  background: var(--wx-hairline);
+}
+
+.wx-cguide-svg { display: block; overflow: visible; }
+.wx-cguide-svg-arrows,
+.wx-cguide-svg-space { width: var(--wx-cguide-w); }
+
+/* "Space" inside its key, in the secondary text colour. */
+.wx-cguide-space { position: relative; }
+.wx-cguide-key-label {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: var(--wx-text-2);
+  font: 500 0.74rem/1 var(--wx-font-text);
+  letter-spacing: 0.04em;
+}
+
+/* Hints under the keys, in the muted text colour. */
+.wx-cguide-hint {
+  color: var(--wx-text-3);
+  font: 500 0.78rem/1 var(--wx-font-text);
+  letter-spacing: 0.02em;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wx-cguide,
+  .wx-cguide.is-out { animation: none; }
+  .wx-cguide.is-out { opacity: 0; }
+}

@@ -1,6 +1,5 @@
 import GamePage from "./game/GamePage.jsx";
 import OfficeScene from "./OfficeScene.jsx";
-import OfficeSceneCopy from "./OfficeSceneCopy.jsx";
 import KitchenScene from "./game/KitchenScene.jsx";
 import MeetingRoomScene from "./game/MeetingRoomScene.jsx";
 import WorldTransition from "./game/WorldTransition.jsx";
@@ -20,7 +19,8 @@ export default function App() {
     case "kitchen":
       return <KitchenScene />;
     case "office":
-      return <OfficeSceneCopy />;
+      // The office level: the "Get ready" loader until the scene is ready (GamePage starts straight away here).
+      return <GamePage />;
     case "office-old":
       return <OfficeScene />;
     case "meeting-room":

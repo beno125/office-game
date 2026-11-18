@@ -4,11 +4,8 @@ import { SCENE_ROUTES } from "./game/sceneRoutes.js";
 import { useLevelHotkeys } from "./game/useLevelHotkeys.js";
 import { setOfficeSceneMount } from "./office-copy/officeSceneMount.js";
 import ControlsGuide from "./game/ControlsGuide.jsx";
-import { Label } from "./game/ui/ui.jsx";
 import GameMenu from "./game/ui/GameMenu.jsx";
 
-/** Loader fade-out once the scene is ready (ms); the intro starts as it begins. */
-const OFFICE_LOADER_FADE_MS = 450;
 
 /**
  * @param {object} props
@@ -30,7 +27,6 @@ export default function OfficeSceneCopy({
   // The loader covers the canvas until the scene is ready (car placed, gums
   // settled, first intro shot drawn), so the first frame seen is the intro.
   const [sceneReady, setSceneReady] = useState(false);
-  const [loaderGone, setLoaderGone] = useState(false);
   // The intro has ended and the player has control: show the controls guide.
   const [introDone, setIntroDone] = useState(false);
   useLevelHotkeys(SCENE_ROUTES.office);
@@ -58,12 +54,10 @@ export default function OfficeSceneCopy({
         onTransitionRef.current?.();
       },
     );
-    let fadeTimer = 0;
     const revealScene = () => {
       if (disposed || !sceneModule) return;
       setSceneReady(true);
       sceneModule.startOfficeIntro();
-      fadeTimer = window.setTimeout(() => setLoaderGone(true), OFFICE_LOADER_FADE_MS);
     };
     const stopSceneReady = onOfficeSceneEvent("office-scene-ready", revealScene);
     const stopIntroDone = onOfficeSceneEvent("office-intro-done", () => {
@@ -88,7 +82,6 @@ export default function OfficeSceneCopy({
 
     return () => {
       disposed = true;
-      window.clearTimeout(fadeTimer);
       stopKitchenTransition();
       stopSceneReady();
       stopIntroDone();
@@ -113,7 +106,6 @@ export default function OfficeSceneCopy({
 
   const showModuleOverlay =
     !hideModuleLoadingOverlay && (phase === "loading" || phase === "error");
-  const showSceneLoader = !hideModuleLoadingOverlay && phase !== "error" && !loaderGone;
 
   return (
     <div
@@ -132,18 +124,6 @@ export default function OfficeSceneCopy({
       <div id="perfBadge" aria-hidden="true" />
       <ControlsGuide active={introDone} />
       <GameMenu level={SCENE_ROUTES.office} getState={getMenuState} onPause={pauseForMenu} />
-      {showSceneLoader && (
-        <div
-          style={{
-            ...overlayStyle,
-            background: "var(--wx-bg)",
-            opacity: sceneReady ? 0 : 1,
-            transition: `opacity ${OFFICE_LOADER_FADE_MS}ms ease`,
-          }}
-        >
-          <Label marker="var(--wx-amber)">Loading 3D scene…</Label>
-        </div>
-      )}
       {showModuleOverlay && phase === "error" && (
         <div style={overlayStyle}>
           Scene bundle failed to load. Open DevTools → Console (F12) and check for red errors

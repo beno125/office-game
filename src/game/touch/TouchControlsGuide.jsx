@@ -8,7 +8,7 @@ import "./touchGuide.css";
  * the car): "Drag from the car to drive", "Drag behind it to reverse" and
  * "Tap the car to brake". Each part lights up in the neon once used; after
  * driving for a moment and one tap on the car, it fades out and stays gone
- * for the browser session (reversing is shown, not required).
+ * until the page loads again (reversing is shown, not required).
  */
 
 /** Seconds of driving that count as "drag to drive" done. */
@@ -17,27 +17,16 @@ const TOUCH_DRIVE_DONE_SEC = 1.5;
 const GUIDE_DONE_DELAY_SEC = 0.6;
 const GUIDE_FADE_IN_SEC = 0.6;
 const GUIDE_FADE_OUT_SEC = 0.7;
-/** Remembered for this browser session once completed. */
-const GUIDE_DONE_KEY = "officeTouchGuideDone";
 /** The Space action in every level (brake). */
 const TAP_ACTION = "brake";
 
-let doneThisSession = false;
+/** Completed for this page load only (shows again whenever the office loads, like the keyboard guide). */
+let doneThisLoad = false;
 function readDone() {
-  if (doneThisSession) return true;
-  try {
-    return sessionStorage.getItem(GUIDE_DONE_KEY) === "1";
-  } catch {
-    return false;
-  }
+  return doneThisLoad;
 }
 function writeDone() {
-  doneThisSession = true;
-  try {
-    sessionStorage.setItem(GUIDE_DONE_KEY, "1");
-  } catch {
-    /* private mode: the module flag covers this page load */
-  }
+  doneThisLoad = true;
 }
 
 /** The control: a ring around the car (seen from above), the knob dragged ahead (or behind). */

@@ -1571,39 +1571,6 @@ export function isKitchenSceneReady() {
       darkPurpleFill.position.set(10, 25, -20);
       scene.add(darkPurpleFill);
 
-      const AXES_SIZE = 12.5;
-      const axesHelper = new THREE.AxesHelper(AXES_SIZE);
-      scene.add(axesHelper);
-
-      function makeAxisLabel(text, hexColor) {
-        const c = document.createElement("canvas");
-        c.width = 64;
-        c.height = 64;
-        const ctx = c.getContext("2d");
-        ctx.fillStyle = "#000000";
-        ctx.fillRect(0, 0, 64, 64);
-        ctx.font = "bold 52px sans-serif";
-        ctx.textAlign = "center";
-        ctx.textBaseline = "middle";
-        ctx.fillStyle = "#" + ("000000" + hexColor.toString(16)).slice(-6);
-        ctx.fillText(text, 32, 32);
-        const tex = new THREE.CanvasTexture(c);
-        tex.needsUpdate = true;
-        const mat = new THREE.SpriteMaterial({ map: tex, depthTest: false });
-        const sprite = new THREE.Sprite(mat);
-        sprite.scale.set(2, 2, 1);
-        return sprite;
-      }
-      const axisLabelX = makeAxisLabel("X", 0xff0000);
-      axisLabelX.position.set(AXES_SIZE, 0, 0);
-      scene.add(axisLabelX);
-      const axisLabelY = makeAxisLabel("Y", 0x00ff00);
-      axisLabelY.position.set(0, AXES_SIZE, 0);
-      scene.add(axisLabelY);
-      const axisLabelZ = makeAxisLabel("Z", 0x0000ff);
-      axisLabelZ.position.set(0, 0, AXES_SIZE);
-      scene.add(axisLabelZ);
-
       const darkMode = {
         background: 0x1a1a1a,
         ambient: { color: 0x4a4460, intensity: 0.65 },

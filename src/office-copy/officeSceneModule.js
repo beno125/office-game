@@ -2368,18 +2368,18 @@ let _officeSceneAnimationFrame = 0;
       const GAMING_DARK = {
         /** Room background (was 0x1a1a1a). */
         background: 0x07060d,
-        /** General light, kept very low so most of the room falls into darkness (was 0x4a4460 @ 0.65). */
-        ambient: { color: 0x241c3a, intensity: 0.08 },
-        /** Was sky 0x88aaff / ground 0xdd88aa @ 0.5. */
-        hemisphere: { sky: 0x2b3f9e, ground: 0x3d0f33, intensity: 0.12 },
+        /** General light, kept very low so most of the room falls into darkness (was 0x4a4460 @ 0.65, then 0x241c3a: less purple now). */
+        ambient: { color: 0x1f1f33, intensity: 0.08 },
+        /** Was sky 0x88aaff / ground 0xdd88aa @ 0.5; ground was 0x3d0f33 (less purple now). */
+        hemisphere: { sky: 0x2b3f9e, ground: 0x2b1a33, intensity: 0.12 },
         /** Two coloured rim lights from behind the desk (were 0xee77aa @ 0.7 and 0x5588dd @ 0.9). */
-        dirPink: { color: 0xff319d, intensity: 0.3 },
+        dirPink: { color: 0xff319d, intensity: 0.15 }, // was 0.3 (pink + blue read as too much purple)
         dirBlue: { color: 0x165dff, intensity: 0.38 },
         /** Soft fills (were 0xdd88aa @ 0.4 and 0x77aaff @ 0.45). */
-        dirFillPink: { color: 0xd52cff, intensity: 0.06 },
+        dirFillPink: { color: 0xd52cff, intensity: 0.03 }, // was 0.06
         dirFillBlue: { color: 0x2090ff, intensity: 0.06 },
         /** Were 0xee66aa / 0x5588dd @ 0.5. */
-        pointPink: { color: 0xff319d, intensity: 0.15 },
+        pointPink: { color: 0xff319d, intensity: 0.08 }, // was 0.15
         pointBlue: { color: 0x2090ff, intensity: 0.15 },
         warmKey: { color: 0xfff0dd, intensity: 0 },
         warmFill: { color: 0xffe8cc, intensity: 0 },
@@ -2390,12 +2390,12 @@ let _officeSceneAnimationFrame = 0;
          * 0x4488ee @ 1.4, pink point 0xff44aa @ 1.5 at [15, 18, -10], purple fill
          * dir 0x8844cc @ 1.2.
          */
-        // Violet under-desk glow on the floor and the legs (point).
-        underDeskGlow: { color: 0x715cff, intensity: 16, pos: [0, 3.5, 3], distance: 30, decay: 1.5 },
-        // Purple glow on the wall / blinds behind the desk (point).
-        wallGlow: { color: 0xd52cff, intensity: 18, pos: [2, 12, -15.5], distance: 34, decay: 1.4 },
+        // Soft blue-violet under-desk glow on the floor and the legs (point; was 0x715cff @ 16).
+        underDeskGlow: { color: 0x7a86ff, intensity: 10, pos: [0, 3.5, 3], distance: 30, decay: 1.5 },
+        // Soft violet glow on the wall / blinds behind the desk (point; was purple 0xd52cff @ 18).
+        wallGlow: { color: 0x9b7cff, intensity: 11, pos: [2, 12, -15.5], distance: 34, decay: 1.4 },
         // Rim lights for the desk objects, low from behind (directional, from `pos` toward the desk).
-        rimMagenta: { color: 0xff319d, intensity: 0.55, pos: [-24, 13, -17], target: [-6, 7.2, -6] },
+        rimMagenta: { color: 0xff319d, intensity: 0.3, pos: [-24, 13, -17], target: [-6, 7.2, -6] }, // was 0.55
         rimBlue: { color: 0x2090ff, intensity: 0.55, pos: [26, 13, -17], target: [14, 7.2, -6] },
         /**
          * Accent lights (dark only, no shadows). spot: a light pool aimed at
@@ -2406,7 +2406,8 @@ let _officeSceneAnimationFrame = 0;
           // Purple-magenta wash: now only a subtle tint, aimed at the back of the
           // desk and the wall so the centre stays white (was intensity 26, target
           // [-1, 6.25, -4]; before that 28 at [-8, 19, 2] → [-5, 6.25, -3], angle 0.62).
-          { type: "spot", color: 0xff319d, intensity: 8, pos: [-4, 30, 7], target: [-1, 6.25, -11], angle: 1.05, penumbra: 1, distance: 60, decay: 1.4 },
+          // (intensity was 8)
+          { type: "spot", color: 0xff319d, intensity: 6, pos: [-4, 30, 7], target: [-1, 6.25, -11], angle: 1.05, penumbra: 1, distance: 60, decay: 1.4 },
           // Blue pool over the right of the desk (charger, gum machine, drawer side).
           { type: "spot", color: 0x2090ff, intensity: 28, pos: [15, 19, 2], target: [16, 6.25, -4], angle: 0.6, penumbra: 0.85, distance: 40, decay: 1.4 },
         ],
@@ -2466,7 +2467,7 @@ let _officeSceneAnimationFrame = 0;
         /** The duck's eyeballs: a soft white glow so they read white (bright mode / dark mode). */
         eyeWhite: { bright: 0.18, dark: 0.42 },
         /** The two shadow-casting lights (car on the desk, desk side wall): bright mode keeps white @ 0.22. */
-        shadowLights: { color: 0x9a8cff, intensity: 0.12 },
+        shadowLights: { color: 0xdfe3f5, intensity: 0.12 }, // colour was lavender 0x9a8cff
         /** Emissive strength in dark mode (bright mode keeps its own values). */
         /** (phoneChargerLight and headphonesLight are on the desk: back to the backup's 2.2 and 3.4; were 4.5 and 6.5.) */
         emissive: { phoneChargerLight: 2.2, headphonesLight: 3.4, roomLight: 0.12 },

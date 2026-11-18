@@ -4,6 +4,7 @@
   /* …plus the safe areas (notch, system bars) on phones. */
   --wx-menu-top: max(var(--wx-menu-inset), env(safe-area-inset-top));
   --wx-menu-left: max(var(--wx-menu-inset), env(safe-area-inset-left));
+  --wx-menu-right: max(var(--wx-menu-inset), env(safe-area-inset-right));
   --wx-menu-open-ms: 240ms; /* modal fade + panel scale in */
   --wx-menu-close-ms: 180ms; /* …and out (matches MENU_CLOSE_MS) */
   --wx-menu-from-scale: 0.96;
@@ -36,6 +37,10 @@
   pointer-events: none;
 }
 .wx-menu.is-visible .wx-menu-button { opacity: 1; pointer-events: auto; }
+/* Desktop (mouse): top right instead (touch devices keep it top left). */
+@media (hover: hover) and (pointer: fine) {
+  .wx-menu { left: auto; right: var(--wx-menu-right); }
+}
 
 /* Centered modal: dimmed, slightly blurred backdrop + the panel in the middle. */
 .wx-menu-modal {

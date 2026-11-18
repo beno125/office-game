@@ -1,43 +1,43 @@
 import { useEffect, useRef, useState } from "react";
 import { isTouchDevice } from "./touch/touchDrive.js";
 import TouchControlsGuide from "./touch/TouchControlsGuide.jsx";
+import "./ui/ui.css";
+import "./ui/controlsGuide.css";
 
 /**
- * On-screen guide to the driving keys: the arrow keys (inverted T) and Space,
- * drawn as thin white vector outlines like a small piece of a keyboard. A key
- * lights up as a violet → pink neon tube while it's pressed; an arrow that has
- * been used keeps a faint neon tint. Once all four arrows have been used, the
- * guide fades out and doesn't come back for the rest of the browser session.
+ * On-screen guide to the driving keys (desktop), in the design system: the
+ * arrow keys (inverted T) and the wide Space key as thin white outlines (the
+ * menu icon's line), with short hints in Wix Madefor Text ("Drive", and the
+ * Space action), on a soft frosted surface without a border. A key lights up
+ * as the violet → pink neon tube while it's pressed; an arrow that has been
+ * used keeps a faint neon tint. Once all four arrows have been used, the guide
+ * fades out (until the page loads again).
  *
  * It only listens to key events (passive): it never blocks or changes input.
+ * Phones / tablets get the touch guide instead.
  */
 
-/** Neon line colours (gradient along the line): Wix Blue → purple, the UI's --wx-action and --wx-purple (were violet #9b4dff → hot pink #ff2fb3). */
-const NEON_FROM = "#0c6efc";
-const NEON_TO = "#674fe6";
-/** Glow around the lit line: blur radius (SVG units) and strength (0..1, opacity of the glow layer). */
-const NEON_GLOW_BLUR = 3.2;
+/** Neon line colours, kept from the original guide (gradient along the line: violet → hot pink). */
+const NEON_FROM = "#9b4dff";
+const NEON_TO = "#ff2fb3";
+/** Glow around the lit line: blur radius (SVG units, sized for the new 1.5 line; was 2.6, then 1.7) and strength (0..1). */
+const NEON_GLOW_BLUR = 1.0;
 const NEON_GLOW_STRENGTH = 0.95;
 /** A used arrow keeps this much of the neon after release (0 = back to plain white). */
 const NEON_USED_LEVEL = 0.35;
 /** Seconds to light up / go back to white. */
 const KEY_LIGHT_SEC = 0.1;
-/** Guide fade in / out (s), and the pause after the last arrow is used before it fades (s). */
-const GUIDE_FADE_IN_SEC = 0.6;
-const GUIDE_FADE_OUT_SEC = 0.7;
+/** Pause after the last arrow is used before the guide leaves (s); its motion is in controlsGuide.css. */
 const GUIDE_DONE_DELAY_SEC = 0.6;
-/** "SPACE" label: the UI's label type (Wix Madefor Text). */
-const KEY_LABEL_FONT = '600 11px "Wix Madefor Text", system-ui, -apple-system, sans-serif';
-/** Line width and corner radius (SVG units, viewBox is 352 × 118). */
-const LINE_WIDTH = 1.6;
-const KEY_RADIUS = 8;
-/** Guide width on screen: clamp(min, preferred vw, max). */
-const GUIDE_WIDTH = "clamp(200px, 26vw, 360px)";
-/** Distance from the bottom of the screen. */
-const GUIDE_BOTTOM = "5vh";
-/** Remembered for this browser session once the guide has been completed. */
-const GUIDE_DONE_KEY = "officeControlsGuideDone";
-
+const GUIDE_LEAVE_SEC = 0.36; // matches --wx-cguide-leave
+/** Line width (the menu icon's line), corner radius and key size / gap (SVG units). */
+const LINE_WIDTH = 1.5;
+const KEY_RADIUS = 7;
+const K = 34;
+const GAP = 6;
+/** The Space action's name (every level: brake) and the arrows' hint. */
+const SPACE_ACTION = "Brake";
+const ARROWS_HINT = "Drive";
 /** Keys the game drives with → the guide key they light (arrows and W A S D both drive). */
 const KEY_CODES = {
   ArrowUp: "up",
@@ -52,48 +52,41 @@ const KEY_CODES = {
 };
 const ARROWS = ["up", "down", "left", "right"];
 
-let guideDoneThisSession = false;
+/**
+ * Completed (all four arrows used) for this page load only: the guide shows
+ * again after the intro whenever the office loads (it used to be remembered
+ * for the whole browser session, which hid it on every reload / revisit).
+ */
+let guideDoneThisLoad = false;
 function readGuideDone() {
-  if (guideDoneThisSession) return true;
-  try {
-    return sessionStorage.getItem(GUIDE_DONE_KEY) === "1";
-  } catch {
-    return false;
-  }
+  return guideDoneThisLoad;
 }
 function writeGuideDone() {
-  guideDoneThisSession = true;
-  try {
-    sessionStorage.setItem(GUIDE_DONE_KEY, "1");
-  } catch {
-    /* private mode: the module flag still covers this page load */
-  }
+  guideDoneThisLoad = true;
 }
 
-// Layout (SVG units): key size, gap, and the bottom row y.
-const K = 44;
-const GAP = 8;
-const ROW2_Y = 70;
-const ARROWS_X = 200; // Left key's x; Down and Right follow
-const KEYS = {
-  space: { x: 2, y: ROW2_Y, w: 176, h: K },
-  left: { x: ARROWS_X, y: ROW2_Y, w: K, h: K },
-  down: { x: ARROWS_X + K + GAP, y: ROW2_Y, w: K, h: K },
-  right: { x: ARROWS_X + 2 * (K + GAP), y: ROW2_Y, w: K, h: K },
-  up: { x: ARROWS_X + K + GAP, y: ROW2_Y - K - GAP, w: K, h: K },
+// Layout (SVG units, 1px stroke inset so the lines aren't clipped).
+const ARROW_KEYS = {
+  up: { x: 1 + K + GAP, y: 1, w: K, h: K },
+  left: { x: 1, y: 1 + K + GAP, w: K, h: K },
+  down: { x: 1 + K + GAP, y: 1 + K + GAP, w: K, h: K },
+  right: { x: 1 + 2 * (K + GAP), y: 1 + K + GAP, w: K, h: K },
 };
+const ARROWS_VIEW = { w: 2 + 3 * K + 2 * GAP, h: 2 + 2 * K + GAP };
+const SPACE_KEY = { x: 1, y: 1, w: 3 * K + 2 * GAP, h: K };
+const SPACE_VIEW = { w: 2 + SPACE_KEY.w, h: 2 + K };
 
-/** Arrow symbol inside a key: shaft plus head, pointing in `dir`. */
+/** Minimal outline arrow (shaft + head) inside a key, pointing in `dir`. */
 function arrowPath(dir, k) {
   const cx = k.x + k.w / 2;
   const cy = k.y + k.h / 2;
-  const L = 11; // half the shaft length
-  const H = 6; // head size
+  const L = 7; // half the shaft
+  const H = 4.5; // head size
   const rot = { up: 0, right: 90, down: 180, left: 270 }[dir];
   const pts = [
-    [0, L, 0, -L], // shaft
-    [-H, -L + H, 0, -L], // head, left side
-    [H, -L + H, 0, -L], // head, right side
+    [0, L, 0, -L],
+    [-H, -L + H, 0, -L],
+    [H, -L + H, 0, -L],
   ];
   const a = (rot * Math.PI) / 180;
   const c = Math.cos(a);
@@ -105,40 +98,47 @@ function arrowPath(dir, k) {
 function KeyShape({ id, k, stroke, filter }) {
   return (
     <g filter={filter}>
-      <rect
-        x={k.x}
-        y={k.y}
-        width={k.w}
-        height={k.h}
-        rx={KEY_RADIUS}
-        ry={KEY_RADIUS}
-        fill="none"
-        stroke={stroke}
-        strokeWidth={LINE_WIDTH}
-        vectorEffect="non-scaling-stroke"
-      />
-      {id === "space" ? (
-        <text
-          x={k.x + k.w / 2}
-          y={k.y + k.h / 2 + 4}
-          textAnchor="middle"
-          fill={stroke}
-          stroke="none"
-          style={{ font: KEY_LABEL_FONT, letterSpacing: "0.14em" }}
-        >
-          SPACE
-        </text>
-      ) : (
-        <path
-          d={arrowPath(id, k)}
-          fill="none"
-          stroke={stroke}
-          strokeWidth={LINE_WIDTH}
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          vectorEffect="non-scaling-stroke"
-        />
+      <rect x={k.x} y={k.y} width={k.w} height={k.h} rx={KEY_RADIUS} ry={KEY_RADIUS} fill="none" stroke={stroke} strokeWidth={LINE_WIDTH} vectorEffect="non-scaling-stroke" />
+      {id === "space" ? null : (
+        <path d={arrowPath(id, k)} fill="none" stroke={stroke} strokeWidth={LINE_WIDTH} strokeLinecap="round" strokeLinejoin="round" vectorEffect="non-scaling-stroke" />
       )}
+    </g>
+  );
+}
+
+/** Neon gradient + glow, one set per SVG (ids are per SVG). */
+function NeonDefs({ id }) {
+  return (
+    <defs>
+      <linearGradient id={`${id}-neon`} x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0" stopColor={NEON_FROM} />
+        <stop offset="1" stopColor={NEON_TO} />
+      </linearGradient>
+      <filter id={`${id}-glow`} x="-40%" y="-40%" width="180%" height="180%">
+        <feGaussianBlur in="SourceGraphic" stdDeviation={NEON_GLOW_BLUR} result="blur" />
+        <feComponentTransfer in="blur" result="glow">
+          <feFuncA type="linear" slope={NEON_GLOW_STRENGTH * 2} />
+        </feComponentTransfer>
+        <feMerge>
+          <feMergeNode in="glow" />
+          <feMergeNode in="SourceGraphic" />
+        </feMerge>
+      </filter>
+    </defs>
+  );
+}
+
+/** One key: white outline, with the neon copy faded in while pressed (or faintly once used). */
+function GuideKey({ id, k, svgId, pressed, neon }) {
+  const transition = `opacity ${KEY_LIGHT_SEC}s ease-out`;
+  return (
+    <g>
+      <g style={{ opacity: pressed ? 0 : 1, transition }}>
+        <KeyShape id={id} k={k} stroke="#ffffff" />
+      </g>
+      <g style={{ opacity: neon, transition }}>
+        <KeyShape id={id} k={k} stroke={`url(#${svgId}-neon)`} filter={`url(#${svgId}-glow)`} />
+      </g>
     </g>
   );
 }
@@ -161,7 +161,7 @@ function KeyboardControlsGuide({ active }) {
   const [phase, setPhase] = useState("hidden"); // hidden | in | out | gone
   const timers = useRef([]);
 
-  // Fade in when the player gets control.
+  // Enter when the player gets control.
   useEffect(() => {
     if (!active || done || phase !== "hidden") return;
     const id = requestAnimationFrame(() => setPhase("in"));
@@ -198,13 +198,13 @@ function KeyboardControlsGuide({ active }) {
     };
   }, [active, done, phase]);
 
-  // All four arrows used: fade out, then remove for the rest of the session.
+  // All four arrows used: leave, then remove for the rest of the session.
   useEffect(() => {
     if (phase !== "in" || !ARROWS.every((a) => used.has(a))) return;
     writeGuideDone();
     timers.current.push(
       setTimeout(() => setPhase("out"), GUIDE_DONE_DELAY_SEC * 1000),
-      setTimeout(() => setPhase("gone"), (GUIDE_DONE_DELAY_SEC + GUIDE_FADE_OUT_SEC) * 1000),
+      setTimeout(() => setPhase("gone"), (GUIDE_DONE_DELAY_SEC + GUIDE_LEAVE_SEC) * 1000),
     );
   }, [used, phase]);
   useEffect(() => () => timers.current.forEach(clearTimeout), []);
@@ -212,54 +212,29 @@ function KeyboardControlsGuide({ active }) {
   if (done || phase === "hidden" || phase === "gone") return null;
 
   const neonLevel = (id) => (pressed.has(id) ? 1 : used.has(id) ? NEON_USED_LEVEL : 0);
-  const transition = `opacity ${KEY_LIGHT_SEC}s ease-out`;
 
   return (
-    <div
-      aria-hidden="true"
-      style={{
-        position: "absolute",
-        left: "50%",
-        bottom: GUIDE_BOTTOM,
-        transform: "translateX(-50%)",
-        width: GUIDE_WIDTH,
-        pointerEvents: "none",
-        zIndex: 6,
-        opacity: phase === "in" ? 1 : 0,
-        transition: `opacity ${phase === "out" ? GUIDE_FADE_OUT_SEC : GUIDE_FADE_IN_SEC}s ease`,
-      }}
-    >
-      <svg viewBox="0 0 352 118" width="100%" style={{ display: "block", overflow: "visible" }}>
-        <defs>
-          <linearGradient id="controlsGuideNeon" x1="0" y1="0" x2="1" y2="1">
-            <stop offset="0" stopColor={NEON_FROM} />
-            <stop offset="1" stopColor={NEON_TO} />
-          </linearGradient>
-          <filter id="controlsGuideGlow" x="-40%" y="-40%" width="180%" height="180%">
-            <feGaussianBlur in="SourceGraphic" stdDeviation={NEON_GLOW_BLUR} result="blur" />
-            <feComponentTransfer in="blur" result="glow">
-              <feFuncA type="linear" slope={NEON_GLOW_STRENGTH * 2} />
-            </feComponentTransfer>
-            <feMerge>
-              <feMergeNode in="glow" />
-              <feMergeNode in="SourceGraphic" />
-            </feMerge>
-          </filter>
-        </defs>
-        {Object.entries(KEYS).map(([id, k]) => {
-          const neon = neonLevel(id);
-          return (
-            <g key={id}>
-              <g style={{ opacity: pressed.has(id) ? 0 : 1, transition }}>
-                <KeyShape id={id} k={k} stroke="#ffffff" />
-              </g>
-              <g style={{ opacity: neon, transition }}>
-                <KeyShape id={id} k={k} stroke="url(#controlsGuideNeon)" filter="url(#controlsGuideGlow)" />
-              </g>
-            </g>
-          );
-        })}
-      </svg>
+    <div className={"wx-cguide" + (phase === "out" ? " is-out" : "")} aria-hidden="true">
+      <div className="wx-cguide-group">
+        <div className="wx-cguide-space">
+          <svg viewBox={`0 0 ${SPACE_VIEW.w} ${SPACE_VIEW.h}`} className="wx-cguide-svg wx-cguide-svg-space">
+            <NeonDefs id="cg-space" />
+            <GuideKey id="space" k={SPACE_KEY} svgId="cg-space" pressed={pressed.has("space")} neon={neonLevel("space")} />
+          </svg>
+          <span className="wx-cguide-key-label">Space</span>
+        </div>
+        <span className="wx-cguide-hint">{SPACE_ACTION}</span>
+      </div>
+      <span className="wx-cguide-divider" />
+      <div className="wx-cguide-group">
+        <svg viewBox={`0 0 ${ARROWS_VIEW.w} ${ARROWS_VIEW.h}`} className="wx-cguide-svg wx-cguide-svg-arrows">
+          <NeonDefs id="cg-arrows" />
+          {Object.entries(ARROW_KEYS).map(([id, k]) => (
+            <GuideKey key={id} id={id} k={k} svgId="cg-arrows" pressed={pressed.has(id)} neon={neonLevel(id)} />
+          ))}
+        </svg>
+        <span className="wx-cguide-hint">{ARROWS_HINT}</span>
+      </div>
     </div>
   );
 }
