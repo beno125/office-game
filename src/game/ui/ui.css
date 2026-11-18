@@ -7,6 +7,14 @@
  */
 @import "./tokens.css";
 
+/*
+ * The base components sit in a cascade layer, so any screen's own rules
+ * (start screen, HUD, menu, guides…) always override them, whatever order the
+ * build loads the CSS files in (the production bundle orders them
+ * differently from the dev server).
+ */
+@layer wx-base {
+
 /* ---------- Selection frame (Wix editor style) ---------- */
 
 .wx-frame {
@@ -249,4 +257,5 @@
   .wx-snap > .wx-frame { opacity: 0; }
   .wx-btn,
   .wx-frame { transition: none; }
+}
 }
