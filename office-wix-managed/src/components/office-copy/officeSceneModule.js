@@ -21,6 +21,7 @@ import {
   introLerp,
 } from "../game/cinematicIntro.js";
 import { createCarLighting } from "../game/carLighting.js";
+import { createTouchDrive } from "../game/touch/touchDrive.js";
 import { addThresholdBloom, BLOOM_EMISSIVE, setBloomWeight } from "../game/thresholdBloom.js";
 
 const _OFFICE_BASE = `${import.meta.env.BASE_URL}office-scene-optimized/`;
@@ -3789,6 +3790,16 @@ let _officeSceneAnimationFrame = 0;
       }
       window.addEventListener("keydown", onKeyDown, true);
       window.addEventListener("keyup", onKeyUp, true);
+      // Touch driving (phones / tablets): writes the same `keys` as the keyboard.
+      createTouchDrive({
+        THREE,
+        mount: getOfficeSceneMount(),
+        getCamera: () => camera,
+        getCar: () => car,
+        getAngle: () => carState.angle,
+        getKeys: () => keys,
+        enabled: () => _officeSceneRendering && isOfficeIntroDone() && !!car,
+      });
 
       const GUM_RELEASE_BATCH = 15;
       let _gumReleaseIdx = -1;

@@ -32,6 +32,7 @@ import { SCENE_ROUTES, nextLevelPath } from "../game/sceneRoutes.js";
 import { createCinematicIntro, introEase, introEaseSine, introLerp } from "../game/cinematicIntro.js";
 import { createCarLighting } from "../game/carLighting.js";
 import { addThresholdBloom, keepBelowBloomThreshold } from "../game/thresholdBloom.js";
+import { createTouchDrive } from "../game/touch/touchDrive.js";
 import {
   CAR_MASS,
   CAR_BUMP_SLIDE_DECAY,
@@ -2384,6 +2385,16 @@ let _worldSwitched = false;
       }
       window.addEventListener("keydown", onKeyDown, true);
       window.addEventListener("keyup", onKeyUp, true);
+      // Touch driving (phones / tablets): writes the same `keys` as the keyboard.
+      createTouchDrive({
+        THREE,
+        mount: getKitchenSceneMount(),
+        getCamera: () => camera,
+        getCar: () => car,
+        getAngle: () => carState.angle,
+        getKeys: () => keys,
+        enabled: () => _kitchenSceneRendering && _kIntro.state === "done",
+      });
 
       const TILT_SPEED_MIN_LERP = 0.4;
       const TILT_SPEED_MAX_LERP = 1.2;
@@ -4443,9 +4454,9 @@ let _worldSwitched = false;
           if (_raceTimer <= 0) {
             _racePhase = "racing";
             _raceGoTimer = RACE_GO_SHOW_SEC;
-            _raceHud.setBig("GO!", "#4dff88");
+            _raceHud.setGo();
           } else {
-            _raceHud.setBig(String(Math.ceil(_raceTimer)), "#ffd23f");
+            _raceHud.setCountdown(Math.ceil(_raceTimer));
           }
         } else if (_racePhase === "racing" || _racePhase === "finishing") {
           _raceElapsed += dt;
@@ -12081,6 +12092,16 @@ let _worldSwitched = false;
           restoreKitchenIntroCamera();
           console.error("Animate error:", e);
         }
+      }
+      /**
+       * For the game menu: the player has control (intro over, race set up), and
+       * a race is under way (from the start delay until the finish).
+       */
+      export function getKitchenMenuState() {
+        return {
+          playerHasControl: _kIntro.state === "done" && _racePhase !== "off" && _racePhase !== "intro",
+          inPlay: _racePhase === "waiting" || _racePhase === "countdown" || _racePhase === "racing" || _racePhase === "finishing",
+        };
       }
       /** The loader is fading out: play the intro (then the race). */
       export function startKitchenIntro() {

@@ -1,0 +1,54 @@
+/* Touch driving: no page gestures on the 3D view, and the finger feedback. */
+:root {
+  --wx-touch-ring: 44px; /* ring under the finger (TOUCH_DRIVE.ringPx) */
+  --wx-touch-line-opacity: 0.28; /* faint line from the car to the finger */
+}
+
+.wx-touch-surface,
+.wx-touch-surface canvas {
+  touch-action: none; /* no scrolling, pinch or double-tap zoom while playing */
+  -webkit-touch-callout: none; /* no long-press menu */
+  -webkit-user-select: none;
+  user-select: none;
+  overscroll-behavior: none; /* no pull-to-refresh */
+}
+
+.wx-touch-fx {
+  position: absolute;
+  inset: 0;
+  z-index: 4; /* over the canvas, under the HUD (5) */
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 160ms var(--wx-ease-out, ease-out);
+}
+.wx-touch-fx.is-on { opacity: 1; }
+.wx-touch-ring {
+  position: absolute;
+  left: calc(var(--wx-touch-ring) / -2);
+  top: calc(var(--wx-touch-ring) / -2);
+  width: var(--wx-touch-ring);
+  height: var(--wx-touch-ring);
+  border: 1.5px solid rgba(255, 255, 255, 0.9);
+  border-radius: 50%;
+  box-shadow: 0 0 12px rgba(12, 110, 252, 0.45), inset 0 0 8px rgba(12, 110, 252, 0.25);
+  will-change: transform;
+}
+.wx-touch-line {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+.wx-touch-line line {
+  stroke: #fff;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-dasharray: 2 6;
+  opacity: var(--wx-touch-line-opacity);
+}
+
+html,
+body {
+  overscroll-behavior: none; /* no pull-to-refresh / bounce while playing */
+}

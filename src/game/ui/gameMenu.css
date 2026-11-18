@@ -1,0 +1,202 @@
+/* General game menu (GameMenu.jsx): air-intake icon, panel, leave confirmation. */
+:root {
+  --wx-menu-inset: 16px; /* icon distance from the top right corner */
+  --wx-menu-icon-w: 44px; /* icon size (SVG viewBox 44 × 24) */
+  --wx-menu-icon-h: 24px;
+  --wx-menu-button-pad: 10px 12px;
+  --wx-menu-cap-sec: 0.28s; /* one cap turning */
+  /* Cap stagger, from the car's airIn timing (airIn1 / 2 / 3). */
+  --wx-menu-open-delay-1: 0s;
+  --wx-menu-open-delay-2: 0.11s;
+  --wx-menu-open-delay-3: 0.06s;
+  --wx-menu-close-delay-1: 0.14s;
+  --wx-menu-close-delay-2: 0.03s;
+  --wx-menu-close-delay-3: 0.1s;
+  --wx-menu-cap-open: 0.06; /* cap seen edge-on: its height share when open */
+  --wx-menu-z: 25; /* above the HUD (5) and results popup (12), under the loaders (30) */
+}
+
+.wx-menu {
+  position: absolute;
+  top: var(--wx-menu-inset);
+  right: var(--wx-menu-inset);
+  z-index: var(--wx-menu-z);
+  opacity: 0;
+  transform: translateY(-6px);
+  transition:
+    opacity var(--wx-dur) var(--wx-ease-out),
+    transform var(--wx-dur) var(--wx-ease-out);
+  pointer-events: none;
+}
+.wx-menu.is-visible { opacity: 1; transform: none; pointer-events: auto; }
+
+/* Click-outside catcher (also keeps clicks off the paused scene). */
+.wx-menu-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+}
+
+/* ---------- Icon button ---------- */
+
+.wx-menu-button {
+  position: relative;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  padding: var(--wx-menu-button-pad);
+  color: rgba(255, 255, 255, 0.9);
+  background: none; /* only the white outline shapes */
+  border: 0;
+  border-radius: var(--wx-radius-pill);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition:
+    color var(--wx-dur-fast) var(--wx-ease-out),
+    border-color var(--wx-dur-fast) var(--wx-ease-out),
+    box-shadow var(--wx-dur-fast) var(--wx-ease-out),
+    transform var(--wx-dur-fast) var(--wx-ease-out);
+}
+.wx-menu-button:hover { color: #fff; }
+.wx-menu-button:active { transform: scale(var(--wx-press-scale)); }
+.wx-menu-button:focus-visible { outline: none; color: #fff; box-shadow: var(--wx-focus-ring); }
+.wx-menu-button[aria-expanded="true"] { color: #fff; }
+
+.wx-menu-icon {
+  display: block;
+  width: var(--wx-menu-icon-w);
+  height: var(--wx-menu-icon-h);
+  overflow: visible;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+}
+.wx-menu-icon * { vector-effect: non-scaling-stroke; }
+.wx-menu-button:hover .wx-menu-icon,
+.wx-menu-button:focus-visible .wx-menu-icon { filter: drop-shadow(0 0 3px rgba(77, 151, 255, 0.9)); }
+
+/* Each cap turns on its horizontal axis: face-on (closed) → edge-on line (open). */
+.wx-menu-cap {
+  transform-box: fill-box;
+  transform-origin: center;
+  transition: transform var(--wx-menu-cap-sec) var(--wx-ease-out);
+}
+.wx-menu-intake-1 .wx-menu-cap { transition-delay: var(--wx-menu-close-delay-1); }
+.wx-menu-intake-2 .wx-menu-cap { transition-delay: var(--wx-menu-close-delay-2); }
+.wx-menu-intake-3 .wx-menu-cap { transition-delay: var(--wx-menu-close-delay-3); }
+.wx-menu-icon.is-open .wx-menu-cap { transform: scaleY(var(--wx-menu-cap-open)); }
+.wx-menu-icon.is-open .wx-menu-intake-1 .wx-menu-cap { transition-delay: var(--wx-menu-open-delay-1); }
+.wx-menu-icon.is-open .wx-menu-intake-2 .wx-menu-cap { transition-delay: var(--wx-menu-open-delay-2); }
+.wx-menu-icon.is-open .wx-menu-intake-3 .wx-menu-cap { transition-delay: var(--wx-menu-open-delay-3); }
+
+/* ---------- Panel ---------- */
+
+.wx-menu-panel {
+  position: absolute;
+  z-index: 1;
+  top: calc(100% + var(--wx-space-2));
+  right: 0;
+  width: min(19rem, calc(100vw - 2 * var(--wx-menu-inset)));
+  max-height: calc(100vh - 90px);
+  overflow-y: auto;
+  padding: var(--wx-space-5);
+  display: grid;
+  gap: var(--wx-space-3);
+  background: var(--wx-surface-strong);
+  transform-origin: top right;
+  animation: wx-menu-in var(--wx-dur) var(--wx-ease-snap) both;
+}
+.wx-menu-panel.is-closing { animation: wx-menu-out 180ms var(--wx-ease-out) both; }
+@keyframes wx-menu-in {
+  from { opacity: 0; transform: translate(8px, -8px) scale(0.96); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes wx-menu-out {
+  to { opacity: 0; transform: translate(8px, -8px) scale(0.96); }
+}
+.wx-menu-title { margin-bottom: var(--wx-space-1); }
+.wx-menu-section { margin-top: var(--wx-space-1); }
+
+.wx-menu-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+.wx-menu-item {
+  display: flex;
+  align-items: center;
+  gap: var(--wx-space-3);
+  width: 100%;
+  padding: var(--wx-space-3) var(--wx-space-3);
+  color: var(--wx-text-2);
+  background: transparent;
+  border: 0;
+  border-radius: var(--wx-radius-sm);
+  font: 500 0.98rem/1.25 var(--wx-font-text);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background-color var(--wx-dur-fast) var(--wx-ease-out),
+    color var(--wx-dur-fast) var(--wx-ease-out),
+    box-shadow var(--wx-dur-fast) var(--wx-ease-out);
+}
+.wx-menu-item:hover { color: var(--wx-text); background: var(--wx-surface-hover); }
+.wx-menu-item:focus-visible {
+  outline: none;
+  color: var(--wx-text);
+  background: var(--wx-surface-hover);
+  box-shadow: inset 0 0 0 1px #4d97ff, 0 0 16px rgba(12, 110, 252, 0.35);
+}
+.wx-menu-item.is-current { color: var(--wx-text); }
+.wx-menu-item-num {
+  min-width: 1.6em;
+  color: var(--wx-text-3);
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+}
+.wx-menu-item-name { flex: 1; }
+.wx-menu-item-current {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--wx-text-3);
+  font: var(--wx-type-label);
+  letter-spacing: var(--wx-label-tracking);
+  text-transform: uppercase;
+}
+
+/* While the menu pauses the level, the HUD's own animations hold too (countdown line, pops). */
+.wx-game-paused .wx-hud-root *,
+.wx-game-paused .wx-hud-root *::after { animation-play-state: paused !important; }
+
+/* ---------- Leave confirmation ---------- */
+
+.wx-menu-confirm-layer {
+  position: fixed;
+  z-index: 3;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: var(--wx-space-4);
+  background: rgba(7, 8, 12, 0.5);
+  animation: wx-rise var(--wx-dur) var(--wx-ease-out) both;
+}
+.wx-menu-confirm {
+  display: grid;
+  gap: var(--wx-space-3);
+  width: min(22rem, 100%);
+  background: var(--wx-surface-strong);
+  animation: wx-menu-in var(--wx-dur) var(--wx-ease-snap) both;
+}
+.wx-menu-confirm-actions { display: flex; gap: var(--wx-space-3); margin-top: var(--wx-space-3); }
+.wx-menu-confirm-actions .wx-btn { flex: 1; padding: 0 var(--wx-space-4); }
+
+@media (max-width: 480px) {
+  :root { --wx-menu-inset: 12px; --wx-menu-icon-w: 38px; --wx-menu-icon-h: 21px; }
+  .wx-menu-panel { padding: var(--wx-space-4); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wx-menu-panel,
+  .wx-menu-panel.is-closing,
+  .wx-menu-confirm,
+  .wx-menu-confirm-layer { animation: none; }
+  .wx-menu-cap { transition: none; }
+}

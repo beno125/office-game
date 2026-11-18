@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from "react";
+import { isTouchDevice } from "./touch/touchDrive.js";
+import TouchControlsGuide from "./touch/TouchControlsGuide.jsx";
 
 /**
  * On-screen guide to the driving keys: the arrow keys (inverted T) and Space,
@@ -10,9 +12,9 @@ import { useEffect, useRef, useState } from "react";
  * It only listens to key events (passive): it never blocks or changes input.
  */
 
-/** Neon line colours (gradient along the line: violet → hot pink). */
-const NEON_FROM = "#9b4dff";
-const NEON_TO = "#ff2fb3";
+/** Neon line colours (gradient along the line): Wix Blue → purple, the UI's --wx-action and --wx-purple (were violet #9b4dff → hot pink #ff2fb3). */
+const NEON_FROM = "#0c6efc";
+const NEON_TO = "#674fe6";
 /** Glow around the lit line: blur radius (SVG units) and strength (0..1, opacity of the glow layer). */
 const NEON_GLOW_BLUR = 3.2;
 const NEON_GLOW_STRENGTH = 0.95;
@@ -24,6 +26,8 @@ const KEY_LIGHT_SEC = 0.1;
 const GUIDE_FADE_IN_SEC = 0.6;
 const GUIDE_FADE_OUT_SEC = 0.7;
 const GUIDE_DONE_DELAY_SEC = 0.6;
+/** "SPACE" label: the UI's label type (Wix Madefor Text). */
+const KEY_LABEL_FONT = '600 11px "Wix Madefor Text", system-ui, -apple-system, sans-serif';
 /** Line width and corner radius (SVG units, viewBox is 352 × 118). */
 const LINE_WIDTH = 1.6;
 const KEY_RADIUS = 8;
@@ -120,7 +124,7 @@ function KeyShape({ id, k, stroke, filter }) {
           textAnchor="middle"
           fill={stroke}
           stroke="none"
-          style={{ font: "500 11px system-ui, -apple-system, sans-serif", letterSpacing: "0.12em" }}
+          style={{ font: KEY_LABEL_FONT, letterSpacing: "0.14em" }}
         >
           SPACE
         </text>
@@ -144,6 +148,13 @@ function KeyShape({ id, k, stroke, filter }) {
  * @param {boolean} props.active  true once the player has control (after the intro)
  */
 export default function ControlsGuide({ active }) {
+  // Phones / tablets: the touch version (drag to drive, tap the car).
+  const [touch] = useState(isTouchDevice);
+  if (touch) return <TouchControlsGuide active={active} />;
+  return <KeyboardControlsGuide active={active} />;
+}
+
+function KeyboardControlsGuide({ active }) {
   const [done] = useState(readGuideDone);
   const [pressed, setPressed] = useState(() => new Set());
   const [used, setUsed] = useState(() => new Set());

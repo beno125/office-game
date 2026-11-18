@@ -1,0 +1,212 @@
+/* Start screen (uses tokens.css / ui.css). */
+
+/* Key art behind the menu: dimmed and softly blurred, kept to the right. */
+:root {
+  --wx-start-photo-opacity: 0.55;
+  --wx-start-photo-blur: 3px;
+  --wx-start-ruler: 18px; /* editor ruler thickness */
+}
+
+.wx-start {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  padding: clamp(var(--wx-space-6), 8vw, 120px);
+  padding-left: calc(var(--wx-start-ruler) + clamp(var(--wx-space-5), 7vw, 112px));
+  background: var(--wx-bg);
+  color: var(--wx-text);
+  font: var(--wx-type-body);
+  -webkit-font-smoothing: antialiased;
+}
+
+.wx-start-photo {
+  position: absolute;
+  inset: -12px; /* hides the blur's soft edge */
+  background: url("/intro-background.png") 70% center / cover no-repeat;
+  opacity: var(--wx-start-photo-opacity);
+  filter: blur(var(--wx-start-photo-blur)) saturate(0.85);
+  /* Fades into the near-black base on the menu side. */
+  -webkit-mask-image: linear-gradient(90deg, transparent 18%, rgba(0, 0, 0, 0.55) 48%, #000 80%);
+  mask-image: linear-gradient(90deg, transparent 18%, rgba(0, 0, 0, 0.55) 48%, #000 80%);
+}
+
+/* Canvas grid, strongest behind the menu and fading out to the right. */
+.wx-start-grid {
+  position: absolute;
+  inset: 0;
+  background-color: transparent;
+  background-position: var(--wx-start-ruler) var(--wx-start-ruler);
+  -webkit-mask-image: radial-gradient(ellipse 70% 90% at 25% 50%, #000 30%, transparent 85%);
+  mask-image: radial-gradient(ellipse 70% 90% at 25% 50%, #000 30%, transparent 85%);
+}
+
+/* Faint brand glows. */
+.wx-start-glow {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(40vmax 30vmax at 12% 30%, rgba(12, 110, 252, 0.16), transparent 70%),
+    radial-gradient(30vmax 22vmax at 30% 95%, rgba(103, 79, 230, 0.12), transparent 70%),
+    radial-gradient(26vmax 20vmax at 92% 8%, rgba(255, 112, 85, 0.08), transparent 70%);
+}
+
+/* Editor rulers along the top and left edges. */
+.wx-ruler {
+  position: absolute;
+  z-index: 1;
+  background-color: rgba(10, 11, 16, 0.85);
+  pointer-events: none;
+}
+.wx-ruler-x {
+  left: var(--wx-start-ruler);
+  right: 0;
+  top: 0;
+  height: var(--wx-start-ruler);
+  border-bottom: 1px solid var(--wx-hairline);
+  background-image:
+    repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.28) 0 1px, transparent 1px calc(var(--wx-grid) * 4)),
+    repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.14) 0 1px, transparent 1px var(--wx-grid));
+  background-size: 100% 8px, 100% 4px;
+  background-position: 0 100%, 0 100%;
+  background-repeat: repeat-x;
+}
+.wx-ruler-y {
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: var(--wx-start-ruler);
+  border-right: 1px solid var(--wx-hairline);
+  background-image:
+    repeating-linear-gradient(180deg, rgba(255, 255, 255, 0.28) 0 1px, transparent 1px calc(var(--wx-grid) * 4)),
+    repeating-linear-gradient(180deg, rgba(255, 255, 255, 0.14) 0 1px, transparent 1px var(--wx-grid));
+  background-size: 8px 100%, 4px 100%;
+  background-position: 100% var(--wx-start-ruler), 100% var(--wx-start-ruler);
+  background-repeat: repeat-y;
+}
+
+.wx-start-menu {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--wx-space-5);
+  width: min(34rem, 100%);
+}
+
+.wx-start-title-wrap { margin: var(--wx-space-1) 0 var(--wx-space-1); }
+.wx-start-title > span { display: block; }
+/* Neon marker full stop after "Game". */
+.wx-start-dot {
+  display: inline-block;
+  width: 0.16em;
+  height: 0.16em;
+  margin-left: 0.06em;
+  border-radius: 50%;
+  background: var(--wx-action);
+  box-shadow: 0 0 0.18em var(--wx-action), 0 0 0.5em rgba(12, 110, 252, 0.6);
+  vertical-align: baseline;
+}
+
+.wx-start-sub { max-width: 26rem; }
+.wx-start-actions { margin: var(--wx-space-2) 0 var(--wx-space-3); }
+
+/* Small editor "Pages" panel listing the levels. */
+.wx-start-pages {
+  padding: var(--wx-space-4) var(--wx-space-5);
+  border-radius: 14px;
+  min-width: 15rem;
+}
+.wx-start-pages-head {
+  padding-bottom: var(--wx-space-3);
+  margin-bottom: var(--wx-space-3);
+  border-bottom: 1px solid var(--wx-hairline);
+  width: 100%;
+}
+.wx-start-pages ol {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: var(--wx-space-2);
+}
+.wx-start-pages li {
+  display: flex;
+  align-items: center;
+  gap: var(--wx-space-3);
+  font: 500 0.92rem/1.3 var(--wx-font-text);
+  color: var(--wx-text-2);
+}
+.wx-start-pages-num {
+  color: var(--wx-text-3);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.8rem;
+}
+
+@media (max-width: 640px) {
+  .wx-start {
+    align-items: flex-end;
+    padding: var(--wx-space-6) var(--wx-space-5);
+    padding-left: calc(var(--wx-start-ruler) + var(--wx-space-5));
+  }
+  .wx-start-photo {
+    background-position: 65% 30%;
+    -webkit-mask-image: linear-gradient(0deg, transparent 30%, #000 75%);
+    mask-image: linear-gradient(0deg, transparent 30%, #000 75%);
+  }
+  .wx-start-menu { gap: var(--wx-space-4); }
+  .wx-start-pages { display: none; }
+}
+
+.wx-start-backdrop { position: absolute; inset: 0; }
+
+/* ---------- "Get ready" loader (same backdrop as the start screen) ---------- */
+
+:root {
+  --wx-progress-height: 3px; /* loader bar */
+}
+.wx-loader-menu { gap: var(--wx-space-5); }
+.wx-loader-status {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  width: min(26rem, 100%);
+  gap: var(--wx-space-4);
+}
+.wx-loader-percent {
+  font: 800 2.4rem/1 var(--wx-font-display);
+  letter-spacing: -0.03em;
+  font-variant-numeric: tabular-nums;
+}
+.wx-loader-percent small { font: 600 1rem/1 var(--wx-font-text); color: var(--wx-text-3); margin-left: 2px; }
+/* Progress: a hairline track; the fill is a selected element being resized (handle at its tip). */
+.wx-progress {
+  position: relative;
+  width: min(26rem, 100%);
+  height: var(--wx-progress-height);
+  border-radius: 2px;
+  background: var(--wx-hairline);
+}
+.wx-progress-fill {
+  position: relative;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--wx-action);
+  box-shadow: 0 0 12px rgba(12, 110, 252, 0.8);
+  transition: width 220ms var(--wx-ease-out);
+}
+.wx-progress-fill::after {
+  content: "";
+  position: absolute;
+  right: calc(var(--wx-handle) / -2);
+  top: 50%;
+  width: var(--wx-handle);
+  height: var(--wx-handle);
+  transform: translateY(-50%);
+  background: var(--wx-handle-fill);
+  border: 1px solid var(--wx-select);
+  box-sizing: border-box;
+}

@@ -15,6 +15,8 @@ import {
   solveCarBump,
 } from "../game/carBumpPhysics.js";
 import { KnockoutHud, RaceResultsPopup, formatRaceTime } from "../kitchen/kitchenRace.js";
+import { COUNTDOWN_GO_TEXT, COUNTDOWN_STEP_TONE, drawCountdown } from "../game/ui/countdown.js";
+import { createTouchDrive } from "../game/touch/touchDrive.js";
 import { SCENE_ROUTES, nextLevelPath, goToLevelWithTransition } from "../game/sceneRoutes.js";
 import { createCinematicIntro, introEaseSine, introLerp } from "../game/cinematicIntro.js";
 
@@ -834,6 +836,16 @@ function onKeyUp(e) {
 
 window.addEventListener("keydown", onKeyDown, true);
 window.addEventListener("keyup", onKeyUp, true);
+// Touch driving (phones / tablets): writes the same player keys as the keyboard.
+createTouchDrive({
+  THREE,
+  mount: getMeetingRoomSceneMount(),
+  getCamera: () => camera,
+  getCar: () => (_playerCarCtx && _playerCarCtx.car) || car,
+  getAngle: () => ((_playerCarCtx && _playerCarCtx.carState) || carState).angle,
+  getKeys: () => playerKeys,
+  enabled: () => _meetingRoomSceneRendering && (!_mrIntro.enabled || _mrIntro.state === "done"),
+});
 
 function captureTableDriveSurface(root) {
   const table = root.getObjectByName("tablePlate");
@@ -8313,7 +8325,7 @@ export function prepareMeetingRoomForReveal(onProgress = () => {}) {
     for (const key of Object.keys(_screens)) {
       const sc = _screens[key];
       if (!sc || !sc.mesh) continue;
-      batches.push({ setup: () => showScreenText(key, "GO!", ARENA_COLOR_GO), mesh: sc.mesh, key });
+      batches.push({ setup: () => showScreenText(key, COUNTDOWN_GO_TEXT, ARENA_COLOR_GO), mesh: sc.mesh, key });
       if (_replay.rt) batches.push({ setup: () => showScreenReplay(key, _replay.rt.texture), mesh: sc.mesh, key });
     }
     const prevTarget = renderer.getRenderTarget();
@@ -9621,6 +9633,8 @@ function setupArenaScreens(root) {
       text: "",
       color: "#ffffff",
       textAge: 0,
+      textDur: 0,
+      textDrawAcc: 0,
     };
   }
   if (SCREEN_GLOW_STRENGTH > 0 && !MR_PERF_NOGLOW && (_screens.left || _screens.right)) {
@@ -9631,12 +9645,11 @@ function setupArenaScreens(root) {
   }
 }
 
-// READY / SET / GO! use Wix Madefor Display (Google Fonts; heaviest weight is
+// READY / SET / GO use Wix Madefor Display (Google Fonts; heaviest weight is
 // 800). Loaded once up front; the countdown falls back to Arial Black until it
 // is ready, and any text already on a screen is redrawn when it arrives.
 const COUNTDOWN_FONT_FAMILY = "Wix Madefor Display";
 const COUNTDOWN_FONT_WEIGHT = 800;
-const COUNTDOWN_FONT = `${COUNTDOWN_FONT_WEIGHT} 250px "${COUNTDOWN_FONT_FAMILY}", "Arial Black", Impact, sans-serif`;
 (function loadCountdownFont() {
   if (typeof document === "undefined" || !document.fonts) return;
   const redraw = () => {
@@ -9647,7 +9660,7 @@ const COUNTDOWN_FONT = `${COUNTDOWN_FONT_WEIGHT} 250px "${COUNTDOWN_FONT_FAMILY}
   };
   const load = () =>
     document.fonts
-      .load(`${COUNTDOWN_FONT_WEIGHT} 250px "${COUNTDOWN_FONT_FAMILY}"`, "READY SET GO!")
+      .load(`${COUNTDOWN_FONT_WEIGHT} 250px "${COUNTDOWN_FONT_FAMILY}"`, "READY SET GO")
       .then(redraw)
       .catch(() => {});
   let link = document.querySelector("link[data-countdown-font]");
@@ -9663,66 +9676,33 @@ const COUNTDOWN_FONT = `${COUNTDOWN_FONT_WEIGHT} 250px "${COUNTDOWN_FONT_FAMILY}
   }
 })();
 
+/** Countdown on the screens: the shared countdown design (../game/ui/countdown.js), drawn into the screen canvas. */
+const COUNTDOWN_FONT_STACK = `"${COUNTDOWN_FONT_FAMILY}", "Arial Black", Impact, sans-serif`;
+/** Redraws per second while a word animates (its line depletes), to keep texture uploads light. */
+const SCREEN_TEXT_FPS = 30;
+
 function _drawScreenText(s) {
-  const c = s.ctx2d;
-  const w = SCREEN_CANVAS_W;
-  const h = SCREEN_CANVAS_H;
-  const bg = c.createLinearGradient(0, 0, 0, h);
-  bg.addColorStop(0, "#04050c");
-  bg.addColorStop(1, "#0b0f26");
-  c.fillStyle = bg;
-  c.fillRect(0, 0, w, h);
-  c.strokeStyle = "rgba(120,140,255,0.07)";
-  c.lineWidth = 2;
-  for (let x = 0; x <= w; x += 64) {
-    c.beginPath();
-    c.moveTo(x, 0);
-    c.lineTo(x, h);
-    c.stroke();
-  }
-  for (let y = 0; y <= h; y += 64) {
-    c.beginPath();
-    c.moveTo(0, y);
-    c.lineTo(w, y);
-    c.stroke();
-  }
-  // Pop-in: starts large and settles within ~0.25 s.
-  const k = Math.min(1, s.textAge / 0.25);
-  const ease = 1 - Math.pow(1 - k, 3);
-  const scale = 1.35 - 0.35 * ease;
-  c.save();
-  c.globalAlpha = Math.min(1, 0.25 + ease);
-  c.translate(w / 2, h / 2 + 8);
-  c.scale(scale, scale);
-  c.textAlign = "center";
-  c.textBaseline = "middle";
-  c.font = COUNTDOWN_FONT;
-  const label = String(s.text).toUpperCase();
-  // 1) Coloured glow.
-  c.shadowColor = s.color;
-  c.shadowBlur = 70;
-  c.fillStyle = s.color;
-  c.fillText(label, 0, 0);
-  c.shadowBlur = 0;
-  // 2) White outline, then 3) the letters filled again on top: the font's
-  // letters are built from overlapping shapes, so a stroke drawn over the fill
-  // also traced the seams inside them. Filling last leaves only the outer edge.
-  c.lineJoin = "round";
-  c.lineWidth = 12;
-  c.strokeStyle = "rgba(255,255,255,0.85)";
-  c.strokeText(label, 0, 0);
-  c.fillText(label, 0, 0);
-  c.restore();
+  drawCountdown(s.ctx2d, SCREEN_CANVAS_W, SCREEN_CANVAS_H, {
+    text: s.text,
+    tone: s.color,
+    age: s.textAge,
+    duration: s.textDur,
+    go: s.text === COUNTDOWN_GO_TEXT,
+    font: COUNTDOWN_FONT_STACK,
+  });
   s.tex.needsUpdate = true;
 }
 
-function showScreenText(key, text, color) {
+/** Shows a countdown word on a screen; its line depletes over `durationSec` (0 = full, GO). */
+function showScreenText(key, text, color, durationSec = 0) {
   const s = _screens[key];
   if (!s) return;
   s.mode = "text";
   s.text = text;
   s.color = color;
   s.textAge = 0;
+  s.textDur = durationSec;
+  s.textDrawAcc = 0;
   _drawScreenText(s);
   s.mesh.material = s.textMat;
 }
@@ -9807,9 +9787,14 @@ function updateArenaScreens(dt) {
     // Original content keeps following the light theme exactly as before.
     s.contentMat.emissiveIntensity = s.base.emissiveIntensity;
 
-    if (s.mode === "text" && s.textAge < 0.3) {
+    // The countdown animates for as long as it shows (enter, depleting line, GO pulse).
+    if (s.mode === "text") {
       s.textAge += dt;
-      _drawScreenText(s);
+      s.textDrawAcc += dt;
+      if (s.textDrawAcc >= 1 / SCREEN_TEXT_FPS) {
+        s.textDrawAcc = 0;
+        _drawScreenText(s);
+      }
     }
   }
 }
@@ -9823,9 +9808,10 @@ const ARENA_READY_TIME = 0.6;
 const ARENA_SET_TIME = 0.6;
 const ARENA_DUSK_TIME = 0.45;
 const ARENA_GO_TIME = 0.75;
-const ARENA_COLOR_READY = "#ff3b3b";
-const ARENA_COLOR_SET = "#ffc43a";
-const ARENA_COLOR_GO = "#3dff6e";
+// Countdown accents from the shared countdown design (were red #ff3b3b, yellow #ffc43a, green #3dff6e).
+const ARENA_COLOR_READY = COUNTDOWN_STEP_TONE.READY;
+const ARENA_COLOR_SET = COUNTDOWN_STEP_TONE.SET;
+const ARENA_COLOR_GO = COUNTDOWN_STEP_TONE.GO;
 
 /** Keys the player car sees until GO! (nothing pressed). */
 const _frozenPlayerKeys = {
@@ -9865,14 +9851,14 @@ function updateArenaGame(dt) {
     case "intro":
       if (g.t > 0.2) warmUpArenaReplay();
       if (g.t >= ARENA_INTRO_HOLD) {
-        showScreenText("left", "READY", ARENA_COLOR_READY);
+        showScreenText("left", "READY", ARENA_COLOR_READY, ARENA_READY_TIME);
         _arenaSetPhase("ready");
       }
       break;
     case "ready":
       if (g.t >= ARENA_READY_TIME) {
         restoreScreenContent("left");
-        showScreenText("right", "SET", ARENA_COLOR_SET);
+        showScreenText("right", "SET", ARENA_COLOR_SET, ARENA_SET_TIME + (_mrIntro.enabled ? 0 : ARENA_DUSK_TIME));
         _arenaSetPhase("set");
       }
       break;
@@ -9883,8 +9869,8 @@ function updateArenaGame(dt) {
       // Drive the existing light blend (1 = Bright, 0 = Dark) with an eased curve.
       // After the cinematic intro the room is already dark: straight to GO!
       if (_mrIntro.enabled) {
-        showScreenText("left", "GO!", ARENA_COLOR_GO);
-        showScreenText("right", "GO!", ARENA_COLOR_GO);
+        showScreenText("left", COUNTDOWN_GO_TEXT, ARENA_COLOR_GO, ARENA_GO_TIME);
+        showScreenText("right", COUNTDOWN_GO_TEXT, ARENA_COLOR_GO, ARENA_GO_TIME);
         _arenaSetPhase("go");
         break;
       }
@@ -9894,8 +9880,8 @@ function updateArenaGame(dt) {
       lightBlendTarget = lightBlend;
       applyLightBlend(lightBlend);
       if (u >= 1) {
-        showScreenText("left", "GO!", ARENA_COLOR_GO);
-        showScreenText("right", "GO!", ARENA_COLOR_GO);
+        showScreenText("left", COUNTDOWN_GO_TEXT, ARENA_COLOR_GO, ARENA_GO_TIME);
+        showScreenText("right", COUNTDOWN_GO_TEXT, ARENA_COLOR_GO, ARENA_GO_TIME);
         _arenaSetPhase("go");
       }
       break;
@@ -10783,7 +10769,7 @@ function updateArenaRound(dt) {
       if (c.isPlayer) {
         _playerCarCtx.keys = _frozenPlayerKeys;
         if (_activeCarCtx === _playerCarCtx) keys = _frozenPlayerKeys;
-        _round.hud.setBig("You're out!", "#ff3b6b");
+        _round.hud.setBig("You’re out!", "#ff3b6b");
         if (_round.endIn < 0) _round.endIn = ARENA_PLAYER_OUT_DELAY_SEC;
       }
     }
@@ -12086,6 +12072,19 @@ function animate() {
   if (introCam) _mrIntro.restoreCamera();
   clearCameraShake();
   if (MR_PERF) _perfEndFrame(dt);
+}
+
+/**
+ * For the game menu: the player has control (intro over), and a round is
+ * under way (from the countdown until the round ends).
+ */
+export function getMeetingRoomMenuState() {
+  const introOver = !_mrIntro.enabled || _mrIntro.state === "done";
+  const phase = _arenaGame.phase;
+  return {
+    playerHasControl: _meetingRoomSceneReady && introOver && phase !== "waiting",
+    inPlay: phase !== "waiting" && phase !== "over",
+  };
 }
 
 export function setMeetingRoomSceneRendering(active) {

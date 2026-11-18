@@ -1,0 +1,320 @@
+/*
+ * In-game UI (uses tokens.css / ui.css): the HUD panel (race position and
+ * laps, knock-off counter), the centre stage (countdown, GO, FINISH, "You're
+ * out!") and the results popup. No backdrop blur over the running game except
+ * the results card.
+ */
+:root {
+  --wx-hud-inset: 16px; /* HUD distance from the screen corner */
+  --wx-stage-top: 38%; /* centre messages: vertical position */
+  --wx-stage-size: clamp(4.5rem, 17vw, 10.5rem); /* countdown digits */
+  --wx-stage-msg-size: clamp(2.6rem, 9vw, 6rem); /* words (FINISH, You're out!) */
+  --wx-stage-in: 280ms; /* each new number / word */
+  --wx-go-ring: 520ms; /* GO: ring burst */
+  --wx-pop-scale: 1.6; /* counter number pop */
+}
+
+/* ---------- HUD panel ---------- */
+
+.wx-hud-root {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 5;
+  color: var(--wx-text);
+  font: var(--wx-type-body);
+  -webkit-font-smoothing: antialiased;
+}
+
+.wx-hud {
+  position: absolute;
+  top: var(--wx-hud-inset);
+  left: var(--wx-hud-inset);
+  display: flex;
+  max-width: calc(100% - 2 * var(--wx-hud-inset));
+  padding: var(--wx-space-3) 0;
+  background: var(--wx-surface-strong);
+  border: 1px solid var(--wx-hairline);
+  border-radius: 14px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+}
+.wx-hud-stat {
+  display: grid;
+  gap: 6px;
+  padding: 0 var(--wx-space-4);
+  min-width: 5.5rem;
+}
+.wx-hud-stat + .wx-hud-stat { border-left: 1px solid var(--wx-hairline); }
+.wx-hud-value {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  font: 800 1.9rem/1 var(--wx-font-display);
+  letter-spacing: -0.03em;
+  font-variant-numeric: tabular-nums;
+}
+.wx-hud-value .wx-hud-of {
+  font: 600 0.95rem/1 var(--wx-font-text);
+  color: var(--wx-text-3);
+  letter-spacing: 0;
+}
+.wx-hud-num {
+  display: inline-block;
+  min-width: 0.7em;
+  transform-origin: 50% 60%;
+}
+.wx-hud-num.is-pop { animation: wx-hud-pop 900ms var(--wx-ease-out); }
+@keyframes wx-hud-pop {
+  0% { transform: scale(var(--wx-pop-scale)); color: var(--wx-tone, var(--wx-amber)); text-shadow: 0 0 18px var(--wx-tone, var(--wx-amber)); }
+  45% { transform: scale(1); }
+  100% { color: var(--wx-text); text-shadow: none; }
+}
+
+/* Lap progress: one segment per lap (done = blue, current = half). */
+.wx-hud-laps { display: flex; gap: 4px; margin-top: 2px; }
+.wx-hud-laps > span {
+  width: 14px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--wx-hairline-strong);
+  transition: background-color var(--wx-dur) var(--wx-ease-out), box-shadow var(--wx-dur) var(--wx-ease-out);
+}
+.wx-hud-laps > span.is-done { background: var(--wx-action); box-shadow: 0 0 8px rgba(12, 110, 252, 0.7); }
+.wx-hud-laps > span.is-now { background: linear-gradient(90deg, var(--wx-action) 50%, var(--wx-hairline-strong) 50%); }
+
+/* ---------- Centre stage (countdown and messages) ---------- */
+
+.wx-stage {
+  position: absolute;
+  left: 50%;
+  top: var(--wx-stage-top);
+  transform: translate(-50%, -50%);
+  display: grid;
+  place-items: center;
+}
+.wx-stage-item {
+  --wx-tone: var(--wx-text);
+  position: relative;
+  padding: 0.02em 0.22em 0.06em;
+  color: var(--wx-tone);
+  font: 800 var(--wx-stage-size)/1 var(--wx-font-display);
+  letter-spacing: -0.05em;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  text-shadow: 0 0 0.2em color-mix(in srgb, var(--wx-tone) 55%, transparent), 0 0.04em 0.3em rgba(0, 0, 0, 0.5);
+}
+.wx-stage-item.is-word { font-size: var(--wx-stage-msg-size); letter-spacing: -0.035em; padding: 0.08em 0.3em 0.12em; }
+.wx-stage-item > .wx-frame { --wx-select-gap: 0px; opacity: 1; }
+.wx-stage-item > .wx-frame .wx-frame-tag { font-size: 11px; padding: 4px 7px; }
+.wx-stage-item.is-in { animation: wx-stage-in var(--wx-stage-in) var(--wx-ease-snap) both; }
+@keyframes wx-stage-in {
+  from { opacity: 0; transform: translate(var(--wx-snap-offset), calc(var(--wx-snap-offset) * -0.6)) scale(1.12); }
+  to { opacity: 1; transform: none; }
+}
+
+/* ---------- Centre message on a panel ("You’re out!") ---------- */
+.wx-hud-message-slot {
+  position: absolute;
+  left: 50%;
+  top: var(--wx-stage-top);
+  transform: translate(-50%, -50%);
+  display: grid;
+  pointer-events: none;
+}
+.wx-hud-message {
+  grid-area: 1 / 1;
+  display: flex;
+  align-items: center;
+  gap: var(--wx-space-4);
+  padding: var(--wx-space-5) var(--wx-space-6);
+  background: var(--wx-surface-strong);
+  white-space: nowrap;
+  animation: wx-hud-message-in var(--wx-dur-slow) var(--wx-ease-snap) both;
+}
+.wx-hud-message .wx-marker { width: 10px; height: 10px; }
+.wx-hud-message-text {
+  color: var(--wx-text);
+  font: var(--wx-type-h1);
+  letter-spacing: var(--wx-title-tracking);
+}
+.wx-hud-message.is-out { animation: wx-hud-message-out 160ms var(--wx-ease-out) both; }
+@keyframes wx-hud-message-in {
+  from { opacity: 0; transform: translate(var(--wx-snap-offset), calc(var(--wx-snap-offset) * -0.6)); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes wx-hud-message-out {
+  to { opacity: 0; transform: translateY(6px); }
+}
+
+/* ---------- Countdown (shared design: countdown.js) ----------
+ * Huge number / word in its accent, no frame; under it the loader's line
+ * (hairline track, glowing fill, white square handle) depleting over the step.
+ */
+:root {
+  --wx-count-size: clamp(4rem, 13vw, 8.5rem); /* 3 · 2 · 1 */
+  --wx-count-go-size: clamp(5rem, 17vw, 11rem); /* GO */
+  --wx-count-line: clamp(4.5rem, 11vw, 7.5rem); /* line length */
+  --wx-count-top: 31%; /* a little above the stage messages, clear of the cars on the grid */
+}
+.wx-count {
+  position: absolute;
+  left: 50%;
+  top: var(--wx-count-top);
+  transform: translate(-50%, -50%);
+  display: grid;
+  pointer-events: none;
+}
+.wx-count-item {
+  --wx-tone: var(--wx-action);
+  grid-area: 1 / 1;
+  display: grid;
+  justify-items: center;
+  gap: var(--wx-space-3);
+  animation: wx-count-in 260ms var(--wx-ease-snap) both;
+}
+.wx-count-item.is-out { animation: wx-count-out 120ms var(--wx-ease-out) both; }
+.wx-count-text {
+  color: var(--wx-tone);
+  font: 800 var(--wx-count-size)/0.9 var(--wx-font-display);
+  letter-spacing: -0.05em;
+  font-variant-numeric: tabular-nums;
+  text-shadow:
+    0 0 0.12em color-mix(in srgb, var(--wx-tone) 70%, transparent),
+    0 0 0.45em color-mix(in srgb, var(--wx-tone) 40%, transparent),
+    0 0.04em 0.25em rgba(0, 0, 0, 0.45);
+}
+.wx-count-line {
+  position: relative;
+  width: var(--wx-count-line);
+  height: var(--wx-progress-height, 3px);
+  border-radius: 2px;
+  background: var(--wx-hairline-strong);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35); /* contrast over the bright table */
+}
+.wx-count-line > i {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 100%;
+  border-radius: 2px;
+  background: var(--wx-tone);
+  box-shadow: 0 0 12px var(--wx-tone);
+  animation: wx-count-deplete var(--wx-count-dur, 1s) linear both;
+}
+/* White square handle at the fill's tip (the loader's handle). */
+.wx-count-line > i::after {
+  content: "";
+  position: absolute;
+  right: calc(var(--wx-handle) / -2);
+  top: 50%;
+  width: var(--wx-handle);
+  height: var(--wx-handle);
+  transform: translateY(-50%);
+  background: var(--wx-handle-fill);
+  border: 1px solid var(--wx-tone);
+  box-sizing: border-box;
+}
+/* GO: bigger, Wix Blue, a short glow pulse, line full. */
+.wx-count-item.is-go { animation-duration: 320ms; }
+.wx-count-item.is-go .wx-count-text {
+  font-size: var(--wx-count-go-size);
+  animation: wx-count-go-pulse 600ms var(--wx-ease-out) both;
+}
+.wx-count-item.is-go .wx-count-line > i { animation: none; }
+@keyframes wx-count-in {
+  from { opacity: 0; transform: translateY(0.4rem) scale(0.9); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes wx-count-out {
+  to { opacity: 0; transform: scale(1.04); }
+}
+@keyframes wx-count-deplete {
+  from { width: 100%; }
+  to { width: 0%; }
+}
+@keyframes wx-count-go-pulse {
+  from { text-shadow: 0 0 0.1em var(--wx-tone), 0 0 0.5em var(--wx-tone), 0 0 1.2em var(--wx-tone); }
+  to {
+    text-shadow:
+      0 0 0.08em color-mix(in srgb, var(--wx-tone) 80%, transparent),
+      0 0 0.4em color-mix(in srgb, var(--wx-tone) 45%, transparent),
+      0 0.04em 0.25em rgba(0, 0, 0, 0.45);
+  }
+}
+
+/* ---------- Results popup ---------- */
+
+.wx-popup {
+  position: absolute;
+  inset: 0;
+  z-index: 12;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: var(--wx-space-4);
+  background: rgba(7, 8, 12, 0.5);
+  opacity: 0;
+  transition: opacity var(--wx-dur) var(--wx-ease-out);
+  pointer-events: auto;
+  color: var(--wx-text);
+  font: var(--wx-type-body);
+  -webkit-font-smoothing: antialiased;
+}
+.wx-popup.is-open { opacity: 1; }
+.wx-popup-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--wx-space-5);
+  width: min(28rem, 100%);
+  max-height: calc(100% - 8px);
+  overflow-y: auto;
+  padding: clamp(1.25rem, 3vw, 2rem);
+  background: var(--wx-surface-strong);
+  transform: translate(var(--wx-snap-offset), calc(var(--wx-snap-offset) * -0.6));
+  transition: transform var(--wx-dur-slow) var(--wx-ease-snap);
+}
+.wx-popup.is-open .wx-popup-card { transform: none; }
+/* Placement frame while the card lands, then it fades. */
+.wx-popup-card > .wx-frame { --wx-select-gap: 4px; }
+.wx-popup.is-open .wx-popup-card > .wx-frame { animation: wx-snap-frame calc(var(--wx-dur-slow) + 380ms) both; }
+.wx-popup-head { display: grid; gap: var(--wx-space-3); }
+.wx-popup-title { font: 800 clamp(2.2rem, 7vw, 3.2rem)/1 var(--wx-font-display); letter-spacing: var(--wx-title-tracking); }
+
+.wx-standings { list-style: none; margin: 0; padding: 0; display: grid; }
+.wx-standings li {
+  position: relative;
+  display: grid;
+  grid-template-columns: 2.6em auto 1fr auto;
+  align-items: center;
+  gap: var(--wx-space-3);
+  padding: var(--wx-space-3) var(--wx-space-3);
+  border-top: 1px solid var(--wx-hairline);
+  font: 500 0.95rem/1.3 var(--wx-font-text);
+  color: var(--wx-text-2);
+}
+.wx-standings li:last-child { border-bottom: 1px solid var(--wx-hairline); }
+.wx-standings-place { font: 700 1rem/1 var(--wx-font-display); color: var(--wx-text); }
+.wx-standings-time { font-variant-numeric: tabular-nums; color: var(--wx-text-3); font-size: 0.88rem; }
+.wx-standings li.is-player { color: var(--wx-text); background: rgba(17, 109, 255, 0.08); }
+.wx-standings li.is-player > .wx-frame { --wx-select-gap: 0px; opacity: 1; }
+/* The "You" chip straddles the frame's top line, so it never covers the row above. */
+.wx-standings li.is-player .wx-frame-tag { bottom: auto; top: -8px; left: auto; right: 10px; font-size: 9px; padding: 2px 5px; }
+.wx-standings-you { color: var(--wx-text-3); }
+
+.wx-popup-actions { display: flex; flex-wrap: wrap; gap: var(--wx-space-4); margin-top: var(--wx-space-1); padding-top: var(--wx-space-3); }
+.wx-popup-actions > .wx-btn { flex: 1 1 8rem; }
+.wx-popup-actions .wx-btn { padding: 0 var(--wx-space-5); }
+
+@media (prefers-reduced-motion: reduce) {
+  .wx-hud-num.is-pop,
+  .wx-stage-item.is-in,
+  .wx-count-item,
+  .wx-count-item.is-out,
+  .wx-hud-message,
+  .wx-hud-message.is-out,
+  .wx-count-item.is-go .wx-count-text,
+  .wx-popup.is-open .wx-popup-card > .wx-frame { animation: none; }
+  .wx-popup.is-open .wx-popup-card > .wx-frame { opacity: 0; }
+  .wx-popup-card { transition: none; transform: none; }
+}

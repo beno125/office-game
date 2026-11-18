@@ -4,6 +4,8 @@ import { SCENE_ROUTES } from "./game/sceneRoutes.js";
 import { useLevelHotkeys } from "./game/useLevelHotkeys.js";
 import { setOfficeSceneMount } from "./office-copy/officeSceneMount.js";
 import ControlsGuide from "./game/ControlsGuide.jsx";
+import { Label } from "./game/ui/ui.jsx";
+import GameMenu from "./game/ui/GameMenu.jsx";
 
 /** Loader fade-out once the scene is ready (ms); the intro starts as it begins. */
 const OFFICE_LOADER_FADE_MS = 450;
@@ -32,6 +34,15 @@ export default function OfficeSceneCopy({
   // The intro has ended and the player has control: show the controls guide.
   const [introDone, setIntroDone] = useState(false);
   useLevelHotkeys(SCENE_ROUTES.office);
+  // Game menu: shown once the player has control, hidden once the office leaves for the kitchen.
+  const moduleRef = useRef(null);
+  const menuFlagsRef = useRef({ introDone: false, leaving: false });
+  menuFlagsRef.current.introDone = introDone;
+  const getMenuState = () => {
+    const f = menuFlagsRef.current;
+    return { visible: f.introDone && !f.leaving && !!moduleRef.current, inPlay: false };
+  };
+  const pauseForMenu = (paused) => moduleRef.current?.setOfficeSceneRendering?.(!paused);
 
   useEffect(() => {
     const root = rootRef.current;
@@ -42,7 +53,10 @@ export default function OfficeSceneCopy({
     setOfficeSceneMount(root);
     const stopKitchenTransition = onOfficeSceneEvent(
       "transition-to-kitchen",
-      () => onTransitionRef.current?.(),
+      () => {
+        menuFlagsRef.current.leaving = true;
+        onTransitionRef.current?.();
+      },
     );
     let fadeTimer = 0;
     const revealScene = () => {
@@ -58,6 +72,7 @@ export default function OfficeSceneCopy({
     import("./office-copy/officeSceneModule.js")
       .then((module) => {
         sceneModule = module;
+        moduleRef.current = module;
         module.setOfficeSceneRendering(!disposed);
         if (disposed) return;
         setPhase("ready");
@@ -88,8 +103,8 @@ export default function OfficeSceneCopy({
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
-    color: "#e8e8e8",
-    font: "14px/1.4 system-ui, sans-serif",
+    color: "var(--wx-text-2)",
+    font: "var(--wx-type-body)",
     textAlign: "center",
     padding: "1rem",
     pointerEvents: "none",
@@ -116,22 +131,23 @@ export default function OfficeSceneCopy({
     >
       <div id="perfBadge" aria-hidden="true" />
       <ControlsGuide active={introDone} />
+      <GameMenu level={SCENE_ROUTES.office} getState={getMenuState} onPause={pauseForMenu} />
       {showSceneLoader && (
         <div
           style={{
             ...overlayStyle,
-            background: "#1a1a1a",
+            background: "var(--wx-bg)",
             opacity: sceneReady ? 0 : 1,
             transition: `opacity ${OFFICE_LOADER_FADE_MS}ms ease`,
           }}
         >
-          Loading 3D scene…
+          <Label marker="var(--wx-amber)">Loading 3D scene…</Label>
         </div>
       )}
       {showModuleOverlay && phase === "error" && (
         <div style={overlayStyle}>
           Scene bundle failed to load. Open DevTools → Console (F12) and check for red errors
-          (network 404 on <code style={{ color: "#9cf" }}>/office-scene-optimized/</code> is common).
+          (network 404 on <code style={{ color: "var(--wx-action-hover)" }}>/office-scene-optimized/</code> is common).
         </div>
       )}
     </div>

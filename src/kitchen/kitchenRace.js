@@ -8,6 +8,9 @@
  * half-circle — counter-clockwise seen from above.
  */
 
+import { brandTone, buttonEl, el, frameEl, markerEl, replayClass } from "../game/ui/dom.js";
+import { createCountdown } from "../game/ui/countdown.js";
+
 export const RACE_LAPS = 4;
 export const RACE_CHECKPOINTS = 8;
 export const RACE_COUNTDOWN_SEC = 3;
@@ -308,78 +311,125 @@ export class RaceAIDriver {
 
 const ORDINALS = ["1st", "2nd", "3rd", "4th"];
 
-/** Race HUD (lap, position, countdown, result), drawn over the scene mount. */
+/** Each countdown number stays this long (s): its line depletes over it (design only; the race keeps its own timer). */
+const COUNTDOWN_STEP_SEC = 1;
+/** Chip on the centre messages' frame, by text (others get no chip). */
+const STAGE_TAGS = { "FINISH!": "Finish", FINISH: "Finish" };
+/** Centre message panel: leave fade (ms, matches its CSS). */
+const HUD_MESSAGE_LEAVE_MS = 160;
+/** Knock-off counter pop colours. */
+const POP_TONE_OUT = "var(--wx-amber)";
+const POP_TONE_LEFT = "var(--wx-red)";
+
+/**
+ * Centre stage: one big word in a selection frame (FINISH).
+ * Replays its entrance only when the text changes. (The countdown is its own
+ * component: ../game/ui/countdown.js.)
+ */
+class HudStage {
+  constructor() {
+    this.root = el("div", "wx-stage");
+    this.root.setAttribute("aria-live", "assertive");
+    this.root.style.display = "none";
+    this._key = "";
+  }
+
+  /** kind: "number" | "word". */
+  show(text, { tone, tag, kind = "word" } = {}) {
+    if (!text) {
+      this.root.style.display = "none";
+      this._key = "";
+      return;
+    }
+    this.root.style.display = "";
+    const key = kind + "|" + text + "|" + tone;
+    if (key === this._key) return;
+    this._key = key;
+    const item = el("div", "wx-stage-item" + (kind === "word" ? " is-word" : ""));
+    item.appendChild(el("span", null, text));
+    if (tone) item.style.setProperty("--wx-tone", tone);
+    item.appendChild(frameEl(tag));
+    this.root.replaceChildren(item);
+    replayClass(item, "is-in");
+  }
+}
+
+/**
+ * Centre message on the menus' panel surface (frosted dark panel, Madefor
+ * Display, a marker dot in the message's accent), no frame: enters and leaves
+ * like the popup. Used for "You’re out!".
+ */
+class HudMessage {
+  constructor() {
+    this.root = el("div", "wx-hud-message-slot");
+    this.root.setAttribute("aria-live", "assertive");
+    this._current = null;
+    this._key = "";
+  }
+
+  show(text, tone) {
+    if (!text) {
+      this.clear();
+      return;
+    }
+    const key = text + "|" + tone;
+    if (key === this._key) return;
+    this.clear();
+    this._key = key;
+    const panel = el("div", "wx-panel wx-hud-message");
+    panel.append(markerEl(tone), el("span", "wx-hud-message-text", text));
+    this.root.appendChild(panel);
+    this._current = panel;
+  }
+
+  clear() {
+    const p = this._current;
+    this._current = null;
+    this._key = "";
+    if (!p) return;
+    p.classList.add("is-out");
+    window.setTimeout(() => p.remove(), HUD_MESSAGE_LEAVE_MS + 40);
+  }
+}
+
+/** HUD stat: small label over a big value (and an optional "/ total"). */
+function hudStat(label) {
+  const wrap = el("div", "wx-hud-stat");
+  const value = el("div", "wx-hud-value");
+  const n = el("span", "wx-hud-num");
+  const of = el("span", "wx-hud-of");
+  value.append(n, of);
+  wrap.append(el("p", "wx-label", label), value);
+  return { wrap, n, of };
+}
+
+/** Race HUD (position, laps, countdown, result), drawn over the scene mount. */
 export class RaceHud {
   constructor() {
-    const root = document.createElement("div");
-    root.className = "kitchen-race-hud";
-    Object.assign(root.style, {
-      position: "absolute",
-      inset: "0",
-      pointerEvents: "none",
-      zIndex: "5",
-      font: "800 16px/1.2 system-ui, sans-serif",
-      color: "#fff",
-      letterSpacing: "0.04em",
-      textTransform: "uppercase",
-    });
+    const root = el("div", "kitchen-race-hud wx-hud-root");
+    const panel = el("div", "wx-hud");
+    this.pos = hudStat("Position");
+    this.lap = hudStat("Lap");
+    this.lapBars = el("div", "wx-hud-laps");
+    this.lapBars.setAttribute("aria-hidden", "true");
+    this.lap.wrap.appendChild(this.lapBars);
+    panel.append(this.pos.wrap, this.lap.wrap);
 
-    const panel = document.createElement("div");
-    Object.assign(panel.style, {
-      position: "absolute",
-      top: "16px",
-      left: "16px",
-      padding: "10px 14px",
-      borderRadius: "10px",
-      background: "rgba(9, 9, 20, 0.62)",
-      display: "flex",
-      flexDirection: "column",
-      gap: "4px",
-      minWidth: "120px",
-    });
-    this.lapEl = document.createElement("div");
-    this.posEl = document.createElement("div");
-    this.posEl.style.fontSize = "26px";
-    panel.append(this.posEl, this.lapEl);
+    this.stage = new HudStage();
+    this.countdown = createCountdown();
 
-    this.bigEl = document.createElement("div");
-    Object.assign(this.bigEl.style, {
-      position: "absolute",
-      left: "50%",
-      top: "38%",
-      transform: "translate(-50%, -50%)",
-      fontSize: "min(22vw, 140px)",
-      fontWeight: "900",
-      textShadow: "0 4px 24px rgba(0,0,0,0.6)",
-      display: "none",
-    });
+    // Result card (kept for the API; the race uses the results popup).
+    this.resultEl = el("div", "wx-stage");
+    this.resultEl.style.display = "none";
+    const card = el("div", "wx-panel");
+    card.style.textAlign = "center";
+    this.resultTitle = el("div", "wx-title wx-title-h2");
+    this.resultSub = el("p", "wx-text");
+    this.resultSub.style.marginTop = "8px";
+    card.append(this.resultTitle, this.resultSub);
+    this.resultEl.appendChild(card);
 
-    this.resultEl = document.createElement("div");
-    Object.assign(this.resultEl.style, {
-      position: "absolute",
-      left: "50%",
-      top: "40%",
-      transform: "translate(-50%, -50%)",
-      padding: "22px 30px",
-      borderRadius: "14px",
-      background: "rgba(9, 9, 20, 0.78)",
-      textAlign: "center",
-      display: "none",
-      maxWidth: "calc(100vw - 32px)",
-      boxSizing: "border-box",
-    });
-    this.resultTitle = document.createElement("div");
-    this.resultTitle.style.fontSize = "34px";
-    this.resultSub = document.createElement("div");
-    Object.assign(this.resultSub.style, {
-      marginTop: "10px",
-      fontSize: "13px",
-      fontWeight: "600",
-      opacity: "0.8",
-    });
-    this.resultEl.append(this.resultTitle, this.resultSub);
-
-    root.append(panel, this.bigEl, this.resultEl);
+    root.append(panel, this.countdown.root, this.stage.root, this.resultEl);
     this.root = root;
     this._last = "";
   }
@@ -397,24 +447,36 @@ export class RaceHud {
     const key = lap + "/" + laps + "/" + place + "/" + cars;
     if (key === this._last) return;
     this._last = key;
-    this.lapEl.textContent = `Lap ${lap}/${laps}`;
-    this.posEl.textContent = `${ORDINALS[place - 1] || place} / ${cars}`;
+    this.pos.n.textContent = ORDINALS[place - 1] || String(place);
+    this.pos.of.textContent = `/ ${cars}`;
+    this.lap.n.textContent = String(lap);
+    this.lap.of.textContent = `/ ${laps}`;
+    if (this.lapBars.childElementCount !== laps) this.lapBars.replaceChildren(...Array.from({ length: laps }, () => el("span")));
+    [...this.lapBars.children].forEach((s, i) => {
+      s.className = i < lap - 1 ? "is-done" : i === lap - 1 ? "is-now" : "";
+    });
+  }
+
+  /** Countdown number (3, 2, 1): the shared countdown (no frame), its line depleting over the second. */
+  setCountdown(n) {
+    this.stage.show("");
+    this.countdown.show(n, COUNTDOWN_STEP_SEC);
+  }
+
+  /** GO: bigger, Wix Blue, a short glow pulse (cleared by setBig("")). */
+  setGo() {
+    this.countdown.go();
   }
 
   setBig(text, color) {
-    if (!text) {
-      this.bigEl.style.display = "none";
-      return;
-    }
-    this.bigEl.style.display = "";
-    this.bigEl.textContent = text;
-    this.bigEl.style.color = color || "#fff";
+    this.countdown.clear();
+    this.stage.show(text, { tone: brandTone(color), tag: STAGE_TAGS[text] });
   }
 
   showResult(title, sub, color) {
     this.resultEl.style.display = "";
     this.resultTitle.textContent = title;
-    this.resultTitle.style.color = color || "#fff";
+    this.resultTitle.style.color = brandTone(color);
     this.resultSub.textContent = sub;
   }
 
@@ -424,77 +486,20 @@ export class RaceHud {
 }
 
 /**
- * Knock-off counter for the meeting room arena, in the race HUD's style (same
- * panel, font and colours): "Knocked off N · Remaining M", the changed number
- * pops when a car falls, plus a big centre message (e.g. "You're out!").
+ * Knock-off counter for the meeting room arena, in the race HUD's style:
+ * "Knocked off N | Remaining M", the changed number pops when a car falls,
+ * plus a centre message on a panel (e.g. "You’re out!").
  */
 export class KnockoutHud {
   constructor() {
-    const root = document.createElement("div");
-    root.className = "arena-knockout-hud";
-    Object.assign(root.style, {
-      position: "absolute",
-      inset: "0",
-      pointerEvents: "none",
-      zIndex: "5",
-      font: "800 16px/1.2 system-ui, sans-serif",
-      color: "#fff",
-      letterSpacing: "0.04em",
-      textTransform: "uppercase",
-      display: "none",
-    });
-    const panel = document.createElement("div");
-    Object.assign(panel.style, {
-      position: "absolute",
-      top: "16px",
-      left: "16px",
-      padding: "10px 14px",
-      borderRadius: "10px",
-      background: "rgba(9, 9, 20, 0.62)",
-      display: "flex",
-      alignItems: "baseline",
-      flexWrap: "wrap",
-      gap: "6px 10px",
-      maxWidth: "calc(100% - 32px)",
-      boxSizing: "border-box",
-    });
-    const stat = (label) => {
-      const wrap = document.createElement("span");
-      wrap.style.whiteSpace = "nowrap";
-      const l = document.createElement("span");
-      l.textContent = label + " ";
-      l.style.opacity = "0.8";
-      const n = document.createElement("span");
-      Object.assign(n.style, {
-        display: "inline-block",
-        fontSize: "24px",
-        minWidth: "0.7em",
-        textAlign: "center",
-        transformOrigin: "50% 60%",
-      });
-      wrap.append(l, n);
-      return { wrap, n };
-    };
-    this.out = stat("Knocked off");
-    this.left = stat("Remaining");
-    const dot = document.createElement("span");
-    dot.textContent = "·";
-    dot.style.opacity = "0.6";
-    panel.append(this.out.wrap, dot, this.left.wrap);
-
-    this.bigEl = document.createElement("div");
-    Object.assign(this.bigEl.style, {
-      position: "absolute",
-      left: "50%",
-      top: "38%",
-      transform: "translate(-50%, -50%)",
-      fontSize: "min(14vw, 96px)",
-      fontWeight: "900",
-      whiteSpace: "nowrap",
-      textShadow: "0 4px 24px rgba(0,0,0,0.6)",
-      display: "none",
-    });
-    root.append(panel, this.bigEl);
+    const root = el("div", "arena-knockout-hud wx-hud-root");
+    root.style.display = "none";
+    const panel = el("div", "wx-hud");
+    this.out = hudStat("Knocked off");
+    this.left = hudStat("Remaining");
+    panel.append(this.out.wrap, this.left.wrap);
+    this.message = new HudMessage();
+    root.append(panel, this.message.root);
     this.root = root;
     this._vals = [null, null];
   }
@@ -507,34 +512,24 @@ export class KnockoutHud {
     this.root.style.display = v ? "" : "none";
   }
 
-  _pop(el, color) {
-    el.style.transition = "none";
-    el.style.transform = "scale(1.7)";
-    el.style.color = color;
-    void el.offsetWidth; // restart the transition
-    el.style.transition = "transform 420ms cubic-bezier(0.2, 0.9, 0.3, 1.3), color 900ms ease";
-    el.style.transform = "scale(1)";
-    el.style.color = "#fff";
+  _pop(n, tone) {
+    n.style.setProperty("--wx-tone", tone);
+    replayClass(n, "is-pop");
   }
 
   /** Counts; the number that changed pops (unless `quiet`, e.g. on a reset). */
   setCounts(knockedOff, remaining, quiet = false) {
     const [o, r] = this._vals;
+    if (knockedOff === o && remaining === r) return;
     this.out.n.textContent = String(knockedOff);
     this.left.n.textContent = String(remaining);
-    if (!quiet && o !== null && knockedOff !== o) this._pop(this.out.n, "#ffd23f");
-    if (!quiet && r !== null && remaining !== r) this._pop(this.left.n, "#ff3b6b");
+    if (!quiet && o !== null && knockedOff !== o) this._pop(this.out.n, POP_TONE_OUT);
+    if (!quiet && r !== null && remaining !== r) this._pop(this.left.n, POP_TONE_LEFT);
     this._vals = [knockedOff, remaining];
   }
 
   setBig(text, color) {
-    if (!text) {
-      this.bigEl.style.display = "none";
-      return;
-    }
-    this.bigEl.style.display = "";
-    this.bigEl.textContent = text;
-    this.bigEl.style.color = color || "#fff";
+    this.message.show(text, brandTone(color));
   }
 }
 
@@ -546,13 +541,14 @@ export function formatRaceTime(sec) {
   return `${m}:${r < 10 ? "0" : ""}${r.toFixed(1)}`;
 }
 
-const POPUP_FONT_DISPLAY = "Impact, Haettenschweiler, 'Arial Narrow Bold', sans-serif";
-const POPUP_FONT_UI = "800 13px/1.4 system-ui, sans-serif";
+/** Popup eyebrow, and the editor-style name chip on the player's row. */
+const POPUP_EYEBROW = "Results";
+const POPUP_PLAYER_TAG = "You";
 
 /**
- * End-of-race popup in the game's menu style (magenta glass card, thick black
- * outline, offset shadow, Impact headings): a result title, the standings and
- * two buttons. Real <button>s, so mouse, Tab and Enter / Space all work.
+ * End-of-race / round popup (design system: frosted panel, Madefor title,
+ * standings with the player's row selected, pill buttons without frames). Real <button>s, so
+ * mouse, Tab and Enter / Space all work.
  */
 export class RaceResultsPopup {
   constructor({ onRetry, onNext, retryLabel = "Race again", nextLabel = "Next level" }) {
@@ -561,98 +557,35 @@ export class RaceResultsPopup {
     this.open = false;
     this._hideTimer = 0;
 
-    const root = document.createElement("div");
-    root.className = "kitchen-race-results";
+    const root = el("div", "kitchen-race-results wx-popup");
     root.setAttribute("role", "dialog");
     root.setAttribute("aria-modal", "true");
-    Object.assign(root.style, {
-      position: "absolute",
-      inset: "0",
-      zIndex: "12",
-      display: "none",
-      alignItems: "center",
-      justifyContent: "center",
-      padding: "16px",
-      boxSizing: "border-box",
-      background: "rgba(3, 3, 10, 0.45)",
-      opacity: "0",
-      transition: `opacity ${RACE_RESULTS_ANIM_MS}ms ease`,
-      pointerEvents: "auto",
-    });
 
-    const card = document.createElement("div");
-    Object.assign(card.style, {
-      display: "flex",
-      flexDirection: "column",
-      gap: "16px",
-      width: "min(26rem, 100%)",
-      maxHeight: "calc(100% - 8px)",
-      overflowY: "auto",
-      boxSizing: "border-box",
-      padding: "clamp(1.1rem, 3vw, 1.8rem)",
-      color: "#fff",
-      background: "rgba(226, 0, 78, 0.46)",
-      border: "4px solid #080808",
-      borderRadius: "20px",
-      boxShadow:
-        "10px 12px 0 #080808, 0 24px 60px rgba(4, 7, 20, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.28)",
-      backdropFilter: "blur(12px) saturate(145%)",
-      WebkitBackdropFilter: "blur(12px) saturate(145%)",
-      transform: "scale(0.92) translateY(10px)",
-      transition: `transform ${RACE_RESULTS_ANIM_MS}ms cubic-bezier(0.2, 0.9, 0.3, 1.2)`,
-    });
-
-    this.titleEl = document.createElement("h2");
-    Object.assign(this.titleEl.style, {
-      margin: "0",
-      fontFamily: POPUP_FONT_DISPLAY,
-      fontSize: "clamp(2.3rem, 8vw, 3.6rem)",
-      fontWeight: "900",
-      lineHeight: "0.9",
-      letterSpacing: "0.01em",
-      textTransform: "uppercase",
-      WebkitTextStroke: "2px #080808",
-      paintOrder: "stroke fill",
-      textShadow: "4px 5px 0 #080808",
-    });
+    const card = el("div", "wx-panel wx-popup-card");
+    const head = el("div", "wx-popup-head");
+    this.eyebrow = el("p", "wx-label");
+    this.marker = markerEl();
+    this.eyebrow.append(this.marker, document.createTextNode(POPUP_EYEBROW));
+    this.titleEl = el("h2", "wx-title wx-popup-title");
     this.titleEl.id = "kitchen-race-results-title";
     root.setAttribute("aria-labelledby", this.titleEl.id);
+    this.subEl = el("p", "wx-text");
+    head.append(this.eyebrow, this.titleEl, this.subEl);
 
-    this.subEl = document.createElement("div");
-    Object.assign(this.subEl.style, {
-      alignSelf: "flex-start",
-      padding: "0.45rem 0.75rem",
-      background: "rgba(8, 8, 8, 0.78)",
-      borderRadius: "8px",
-      font: POPUP_FONT_UI,
-      letterSpacing: "0.055em",
-      textTransform: "uppercase",
-    });
+    this.listEl = el("ol", "wx-standings");
 
-    this.listEl = document.createElement("ol");
-    Object.assign(this.listEl.style, {
-      listStyle: "none",
-      margin: "0",
-      padding: "0",
-      display: "flex",
-      flexDirection: "column",
-      gap: "6px",
-    });
-
-    const btnRow = document.createElement("div");
-    Object.assign(btnRow.style, {
-      display: "flex",
-      flexWrap: "wrap",
-      gap: "12px",
-      marginTop: "4px",
-    });
-    this.retryBtn = this._button(retryLabel, "#f00458");
-    this.nextBtn = this._button(nextLabel, "#165dff");
+    const btnRow = el("div", "wx-popup-actions");
+    // No selection frames: the buttons' own hover / focus state (ui.css) shows they react.
+    const retry = buttonEl(retryLabel, { variant: "secondary", size: "lg", frame: false });
+    const next = buttonEl(nextLabel, { variant: "primary", size: "lg", frame: false });
+    this.retryBtn = retry.button;
+    this.nextBtn = next.button;
+    this.nextWrap = next.wrap;
     this.retryBtn.addEventListener("click", () => this.open && this.onRetry && this.onRetry());
     this.nextBtn.addEventListener("click", () => this.open && !this.nextBtn.disabled && this.onNext && this.onNext());
-    btnRow.append(this.retryBtn, this.nextBtn);
+    btnRow.append(retry.wrap, next.wrap);
 
-    card.append(this.titleEl, this.subEl, this.listEl, btnRow);
+    card.append(head, this.listEl, btnRow, frameEl());
     root.append(card);
     // Keys used here stay here (the game's own key handlers on window don't see them).
     root.addEventListener("keydown", (e) => {
@@ -674,55 +607,6 @@ export class RaceResultsPopup {
     this.card = card;
   }
 
-  _button(label, bg) {
-    const b = document.createElement("button");
-    b.type = "button";
-    b.textContent = label;
-    Object.assign(b.style, {
-      flex: "1 1 9rem",
-      padding: "0.7rem 1.1rem",
-      color: "#fff",
-      background: bg,
-      border: "4px solid #080808",
-      borderRadius: "12px",
-      fontFamily: POPUP_FONT_DISPLAY,
-      fontSize: "clamp(1.2rem, 4vw, 1.55rem)",
-      fontWeight: "900",
-      lineHeight: "1",
-      letterSpacing: "0.045em",
-      textTransform: "uppercase",
-      WebkitTextStroke: "1px #080808",
-      paintOrder: "stroke fill",
-      cursor: "pointer",
-      boxShadow: "6px 7px 0 #080808",
-      outline: "none",
-      transition: "transform 120ms ease, box-shadow 120ms ease, filter 120ms ease",
-    });
-    const lift = (on) => {
-      if (b.disabled) return;
-      b.style.transform = on ? "translate(-2px, -2px)" : "";
-      b.style.boxShadow = on ? "8px 9px 0 #080808" : "6px 7px 0 #080808";
-    };
-    b.addEventListener("pointerenter", () => lift(true));
-    b.addEventListener("pointerleave", () => lift(document.activeElement === b));
-    b.addEventListener("focus", () => {
-      lift(true);
-      b.style.filter = "brightness(1.15)";
-      b.style.outline = "3px solid #fff";
-      b.style.outlineOffset = "2px";
-    });
-    b.addEventListener("blur", () => {
-      lift(false);
-      b.style.filter = "";
-      b.style.outline = "none";
-    });
-    b.addEventListener("pointerdown", () => {
-      b.style.transform = "translate(3px, 4px)";
-      b.style.boxShadow = "2px 2px 0 #080808";
-    });
-    return b;
-  }
-
   attach(mount) {
     if (mount && this.root.parentNode !== mount) mount.appendChild(this.root);
   }
@@ -730,7 +614,7 @@ export class RaceResultsPopup {
   /**
    * @param {object} r
    * @param {string} r.title       e.g. "You win!" / "2nd place"
-   * @param {string} r.color       title colour
+   * @param {string} r.color       result colour (the eyebrow marker)
    * @param {string} r.sub         one line under the title (e.g. your time)
    * @param {{place:number,name:string,color:string,time:string,isPlayer:boolean}[]} r.rows
    * @param {boolean} r.nextEnabled  false when there's no next level
@@ -738,57 +622,34 @@ export class RaceResultsPopup {
   show(r) {
     window.clearTimeout(this._hideTimer);
     this.titleEl.textContent = r.title;
-    this.titleEl.style.color = r.color || "#fff";
+    this.marker.style.setProperty("--wx-marker", brandTone(r.color));
     this.subEl.textContent = r.sub || "";
     this.subEl.style.display = r.sub ? "" : "none";
     this.listEl.replaceChildren(
       ...r.rows.map((row) => {
-        const li = document.createElement("li");
-        Object.assign(li.style, {
-          display: "flex",
-          alignItems: "center",
-          gap: "10px",
-          padding: "0.45rem 0.7rem",
-          borderRadius: "8px",
-          background: row.isPlayer ? "rgba(8, 8, 8, 0.92)" : "rgba(8, 8, 8, 0.62)",
-          border: row.isPlayer ? "2px solid #fff" : "2px solid transparent",
-          font: POPUP_FONT_UI,
-          letterSpacing: "0.055em",
-          textTransform: "uppercase",
-        });
-        const place = document.createElement("span");
-        place.textContent = ORDINALS[row.place - 1] || String(row.place);
-        Object.assign(place.style, { width: "2.6em", fontSize: "15px" });
-        const dot = document.createElement("span");
-        Object.assign(dot.style, {
-          width: "14px",
-          height: "14px",
-          borderRadius: "50%",
-          background: row.color,
-          boxShadow: `0 0 10px ${row.color}`,
-          border: "2px solid #080808",
-          flex: "0 0 auto",
-        });
-        const name = document.createElement("span");
-        name.textContent = row.isPlayer ? `${row.name} (you)` : row.name;
-        name.style.flex = "1";
-        const time = document.createElement("span");
-        time.textContent = row.time;
-        time.style.opacity = "0.85";
-        li.append(place, dot, name, time);
+        const li = el("li", row.isPlayer ? "is-player" : "");
+        const name = el("span", null, row.name);
+        if (row.isPlayer) name.appendChild(el("span", "wx-standings-you", " (you)"));
+        li.append(
+          el("span", "wx-standings-place", ORDINALS[row.place - 1] || String(row.place)),
+          markerEl(row.color),
+          name,
+          el("span", "wx-standings-time", row.time),
+        );
+        if (row.isPlayer) li.appendChild(frameEl(POPUP_PLAYER_TAG));
         return li;
       }),
     );
     this.nextBtn.disabled = !r.nextEnabled;
-    this.nextBtn.style.display = r.nextEnabled ? "" : "none";
-    this.retryBtn.style.transform = "";
-    this.nextBtn.style.transform = "";
+    this.nextWrap.style.display = r.nextEnabled ? "" : "none";
+    // The only button left is the main action.
+    this.retryBtn.classList.toggle("wx-btn-primary", !r.nextEnabled);
+    this.retryBtn.classList.toggle("wx-btn-secondary", !!r.nextEnabled);
     this.root.style.display = "flex";
     this.open = true;
     // Next frame: animate in, focus the first button.
     requestAnimationFrame(() => {
-      this.root.style.opacity = "1";
-      this.card.style.transform = "scale(1) translateY(0)";
+      this.root.classList.add("is-open");
       this.retryBtn.focus({ preventScroll: true });
     });
   }
@@ -797,8 +658,7 @@ export class RaceResultsPopup {
     if (!this.open && this.root.style.display === "none") return;
     this.open = false;
     if (document.activeElement && this.root.contains(document.activeElement)) document.activeElement.blur();
-    this.root.style.opacity = "0";
-    this.card.style.transform = "scale(0.92) translateY(10px)";
+    this.root.classList.remove("is-open");
     window.clearTimeout(this._hideTimer);
     if (immediate) {
       this.root.style.display = "none";

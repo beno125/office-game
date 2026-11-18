@@ -1,65 +1,19 @@
 import { useEffect, useState } from "react";
-import IntroPage, {
-  introMenuStyle,
-  introPageStyle,
-  introTitleStyle,
-} from "./IntroPage.jsx";
+import IntroPage, { StartBackdrop } from "./IntroPage.jsx";
+import { Label, Marker, Title } from "./ui/ui.jsx";
 import { onOfficeSceneEvent } from "./officeSceneEvents.js";
 import OfficeSceneCopy from "../OfficeSceneCopy.jsx";
 import KitchenScene from "./KitchenScene.jsx";
 
+/** Loader overlay above the office (fades as one layer). */
 const overlayBase = {
-  ...introPageStyle,
+  position: "fixed",
+  inset: 0,
   zIndex: 2147483646,
   overflow: "hidden",
-  background: "#03030a",
+  background: "var(--wx-bg)",
   transition: "opacity 750ms ease",
   pointerEvents: "none",
-};
-
-const backdropStyle = {
-  position: "absolute",
-  inset: 0,
-  backgroundImage:
-    'linear-gradient(90deg, rgba(5, 7, 20, 0.76) 0%, rgba(5, 7, 20, 0.48) 34%, rgba(5, 7, 20, 0.08) 62%, transparent 78%), url("/intro-background.png")',
-  backgroundSize: "cover",
-  backgroundPosition: "center",
-  transition: "opacity 700ms ease",
-};
-
-const loaderCardStyle = {
-  ...introMenuStyle,
-  position: "relative",
-  zIndex: 1,
-  transition: "opacity 400ms ease, transform 500ms ease",
-};
-
-const loaderTitleStyle = {
-  ...introTitleStyle,
-};
-
-const statusLine = {
-  margin: 0,
-  display: "flex",
-  justifyContent: "space-between",
-  width: "100%",
-  boxSizing: "border-box",
-  padding: "0.55rem 0.75rem",
-  background: "rgba(8, 8, 8, 0.8)",
-  borderRadius: "8px",
-  font: "800 13px/1.4 system-ui, sans-serif",
-  letterSpacing: "0.055em",
-  textTransform: "uppercase",
-};
-
-const loaderTrackStyle = {
-  width: "100%",
-  height: "18px",
-  overflow: "hidden",
-  background: "#fff",
-  border: "4px solid #080808",
-  borderRadius: "9px",
-  boxSizing: "border-box",
 };
 
 /**
@@ -154,42 +108,47 @@ export default function GamePage() {
         <div
           aria-live="polite"
           aria-busy={!gumsSettled}
+          className="wx-start"
           style={{
             ...overlayBase,
             opacity: transitionPhase === "revealing" ? 0 : 1,
           }}
         >
-          <div
+          <StartBackdrop
             style={{
-              ...backdropStyle,
               opacity: transitionPhase === "loading" ? 1 : 0,
+              transition: "opacity 700ms ease",
             }}
           />
-          <div
+          <section
+            className="wx-start-menu wx-loader-menu"
             style={{
-              ...loaderCardStyle,
               opacity: transitionPhase === "loading" ? 1 : 0,
-              transform:
-                transitionPhase === "loading"
-                  ? "translateY(0) scale(1)"
-                  : "translateY(10px) scale(0.98)",
+              transform: transitionPhase === "loading" ? "none" : "translateY(10px)",
+              transition: "opacity 400ms ease, transform 500ms var(--wx-ease-out)",
             }}
           >
-            <h1 style={loaderTitleStyle}>
-              <span style={{ display: "block" }}>Get</span>
-              <span style={{ display: "block" }}>Ready</span>
-            </h1>
-            <p style={statusLine}>
-              <span>{status}</span>
-              <span>{progress}%</span>
-            </p>
-            <div style={loaderTrackStyle} aria-hidden="true">
-              <div
-                className="game-loader-progress"
-                style={{ width: `${progress}%` }}
-              />
+            <Label className="wx-rise" marker="var(--wx-action)">Page 01 · Office</Label>
+            <Title size="hero" className="wx-start-title wx-rise">
+              <span>Get</span>
+              <span>
+                ready<span className="wx-start-dot" aria-hidden="true" />
+              </span>
+            </Title>
+            <div className="wx-loader-status wx-rise">
+              <Label as="span">
+                <Marker color={gumsSettled ? "var(--wx-green-bright)" : "var(--wx-amber)"} />
+                {status}
+              </Label>
+              <span className="wx-loader-percent">
+                {progress}
+                <small>%</small>
+              </span>
             </div>
-          </div>
+            <div className="wx-progress" aria-hidden="true">
+              <div className="wx-progress-fill" style={{ width: `${progress}%` }} />
+            </div>
+          </section>
         </div>
       )}
     </>

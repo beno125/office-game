@@ -4,6 +4,7 @@ import { onKitchenSceneEvent } from "./kitchenSceneEvents.js";
 import { SCENE_ROUTES, goToLevelWithTransition, LEVEL_DESCRIPTION_MIN_READ_MS } from "./sceneRoutes.js";
 import { useLevelHotkeys } from "./useLevelHotkeys.js";
 import WorldTransition from "./WorldTransition.jsx";
+import GameMenu from "./ui/GameMenu.jsx";
 import { RACE_LAPS } from "../kitchen/kitchenRace.js";
 
 /** Loader fade-out once the kitchen is drawn (the intro plays under it). */
@@ -42,6 +43,15 @@ export default function KitchenScene({ waitForTransition = false }) {
   const [leaving, setLeaving] = useState(false);
   const [minShown, setMinShown] = useState(false);
   const reveal = sceneReady && transitionDone && minShown;
+  // Game menu: shown once the player has control (not over the loader or the intro).
+  const menuFlagsRef = useRef({ loaderGone: false, leaving: false });
+  menuFlagsRef.current = { loaderGone, leaving };
+  const getMenuState = () => {
+    const s = moduleRef.current?.getKitchenMenuState?.();
+    const f = menuFlagsRef.current;
+    return { visible: !!(s && s.playerHasControl && f.loaderGone && !f.leaving), inPlay: !!(s && s.inPlay) };
+  };
+  const pauseForMenu = (paused) => moduleRef.current?.setKitchenSceneRendering?.(!paused);
   useLevelHotkeys(SCENE_ROUTES.kitchen);
 
   useEffect(() => {
@@ -122,6 +132,7 @@ export default function KitchenScene({ waitForTransition = false }) {
       }}
     >
       <div id="perfBadge" aria-hidden="true" />
+      <GameMenu level={SCENE_ROUTES.kitchen} getState={getMenuState} onPause={pauseForMenu} />
       <div
         aria-hidden="true"
         style={{

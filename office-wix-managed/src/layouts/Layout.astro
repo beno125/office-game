@@ -38,11 +38,11 @@ const { title = "Office" } = Astro.props;
     right: 10px;
     z-index: 9999;
     padding: 6px 10px;
-    border-radius: 6px;
+    border-radius: 10px;
     font: 11px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace;
-    color: #dce8ff;
-    background: rgba(8, 12, 22, 0.72);
-    border: 1px solid rgba(120, 160, 255, 0.25);
+    color: var(--wx-text-2, #dce8ff);
+    background: var(--wx-surface-strong, rgba(8, 12, 22, 0.72));
+    border: 1px solid var(--wx-hairline, rgba(120, 160, 255, 0.25));
     pointer-events: none;
     opacity: 0;
     transition: opacity 0.35s ease;
@@ -53,36 +53,10 @@ const { title = "Office" } = Astro.props;
     opacity: 1;
   }
 
-  .intro-start-button {
-    transition:
-      transform 120ms ease,
-      box-shadow 120ms ease,
-      filter 120ms ease;
-  }
 
-  .intro-start-button:hover {
-    transform: translate(3px, 4px);
-    box-shadow: 3px 3px 0 #080808 !important;
-    filter: brightness(1.06);
-  }
 
-  .intro-start-button:active {
-    transform: translate(5px, 6px);
-    box-shadow: 1px 1px 0 #080808 !important;
-    filter: brightness(0.94);
-  }
 
-  .intro-start-button:focus-visible {
-    outline: 4px solid #fff;
-    outline-offset: 5px;
-  }
 
-  .game-loader-progress {
-    height: 100%;
-    background: linear-gradient(90deg, #f00458, #ff6ca1, #f00458);
-    transition: width 220ms ease;
-    will-change: width;
-  }
 
   .world-transition {
     position: fixed;

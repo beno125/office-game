@@ -3,6 +3,8 @@ import { setMeetingRoomSceneMount } from "../meeting-room/meetingRoomSceneMount.
 import { onMeetingRoomSceneEvent } from "./meetingRoomSceneEvents.js";
 import { SCENE_ROUTES } from "./sceneRoutes.js";
 import { useLevelHotkeys } from "./useLevelHotkeys.js";
+import { Label } from "./ui/ui.jsx";
+import GameMenu from "./ui/GameMenu.jsx";
 import MeetingRoomSignTransition from "./MeetingRoomSignTransition.jsx";
 
 /** Sign loader fade-out once its lights have dimmed. */
@@ -31,6 +33,14 @@ export default function MeetingRoomScene() {
   const [prepProgress, setPrepProgress] = useState(0);
   const [prepared, setPrepared] = useState(false);
   const moduleRef = useRef(null);
+  // Game menu: shown once the player has control (not over the sign or the intro).
+  const signGoneRef = useRef(false);
+  signGoneRef.current = signGone;
+  const getMenuState = () => {
+    const st = moduleRef.current?.getMeetingRoomMenuState?.();
+    return { visible: !!(st && st.playerHasControl && signGoneRef.current), inPlay: !!(st && st.inPlay) };
+  };
+  const pauseForMenu = (paused) => moduleRef.current?.setMeetingRoomSceneRendering?.(!paused);
   const startedRef = useRef(false);
   // The warm-up starts once the sign is fully shown (its loader step) and the
   // module is in, whichever comes last; the room keeps loading meanwhile.
@@ -138,6 +148,7 @@ export default function MeetingRoomScene() {
       }}
     >
       <div id="perfBadge" aria-hidden="true" />
+      <GameMenu level={SCENE_ROUTES.meetingRoom} getState={getMenuState} onPause={pauseForMenu} />
       {!signGone && phase !== "error" && (
         <div
           style={{
@@ -172,19 +183,18 @@ export default function MeetingRoomScene() {
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
-          color: "#fff",
-          background: "#090914",
-          font: "800 15px/1.4 system-ui, sans-serif",
-          letterSpacing: "0.06em",
-          textTransform: "uppercase",
+          color: "var(--wx-text-2)",
+          background: "var(--wx-bg)",
           opacity: phase === "error" ? 1 : 0,
           transition: "opacity 650ms ease",
           pointerEvents: "none",
         }}
       >
-        {phase === "error"
-          ? "Add meeting-room.gltf to public/meeting-room-optimized/"
-          : "Loading meeting room…"}
+        <Label marker={phase === "error" ? "var(--wx-red)" : "var(--wx-amber)"}>
+          {phase === "error"
+            ? "Add meeting-room.gltf to public/meeting-room-optimized/"
+            : "Loading meeting room…"}
+        </Label>
       </div>
     </div>
   );

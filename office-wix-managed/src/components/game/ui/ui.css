@@ -1,0 +1,252 @@
+/*
+ * Game UI components (classes use the tokens in tokens.css):
+ * .wx-btn (primary / secondary / ghost), .wx-panel, .wx-frame (selection
+ * frame), .wx-selectable, .wx-title, .wx-label, .wx-marker, .wx-icon,
+ * .wx-divider, .wx-canvas (grid background) and .wx-snap (snap-to-grid entrance).
+ * CSS only: no filters or animations run once an element has entered.
+ */
+@import "./tokens.css";
+
+/* ---------- Selection frame (Wix editor style) ---------- */
+
+.wx-frame {
+  position: absolute;
+  inset: calc(-1 * var(--wx-select-gap));
+  border: var(--wx-select-width) solid var(--wx-select);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity var(--wx-dur-fast) var(--wx-ease-out);
+}
+/* Pill elements keep a square frame, like the editor's bounding box. */
+.wx-frame > i {
+  position: absolute;
+  width: var(--wx-handle);
+  height: var(--wx-handle);
+  background: var(--wx-handle-fill);
+  border: 1px solid var(--wx-select);
+  box-sizing: border-box;
+}
+.wx-frame > i:nth-child(1) { left: calc(var(--wx-handle) / -2); top: calc(var(--wx-handle) / -2); }
+.wx-frame > i:nth-child(2) { right: calc(var(--wx-handle) / -2); top: calc(var(--wx-handle) / -2); }
+.wx-frame > i:nth-child(3) { left: calc(var(--wx-handle) / -2); bottom: calc(var(--wx-handle) / -2); }
+.wx-frame > i:nth-child(4) { right: calc(var(--wx-handle) / -2); bottom: calc(var(--wx-handle) / -2); }
+/* Element name chip above the frame (like the editor's selected-element tag). */
+.wx-frame-tag {
+  position: absolute;
+  left: -1px;
+  bottom: calc(100% + 5px);
+  padding: 3px 6px;
+  border-radius: var(--wx-radius-xs);
+  background: var(--wx-select);
+  color: #fff;
+  font: 600 10px/1 var(--wx-font-text);
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+.wx-frame.is-on { opacity: 1; }
+
+/* Anything selectable: the frame shows on hover and on keyboard focus. */
+.wx-selectable {
+  position: relative;
+  display: inline-flex;
+}
+.wx-selectable:hover > .wx-frame,
+.wx-selectable:focus-within:has(:focus-visible) > .wx-frame {
+  opacity: 1;
+}
+
+/* ---------- Buttons ---------- */
+
+.wx-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--wx-space-2);
+  min-height: 48px;
+  padding: 0 var(--wx-space-6);
+  border: 1px solid transparent;
+  border-radius: var(--wx-radius-pill);
+  font: var(--wx-type-button);
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  transition:
+    background-color var(--wx-dur-fast) var(--wx-ease-out),
+    border-color var(--wx-dur-fast) var(--wx-ease-out),
+    box-shadow var(--wx-dur-fast) var(--wx-ease-out),
+    color var(--wx-dur-fast) var(--wx-ease-out),
+    transform var(--wx-dur-fast) var(--wx-ease-out);
+}
+.wx-btn:active { transform: scale(var(--wx-press-scale)); }
+/*
+ * Buttons without a selection frame (popups): a slight lift on hover and a
+ * glowing focus ring (bright blue ring with a dark gap, plus the accent glow),
+ * clearly visible when using the keyboard.
+ */
+.wx-btn:not(.wx-selectable > .wx-btn):hover { transform: translateY(-1px); }
+.wx-btn:not(.wx-selectable > .wx-btn):active { transform: translateY(0) scale(var(--wx-press-scale)); }
+.wx-btn:focus-visible { outline: none; box-shadow: var(--wx-focus-ring); }
+.wx-btn-primary:focus-visible { background: var(--wx-action-hover); box-shadow: var(--wx-focus-ring), var(--wx-glow-action-hover); }
+.wx-btn-secondary:focus-visible { background: var(--wx-surface-hover); border-color: rgba(255, 255, 255, 0.5); }
+/* Inside a selectable (start screen) the frame is the focus state. */
+.wx-selectable > .wx-btn:focus-visible { box-shadow: none; }
+.wx-selectable > .wx-btn-primary:focus-visible { box-shadow: var(--wx-glow-action-hover); }
+.wx-btn:disabled { opacity: 0.4; cursor: default; transform: none; }
+.wx-btn-lg { min-height: 56px; padding: 0 var(--wx-space-7); font-size: 1.08rem; }
+.wx-btn-sm { min-height: 36px; padding: 0 var(--wx-space-5); font-size: 0.88rem; }
+
+.wx-btn-primary {
+  color: var(--wx-text-on-action);
+  background: var(--wx-action);
+  box-shadow: var(--wx-glow-action);
+}
+.wx-btn-primary:hover { background: var(--wx-action-hover); box-shadow: var(--wx-glow-action-hover); }
+.wx-btn-primary:active { background: var(--wx-action-press); }
+
+.wx-btn-secondary {
+  color: var(--wx-text);
+  background: transparent;
+  border-color: var(--wx-hairline-strong);
+}
+.wx-btn-secondary:hover { background: var(--wx-surface-hover); border-color: rgba(255, 255, 255, 0.4); }
+
+.wx-btn-ghost {
+  color: var(--wx-text-2);
+  background: transparent;
+  padding: 0 var(--wx-space-4);
+}
+.wx-btn-ghost:hover { color: var(--wx-text); background: var(--wx-surface-hover); }
+
+/* ---------- Panel ---------- */
+
+.wx-panel {
+  position: relative;
+  padding: var(--wx-space-6);
+  color: var(--wx-text);
+  background: var(--wx-surface);
+  border: 1px solid var(--wx-hairline);
+  border-radius: var(--wx-radius-panel);
+  box-shadow: var(--wx-panel-shadow), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  backdrop-filter: blur(var(--wx-blur)) saturate(140%);
+  -webkit-backdrop-filter: blur(var(--wx-blur)) saturate(140%);
+}
+
+/* ---------- Type ---------- */
+
+.wx-title {
+  margin: 0;
+  color: var(--wx-text);
+  letter-spacing: var(--wx-title-tracking);
+  font: var(--wx-type-h1);
+}
+.wx-title-hero { font: var(--wx-type-hero); }
+.wx-title-h2 { font: var(--wx-type-h2); letter-spacing: -0.02em; }
+.wx-title-number { font: var(--wx-type-number); font-variant-numeric: tabular-nums; letter-spacing: -0.05em; }
+
+.wx-text { margin: 0; font: var(--wx-type-body); color: var(--wx-text-2); }
+
+.wx-label {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--wx-space-2);
+  margin: 0;
+  color: var(--wx-text-3);
+  font: var(--wx-type-label);
+  letter-spacing: var(--wx-label-tracking);
+  text-transform: uppercase;
+}
+
+/* Neon marker: a small glowing dot in a brand accent (set --wx-marker). */
+.wx-marker {
+  --wx-marker: var(--wx-action);
+  display: inline-block;
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--wx-marker);
+  box-shadow: 0 0 10px var(--wx-marker), 0 0 2px var(--wx-marker);
+}
+
+/* Thin outline icon (matches the controls guide's white outline keys). */
+.wx-icon {
+  width: 1.15em;
+  height: 1.15em;
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.wx-divider {
+  width: 100%;
+  height: 1px;
+  margin: 0;
+  border: 0;
+  background: var(--wx-hairline);
+}
+
+/* ---------- Canvas (editor grid background) ---------- */
+
+.wx-canvas {
+  background-color: var(--wx-bg);
+  background-image:
+    linear-gradient(var(--wx-grid-major) 1px, transparent 1px),
+    linear-gradient(90deg, var(--wx-grid-major) 1px, transparent 1px),
+    linear-gradient(var(--wx-grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--wx-grid-line) 1px, transparent 1px);
+  background-size:
+    calc(var(--wx-grid) * 4) calc(var(--wx-grid) * 4),
+    calc(var(--wx-grid) * 4) calc(var(--wx-grid) * 4),
+    var(--wx-grid) var(--wx-grid),
+    var(--wx-grid) var(--wx-grid);
+}
+
+/* ---------- Snap-to-grid entrance ----------
+ * The element appears a little off its cell with a selection frame (as if just
+ * dropped on the canvas), then snaps into place and the frame fades.
+ * Set --wx-delay for sequences.
+ */
+.wx-snap {
+  position: relative;
+  animation: wx-snap-in var(--wx-dur-slow) var(--wx-delay, 0ms) both;
+}
+.wx-snap > .wx-frame {
+  animation: wx-snap-frame calc(var(--wx-dur-slow) + 380ms) var(--wx-delay, 0ms) both;
+}
+@keyframes wx-snap-in {
+  0% {
+    opacity: 0;
+    transform: translate(var(--wx-snap-offset), calc(var(--wx-snap-offset) * -0.6));
+    animation-timing-function: var(--wx-ease-out);
+  }
+  45% {
+    opacity: 1;
+    transform: translate(var(--wx-snap-offset), calc(var(--wx-snap-offset) * -0.6));
+    animation-timing-function: var(--wx-ease-snap);
+  }
+  100% { opacity: 1; transform: none; }
+}
+@keyframes wx-snap-frame {
+  0%, 70% { opacity: 1; }
+  100% { opacity: 0; }
+}
+/* Plain fade-up for secondary items. */
+.wx-rise { animation: wx-rise var(--wx-dur) var(--wx-delay, 0ms) var(--wx-ease-out) both; }
+@keyframes wx-rise {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wx-snap,
+  .wx-snap > .wx-frame,
+  .wx-rise { animation: none; }
+  .wx-snap > .wx-frame { opacity: 0; }
+  .wx-btn,
+  .wx-frame { transition: none; }
+}

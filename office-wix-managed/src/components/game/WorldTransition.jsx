@@ -1,12 +1,14 @@
 import { useEffect, useRef } from "react";
+import { Label, Panel, Snap } from "./ui/ui.jsx";
+import "./ui/loaders.css";
 
 const TRANSITION_DURATION = 8600;
 const TRANSITION_STRIP_COLORS = [
-  "#165dff",
-  "#2090ff",
-  "#715cff",
-  "#ff319d",
-  "#d52cff",
+  "#0c6efc", // Wix Blue
+  "#2a82ff", // lighter blue
+  "#674fe6", // purple
+  "#ff7055", // peach
+  "#faad4d", // amber
 ];
 const TRANSITION_STRIPS = Array.from({ length: 120 }, (_, index) => {
   const seed = (index * 47) % 131;
@@ -21,28 +23,10 @@ const TRANSITION_STRIPS = Array.from({ length: 120 }, (_, index) => {
   };
 });
 
-/** Level description under the car: the game's loader status style (dark pill, white caps). */
-const descriptionStyle = {
-  position: "absolute",
-  left: "50%",
-  bottom: "clamp(28px, 10vh, 88px)",
-  transform: "translateX(-50%)",
-  zIndex: 2,
-  width: "max-content",
-  maxWidth: "min(34rem, calc(100% - 32px))",
-  boxSizing: "border-box",
-  margin: 0,
-  padding: "0.6rem 0.9rem",
-  color: "#fff",
-  background: "rgba(8, 8, 8, 0.8)",
-  borderRadius: "8px",
-  font: "800 13px/1.45 system-ui, sans-serif",
-  letterSpacing: "0.055em",
-  textTransform: "uppercase",
-  textAlign: "center",
-  pointerEvents: "none",
-  animation: "world-transition-caption-in 600ms ease 200ms both",
-};
+/** Caption eyebrow (the kitchen is the game's second level / "page"). */
+const CAPTION_EYEBROW = "Page 02 · Kitchen";
+/** Caption entrance delay (ms). */
+const CAPTION_DELAY_MS = 200;
 
 export default function WorldTransition({ onComplete, description }) {
   const stageRef = useRef(null);
@@ -477,10 +461,14 @@ export default function WorldTransition({ onComplete, description }) {
       </div>
       <div ref={stageRef} className="world-transition-car" />
       {description && (
-        <>
-          <style>{`@keyframes world-transition-caption-in { from { opacity: 0; transform: translate(-50%, 8px); } to { opacity: 1; transform: translate(-50%, 0); } }`}</style>
-          <p style={descriptionStyle}>{description}</p>
-        </>
+        <div className="wx-level-caption">
+          <Snap delay={CAPTION_DELAY_MS} frame={false}>
+            <Panel>
+              <Label marker="var(--wx-amber)">{CAPTION_EYEBROW}</Label>
+              <p className="wx-text">{description}</p>
+            </Panel>
+          </Snap>
+        </div>
       )}
     </section>
   );

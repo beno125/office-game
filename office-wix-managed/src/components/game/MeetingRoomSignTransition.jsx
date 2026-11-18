@@ -318,6 +318,9 @@ function loadSignFont() {
 /** Layout in face units (0..1 from the top-left), like the reference's hierarchy. */
 /** The sign's big title, one entry per line. */
 const SIGN_TITLE_LINES = ["Meeting", "Room", "Madness"];
+/** Editor-style copy on the sign (game UI language): small line above the title, and "Page 3 of 3" at the foot (were "Next stop" / "Level"). */
+const SIGN_KICKER = "Next page";
+const SIGN_FOOT_LABEL = "Page";
 /** The title's widest line stays within this width (face units); wider → scaled down. */
 const SIGN_TITLE_MAX_WIDTH = 0.72;
 /** What the level is about: a subtitle under the title (wrapped, not shrunk). */
@@ -469,11 +472,11 @@ function drawPercent(ctx, w, h, text) {
 function signContent() {
   const index = LEVEL_ORDER.indexOf(SCENE_ROUTES.meetingRoom);
   return {
-    kicker: "Next stop",
+    kicker: SIGN_KICKER,
     description: SIGN_DESCRIPTION,
     title: SIGN_TITLE_LINES,
     foot: [
-      ["Level", String(index + 1)],
+      [SIGN_FOOT_LABEL, String(index + 1)],
       ["of", String(LEVEL_ORDER.length)],
     ],
   };

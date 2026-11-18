@@ -1,0 +1,94 @@
+/*
+ * Game UI design tokens: "Editor Mode" on "Studio Night", with "Neon Marker"
+ * accents. One source for every menu, HUD, popup and loader in the game.
+ * Colours come from Wix's brand palette, used as bright markers and glows on
+ * near-black surfaces (never as large saturated backgrounds).
+ */
+:root {
+  /* Surfaces: near-black base, frosted panels on top of it. */
+  --wx-bg: #07080c; /* page base */
+  --wx-bg-raised: #0d0f15; /* solid raised surface (no blur) */
+  --wx-surface: rgba(16, 18, 26, 0.62); /* frosted panel fill */
+  --wx-surface-strong: rgba(16, 18, 26, 0.82); /* frosted panel over busy scenes */
+  --wx-surface-hover: rgba(255, 255, 255, 0.06); /* hover wash on dark */
+  --wx-blur: 18px; /* frosted panel backdrop blur */
+  --wx-hairline: rgba(255, 255, 255, 0.1); /* thin dividers and panel borders */
+  --wx-hairline-strong: rgba(255, 255, 255, 0.22); /* secondary button outline */
+
+  /* Text. */
+  --wx-text: #f5f6f8; /* primary */
+  --wx-text-2: rgba(245, 246, 248, 0.7); /* secondary */
+  --wx-text-3: rgba(245, 246, 248, 0.44); /* muted (labels, hints) */
+  --wx-text-on-action: #ffffff;
+
+  /* Action and accents (Wix brand palette). */
+  --wx-action: #0c6efc; /* Wix Blue: primary actions */
+  --wx-action-hover: #2a82ff;
+  --wx-action-press: #0a5ad0;
+  --wx-amber: #faad4d;
+  --wx-green: #008463;
+  --wx-green-bright: #1fc796; /* green lifted for text/glow on near-black */
+  --wx-red: #df3131;
+  --wx-purple: #674fe6;
+  --wx-deep-purple: #7f2275;
+  --wx-peach: #ff7055;
+
+  /* Editor selection frame (Wix-style: thin blue outline, square handles). */
+  --wx-select: #116dff;
+  --wx-select-width: 1px; /* outline width */
+  --wx-select-gap: 6px; /* space between element and frame */
+  --wx-handle: 7px; /* corner handle size */
+  --wx-handle-fill: #ffffff;
+  /* Focus ring for buttons without a selection frame: dark gap, bright blue ring, soft glow. */
+  --wx-focus-ring: 0 0 0 2px var(--wx-bg), 0 0 0 4px #4d97ff, 0 0 22px rgba(12, 110, 252, 0.55);
+
+  /* Canvas grid (background and snap entrances). */
+  --wx-grid: 24px; /* cell size */
+  --wx-grid-line: rgba(255, 255, 255, 0.035);
+  --wx-grid-major: rgba(255, 255, 255, 0.06); /* every 4th line */
+
+  /* Glows (neon markers). Strength = shadow alpha. */
+  --wx-glow-soft: 0 0 18px; /* geometry: blur radius of a soft glow */
+  --wx-glow-action: 0 0 0 1px rgba(12, 110, 252, 0.6), 0 8px 28px rgba(12, 110, 252, 0.45);
+  --wx-glow-action-hover: 0 0 0 1px rgba(42, 130, 255, 0.8), 0 10px 36px rgba(12, 110, 252, 0.6);
+  --wx-panel-shadow: 0 24px 80px rgba(0, 0, 0, 0.55);
+
+  /* Radius. */
+  --wx-radius-pill: 999px; /* buttons */
+  --wx-radius-panel: 20px; /* panels, popups */
+  --wx-radius-sm: 10px; /* small chips, inputs */
+  --wx-radius-xs: 3px; /* editor tags */
+
+  /* Spacing scale (4px base). */
+  --wx-space-1: 4px;
+  --wx-space-2: 8px;
+  --wx-space-3: 12px;
+  --wx-space-4: 16px;
+  --wx-space-5: 24px;
+  --wx-space-6: 32px;
+  --wx-space-7: 48px;
+  --wx-space-8: 64px;
+
+  /* Typography: Madefor Display for headlines and big numbers, Madefor Text for UI. */
+  --wx-font-display: "Wix Madefor Display", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --wx-font-text: "Wix Madefor Text", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --wx-type-hero: 800 clamp(3.4rem, 8.2vw, 7rem) / 0.92 var(--wx-font-display); /* start title */
+  --wx-type-h1: 800 clamp(2.4rem, 5vw, 4rem) / 1 var(--wx-font-display); /* popup titles */
+  --wx-type-h2: 700 clamp(1.4rem, 2.4vw, 1.9rem) / 1.15 var(--wx-font-display);
+  --wx-type-number: 800 clamp(6rem, 22vw, 16rem) / 0.9 var(--wx-font-display); /* countdown, big stats */
+  --wx-type-body: 400 clamp(0.95rem, 1.2vw, 1.05rem) / 1.55 var(--wx-font-text);
+  --wx-type-button: 600 1rem / 1 var(--wx-font-text);
+  --wx-type-label: 600 0.72rem / 1.2 var(--wx-font-text); /* eyebrows, tags (uppercase) */
+  --wx-label-tracking: 0.14em;
+  --wx-title-tracking: -0.035em;
+
+  /* Motion: quick entrances with a soft ease-out, subtle feedback. */
+  --wx-ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --wx-ease-snap: cubic-bezier(0.3, 1.5, 0.5, 1); /* tiny settle when snapping to the grid */
+  --wx-dur-fast: 140ms; /* hover / press */
+  --wx-dur: 260ms; /* standard entrance */
+  --wx-dur-slow: 420ms; /* large elements */
+  --wx-snap-offset: 14px; /* how far an element starts from its grid cell */
+  --wx-stagger: 90ms; /* delay between items entering in sequence */
+  --wx-press-scale: 0.97;
+}
