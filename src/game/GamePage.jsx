@@ -5,7 +5,7 @@ import IntroPage, {
   introTitleStyle,
 } from "./IntroPage.jsx";
 import { onOfficeSceneEvent } from "./officeSceneEvents.js";
-import OfficeScene from "../OfficeScene.jsx";
+import OfficeSceneCopy from "../OfficeSceneCopy.jsx";
 import KitchenScene from "./KitchenScene.jsx";
 
 const overlayBase = {
@@ -62,6 +62,14 @@ const loaderTrackStyle = {
   boxSizing: "border-box",
 };
 
+/**
+ * Loader → office: the backdrop darkens, then the overlay fades out (ms). The
+ * office's intro starts when the scene is ready, so this is kept short (was
+ * 700 + 750) to show the intro's first shot.
+ */
+const LOADER_DARKEN_MS = 250;
+const LOADER_REVEAL_MS = 750;
+
 function pathIsPlay() {
   if (typeof window === "undefined") return false;
   return window.location.pathname.replace(/\/$/, "") === "/play";
@@ -78,7 +86,8 @@ export default function GamePage() {
 
   useEffect(() => {
     if (!started) return;
-    return onOfficeSceneEvent("gums-tank-initial-settled", () => {
+    // The office is ready (car placed, gums settled, warmed up): its intro starts now.
+    return onOfficeSceneEvent("office-scene-ready", () => {
       setGumsSettled(true);
     });
   }, [started]);
@@ -88,11 +97,11 @@ export default function GamePage() {
     setTransitionPhase("darkening");
     const revealTimer = window.setTimeout(
       () => setTransitionPhase("revealing"),
-      700,
+      LOADER_DARKEN_MS,
     );
     const doneTimer = window.setTimeout(
       () => setTransitionPhase("done"),
-      1450,
+      LOADER_DARKEN_MS + LOADER_REVEAL_MS,
     );
     return () => {
       window.clearTimeout(revealTimer);
@@ -132,7 +141,7 @@ export default function GamePage() {
   return (
     <>
       {activeScene === "office" ? (
-        <OfficeScene
+        <OfficeSceneCopy
           hideModuleLoadingOverlay
           onModuleReady={() => setBundleReady(true)}
           onTransitionToKitchen={() => setActiveScene("kitchen")}
