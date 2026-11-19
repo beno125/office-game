@@ -2,8 +2,15 @@
 
 /* Key art behind the menu: dimmed and softly blurred, kept to the right. */
 :root {
-  --wx-start-photo-opacity: 0.55;
+  --wx-start-photo-opacity: 0.68; /* was 0.55 */
   --wx-start-photo-blur: 3px;
+  --wx-start-photo-brightness: 1.08; /* whole image, a little (menu stays readable) */
+  --wx-start-photo-saturate: 0.95; /* was 0.85: natural colours */
+  /* Soft light on the car: a radial boost (soft-light blend, so colours stay natural). */
+  --wx-start-car-x: 68%;
+  --wx-start-car-y: 56%;
+  --wx-start-car-boost: 0.6; /* strength of the boost at its centre (0..1) */
+  --wx-start-car-size: 42% 50%; /* ellipse radii; fades out smoothly to transparent */
   --wx-start-ruler: 18px; /* editor ruler thickness */
 }
 
@@ -26,10 +33,26 @@
   inset: -12px; /* hides the blur's soft edge */
   background: url("/intro-background.png") 70% center / cover no-repeat;
   opacity: var(--wx-start-photo-opacity);
-  filter: blur(var(--wx-start-photo-blur)) saturate(0.85);
+  filter: blur(var(--wx-start-photo-blur)) brightness(var(--wx-start-photo-brightness)) saturate(var(--wx-start-photo-saturate));
   /* Fades into the near-black base on the menu side. */
   -webkit-mask-image: linear-gradient(90deg, transparent 18%, rgba(0, 0, 0, 0.55) 48%, #000 80%);
   mask-image: linear-gradient(90deg, transparent 18%, rgba(0, 0, 0, 0.55) 48%, #000 80%);
+}
+
+/* The car brighter than the rest: blends only with the photo (the filter isolates it). */
+.wx-start-photo::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  opacity: var(--wx-start-car-boost);
+  mix-blend-mode: soft-light;
+  background: radial-gradient(
+    ellipse var(--wx-start-car-size) at var(--wx-start-car-x) var(--wx-start-car-y),
+    #fff 0%,
+    rgba(255, 255, 255, 0.7) 30%,
+    rgba(255, 255, 255, 0.25) 60%,
+    transparent 100%
+  );
 }
 
 /* Canvas grid, strongest behind the menu and fading out to the right. */
@@ -154,6 +177,7 @@
     padding: var(--wx-space-6) var(--wx-space-5);
     padding-left: calc(var(--wx-start-ruler) + var(--wx-space-5));
   }
+  :root { --wx-start-car-x: 62%; --wx-start-car-y: 34%; --wx-start-car-size: 60% 30%; }
   .wx-start-photo {
     background-position: 65% 30%;
     -webkit-mask-image: linear-gradient(0deg, transparent 30%, #000 75%);

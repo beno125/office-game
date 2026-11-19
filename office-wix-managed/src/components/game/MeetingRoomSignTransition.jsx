@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { LEVEL_ORDER, SCENE_ROUTES, LEVEL_DESCRIPTION_MIN_READ_MS } from "./sceneRoutes.js";
+import { createCameraDrag } from "./cameraDrag.js";
 
 /**
  * Loader before the meeting room: an illuminated lightbox sign hanging in a
@@ -74,6 +75,12 @@ const SIGN_HOLD_MS = 2800; // full sign, bar at 100%, before the exit
 /** Fully readable (end of the fade-in → exit) at least this long, however fast the room loads. */
 const SIGN_MIN_READABLE_MS = LEVEL_DESCRIPTION_MIN_READ_MS;
 const SIGN_DIM_MS = 700; // exit: lights dim, then onFinished() (the page fades out)
+/**
+ * The mouse camera drag (cameraDrag.js, "signTransition") is off from this long
+ * before the hold ends, and through the exit: it springs back to the fixed
+ * straight-on view before the scene ends.
+ */
+const SIGN_CAMERA_DRAG_END_MS = 600; // + the 700 ms exit: the spring (exactly zero in ~1 s) is done before onFinished()
 const SIGN_COLOR_WAIT_MS = 900; // longest wait for the table colour before the lights come on
 
 /** Camera: the sign fills this much of the smaller screen dimension, then pushes in. */
@@ -537,6 +544,8 @@ export default function MeetingRoomSignTransition({ ready, roomLoaded, prepProgr
       renderer.domElement.style.display = "block";
       // Visible from the first frame: the sign is there, just unlit.
       stage.appendChild(renderer.domElement);
+      // Drag to orbit round the sign (set up once its centre is known, below).
+      let cameraDrag = null;
       const scene = new THREE.Scene();
       scene.background = new THREE.Color(SIGN_BACKGROUND);
       const camera = new THREE.PerspectiveCamera(30, 1, 0.05, 50);
@@ -550,6 +559,10 @@ export default function MeetingRoomSignTransition({ ready, roomLoaded, prepProgr
 
       cleanup = () => {
         cancelAnimationFrame(raf);
+        if (cameraDrag) {
+          cameraDrag.reset();
+          cameraDrag.dispose();
+        }
         window.removeEventListener("resize", resize);
         if (gltfScene) {
           gltfScene.traverse((o) => {
@@ -599,6 +612,18 @@ export default function MeetingRoomSignTransition({ ready, roomLoaded, prepProgr
       const cupBox = cup ? new THREE.Box3().setFromObject(cup) : signBox.clone();
       const cupSize = cupBox.getSize(new THREE.Vector3());
       const center = signBox.getCenter(new THREE.Vector3());
+      cameraDrag = createCameraDrag({
+        THREE,
+        element: renderer.domElement,
+        scene: "signTransition",
+        isEnabled: () => {
+          try {
+            return step === "TURN_ON" || step === "LOADING" || (step === "HOLD" && performance.now() - stepAt < SIGN_HOLD_MS - SIGN_CAMERA_DRAG_END_MS);
+          } catch (e) {
+            return false; // pressed before the sequence's state exists (still setting up)
+          }
+        },
+      });
       const signSize = signBox.getSize(new THREE.Vector3());
       // The model's face normal is +X (cup thinnest along X, in front of the base).
       const normal = new THREE.Vector3(1, 0, 0);
@@ -1064,7 +1089,10 @@ export default function MeetingRoomSignTransition({ ready, roomLoaded, prepProgr
         inkMat.color.set(SIGN_INK).multiplyScalar(Math.min(1, power * lit));
         pctMat.color.setScalar(Math.min(1, power * lit));
 
+        cameraDrag.update(dt);
+        cameraDrag.apply(camera, center);
         composer.render();
+        cameraDrag.restore(camera);
       };
       frame();
     }).catch((error) => {

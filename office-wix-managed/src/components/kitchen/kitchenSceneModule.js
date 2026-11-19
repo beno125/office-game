@@ -33,6 +33,8 @@ import { createCinematicIntro, introEase, introEaseSine, introLerp } from "../ga
 import { createCarLighting } from "../game/carLighting.js";
 import { addThresholdBloom, keepBelowBloomThreshold } from "../game/thresholdBloom.js";
 import { createTouchDrive } from "../game/touch/touchDrive.js";
+import { createKitchenFood, trayFromMesh, addTrayShapes, KITCHEN_FOOD } from "./kitchenFood.js";
+import { createCameraDrag } from "../game/cameraDrag.js";
 import {
   CAR_MASS,
   CAR_BUMP_SLIDE_DECAY,
@@ -1506,6 +1508,27 @@ export function isKitchenSceneReady() {
       let controls = createOrbitControls(camera);
       controls.target.set(0, 0, 0);
 
+      // Drag the camera with the mouse (shared, cameraDrag.js): an offset round the car,
+      // springing back on release; only while racing, on the gameplay cameras.
+      let _kitchenDragRoot = null;
+      const _kitchenDragTarget = new THREE.Vector3();
+      const kitchenCameraDrag = createCameraDrag({
+        THREE,
+        element: renderer.domElement,
+        scene: "kitchen",
+        isEnabled: () =>
+          _kitchenSceneRendering &&
+          _kIntro.state === "done" &&
+          _racePhase === "racing" &&
+          (camera === carCamera || camera === carCameraFollow) &&
+          !(_jumpFx.active || _jumpFx.w > 0),
+        collisionObjects: () => (_kitchenDragRoot ? [_kitchenDragRoot] : []),
+        ignore: (obj) => {
+          for (let x = obj; x; x = x.parent) if (x === car) return true;
+          return false;
+        },
+      });
+
       // Lights: lightBlend (0→1) drives dark/bright mode (Key O / Key P).
       const ambient = new THREE.AmbientLight(0x445566, 0.65);
       scene.add(ambient);
@@ -1619,6 +1642,22 @@ export function isKitchenSceneReady() {
       // Meshes whose emissiveIntensity is lerped between strong (dark) and gentle (bright).
       // Each entry: { mesh, darkIntensity, brightIntensity }.
       const _peselLightMeshes = [];
+      /**
+       * soab1 / soab2 (new in ul-kitchen25): matte pastel plastic, no shine or
+       * reflections. In dark mode the kitchen's lights are very dim and blue,
+       * so they light themselves a little in their own colour (emissive, far
+       * below the bloom threshold) to stay pastel instead of turning grey (and a
+       * little in bright mode, whose warm dimmed lights made them look dusty).
+       */
+      const KITCHEN_SOAP_PASTEL = {
+        soab1: 0xa9d4f2, // pastel light blue
+        soab2: 0xf5bfd2, // pastel pink
+        roughness: 0.9,
+        metalness: 0,
+        envMapIntensity: 0.12,
+        selfLight: { dark: 0.32, bright: 0.22 },
+      };
+      const _kitchenPastelMats = [];
       const _shelfDownLights = [];
       const _mainLightDownPoints = [];
       const brightMode = {
@@ -1770,6 +1809,11 @@ export function isKitchenSceneReady() {
               entry.darkPenumbra +
               (entry.brightPenumbra - entry.darkPenumbra) * b;
           }
+        }
+        for (const m of _kitchenPastelMats) {
+          m.emissiveIntensity =
+            KITCHEN_SOAP_PASTEL.selfLight.dark +
+            (KITCHEN_SOAP_PASTEL.selfLight.bright - KITCHEN_SOAP_PASTEL.selfLight.dark) * b;
         }
         if (_kitchenWorldActive && _kitchenFloorMat) {
           _kitchenFloorMat.color.lerpColors(
@@ -2416,6 +2460,9 @@ let _worldSwitched = false;
       const PHYS_GROUP_PROP_BUMPER = 1024;
       const PHYS_GROUP_PROP = 2048;
       const PHYS_GROUP_CUP = 8192;
+      /** Food scattered from the plates (kitchenFood.js): table / floor / plates and each other. */
+      const PHYS_GROUP_FOOD = 16384;
+      let _kitchenFood = null;
 
       physicsWorld = new CANNON.World({
         gravity: new CANNON.Vec3(0, -480, 0),
@@ -2435,15 +2482,19 @@ let _worldSwitched = false;
       const cupPhysMaterial = new CANNON.Material("cup");
       const KITCHEN_PROP_FRICTION = 0.4; // props on the table / floor (was 0.25)
       const KITCHEN_CUP_FRICTION = 0.25;
+      // Props (and cups) on the table / floor: bounce and contact stiffness (named so the food can share them).
+      const KITCHEN_CUP_RESTITUTION = 0.05;
+      const KITCHEN_CUP_CONTACT_STIFFNESS = 1e8;
+      const KITCHEN_CUP_CONTACT_RELAXATION = 2;
       // Props on the table / floor: they slide when pushed rather than dig in.
       for (const surface of [tablePlatePhysicsMaterial, floorPhysMaterial]) {
         for (const [mat, friction] of [[propPhysMaterial, KITCHEN_PROP_FRICTION], [cupPhysMaterial, KITCHEN_CUP_FRICTION]]) {
           physicsWorld.addContactMaterial(
             new CANNON.ContactMaterial(mat, surface, {
               friction,
-              restitution: 0.05,
-              contactEquationStiffness: 1e8,
-              contactEquationRelaxation: 2,
+              restitution: KITCHEN_CUP_RESTITUTION,
+              contactEquationStiffness: KITCHEN_CUP_CONTACT_STIFFNESS,
+              contactEquationRelaxation: KITCHEN_CUP_CONTACT_RELAXATION,
             }),
           );
         }
@@ -2514,13 +2565,18 @@ let _worldSwitched = false;
       // bounds become a dynamic body the car can push; every visual in the
       // group follows it every frame.
       const KITCHEN_PROP_PAIRS = [
-        ["fruitPlate1", "fruitPlate1Physic", "cylinder"],
-        ["fruitPlate2", "fruitPlate2Physic", "cylinder"],
-        ["fruitPlate3", "fruitPlate3Physic", "cylinder"],
+        // The fruit plates: their ...Physic meshes are open trays (floor, walls,
+        // rim), used as compound colliders so the food sits inside them.
+        ["fruitPlate1", "fruitPlate1Physic", "tray"],
+        ["fruitPlate2", "fruitPlate2Physic", "tray"],
+        ["fruitPlate3", "fruitPlate3Physic", "tray"],
         [["greyBox", "greyBoxCup"], "greyBoxPhysic", "box"],
         ["binSign1", "binSign1Physic", "box"],
         ["binSign2", "binSign2Physic", "box"],
         ["binSign3", "binSign3Physic", "box"],
+        // salBase group (new in ul-kitchen25): the stand and its top bar move as
+        // one, on the stand's base collider (same setup as the bin signs).
+        [["salBase1", "salHange1"], "salBase1Physic", "box", { salBase: true }],
         // The cup is not listed here: buildCupPyramid() stacks it with its
         // copies into a pyramid and adds them to _cupPyramidPairs.
       ];
@@ -2529,9 +2585,25 @@ let _worldSwitched = false;
       const KITCHEN_PLATE_REF_RADIUS = 1.55;
       const KITCHEN_GREY_BOX_MASS = 10;
       const KITCHEN_BIN_SIGN_MASS = 8;
+      /**
+       * The salBase group (salBase1 + salHange1 on salBase1Physic): a bit
+       * heavier than a bin sign (larger base); damping as the other props.
+       * Friction and bounce come from the props' shared material
+       * (KITCHEN_PROP_FRICTION 0.4, restitution 0.05 on the table / floor).
+       */
+      const KITCHEN_SAL_BASE = {
+        mass: 10,
+        linearDamping: 0.8,
+        angularDamping: 0.85,
+        /** Its model stands 0.175 above the table: seated on it at load (within this gap), so it doesn't drop at the start or on "Race again". */
+        seatGap: 0.3,
+      };
       const KITCHEN_CUP_MASS = 2; // pyramid cups: original physics, unchanged
       const KITCHEN_CUP_LINEAR_DAMPING = 0.35;
       const KITCHEN_CUP_ANGULAR_DAMPING = 0.5;
+      /** Props' and cups' sleep (the food shares it). */
+      const KITCHEN_PROP_SLEEP_SPEED = 0.6;
+      const KITCHEN_PROP_SLEEP_TIME = 0.5;
       /** Cup speed after a shove, relative to the car's speed toward it (original). */
       const KITCHEN_CUP_PUSH_RESTITUTION = 1.1;
       // Car ↔ prop response (momentum based):
@@ -2545,6 +2617,7 @@ let _worldSwitched = false;
         if (isCup) return KITCHEN_CUP_MASS;
         if (/^greyBox/.test(physName)) return KITCHEN_GREY_BOX_MASS;
         if (/^binSign/.test(physName)) return KITCHEN_BIN_SIGN_MASS;
+        if (/^salBase/.test(physName)) return KITCHEN_SAL_BASE.mass;
         if (/^fruitPlate/.test(physName)) return KITCHEN_PLATE_MASS * Math.max(1, radius / KITCHEN_PLATE_REF_RADIUS);
         return KITCHEN_PLATE_MASS;
       }
@@ -2561,6 +2634,13 @@ let _worldSwitched = false;
       const KITCHEN_PROP_VISUAL_LIFT = 0.012;
       /** Overlap with the table top allowed before a prop is lifted back out. */
       const KITCHEN_PROP_TABLE_TOLERANCE = 0.01;
+      /**
+       * The same for the fruit plates once their food is loose in them (was
+       * 0.01 like the other props): a plate carrying a pile rests deeper in the
+       * table, and lifting it every frame bounced the plate and threw the food
+       * through its floor.
+       */
+      const KITCHEN_PLATE_TABLE_TOLERANCE = 0.06;
       /** Inradius / radius of the props' 12-segment cylinder colliders. */
       const KITCHEN_PROP_CYL_INRADIUS = Math.cos(Math.PI / 12);
       /** Gap between the car's prop bumper and the table (it never touches the table). */
@@ -2815,6 +2895,49 @@ let _worldSwitched = false;
         model.updateMatrixWorld(true);
       }
 
+      /** Food on the fruit plates (kitchenFood.js): built once, put back on "Race again". */
+      function setupKitchenFood() {
+        if (_kitchenFood) return;
+        _kitchenFood = createKitchenFood({
+          THREE,
+          CANNON,
+          scene,
+          world: physicsWorld,
+          groups: { DEFAULT: PHYS_GROUP_DEFAULT, PROP: PHYS_GROUP_PROP, FOOD: PHYS_GROUP_FOOD },
+          materials: { table: tablePlatePhysicsMaterial, floor: floorPhysMaterial, prop: propPhysMaterial, ramp: _rampPhysMaterial() },
+          getTable: () => {
+            if (!tablePlateBody) return null;
+            const he = tablePlateBody.shapes[0].halfExtents;
+            const tp = tablePlateBody.position;
+            return { top: tp.y + he.y, cx: tp.x, cz: tp.z, hx: he.x, hz: he.z };
+          },
+          getFloor: () => {
+            if (!floorPhysBody) return null;
+            const he = floorPhysBody.shapes[0].halfExtents;
+            const fp = floorPhysBody.position;
+            return { top: fp.y + he.y, cx: fp.x, cz: fp.z, hx: he.x, hz: he.z };
+          },
+          carMass: CAR_MASS,
+          guardMaterial: keepBelowBloomThreshold,
+          // The food's physics: the cup pyramid's settings, shared (not copied).
+          cup: {
+            friction: KITCHEN_CUP_FRICTION,
+            restitution: KITCHEN_CUP_RESTITUTION,
+            stiffness: KITCHEN_CUP_CONTACT_STIFFNESS,
+            relaxation: KITCHEN_CUP_CONTACT_RELAXATION,
+            linearDamping: KITCHEN_CUP_LINEAR_DAMPING,
+            angularDamping: KITCHEN_CUP_ANGULAR_DAMPING,
+            sleepSpeed: KITCHEN_PROP_SLEEP_SPEED,
+            sleepTime: KITCHEN_PROP_SLEEP_TIME,
+          },
+        });
+        _kitchenFood.setup(
+          _kitchenProps
+            .filter((p) => p.vis && /^fruitPlate\d$/.test(p.vis.name))
+            .map((p) => ({ name: p.vis.name, body: p.body, radius: p.body._propRadius, tray: p.body._propTray })),
+        );
+      }
+
       function setupKitchenPropPhysics(model) {
         model.updateMatrixWorld(true);
         // Physics proxies (…Physic) are never drawn, paired with a prop or not.
@@ -2834,11 +2957,13 @@ let _worldSwitched = false;
           const box = new THREE.Box3().setFromObject(phys);
           if (box.isEmpty()) continue;
           const center = box.getCenter(new THREE.Vector3());
+          const meshCenter = center.clone(); // the body's frame for a tray profile
           const size = box.getSize(new THREE.Vector3());
           const radius = (size.x + size.z) / 4;
           const height = Math.max(size.y, 0.05);
           // Rest exactly on the table top (no start-up pop if the proxy dips into it).
           if (box.min.y < tableTop && box.max.y > tableTop) center.y = tableTop + height / 2 + 0.002;
+          else if (opts && opts.salBase && box.min.y >= tableTop && box.min.y - tableTop < KITCHEN_SAL_BASE.seatGap) center.y = tableTop + height / 2 + 0.002;
           // Upper pyramid rows: exactly on the row below (bottom row is snapped above).
           if (isCup && box.min.y > tableTop + 0.1) {
             const row = Math.round((box.min.y - tableTop) / (height + KITCHEN_CUP_GAP));
@@ -2846,11 +2971,11 @@ let _worldSwitched = false;
           }
           const body = new CANNON.Body({
             mass: kitchenPropMass(physName, isCup, radius),
-            linearDamping: isCup ? KITCHEN_CUP_LINEAR_DAMPING : KITCHEN_PROP_LINEAR_DAMPING,
-            angularDamping: isCup ? KITCHEN_CUP_ANGULAR_DAMPING : KITCHEN_PROP_ANGULAR_DAMPING,
+            linearDamping: isCup ? KITCHEN_CUP_LINEAR_DAMPING : opts && opts.salBase ? KITCHEN_SAL_BASE.linearDamping : KITCHEN_PROP_LINEAR_DAMPING,
+            angularDamping: isCup ? KITCHEN_CUP_ANGULAR_DAMPING : opts && opts.salBase ? KITCHEN_SAL_BASE.angularDamping : KITCHEN_PROP_ANGULAR_DAMPING,
             allowSleep: true,
-            sleepSpeedLimit: 0.6,
-            sleepTimeLimit: 0.5,
+            sleepSpeedLimit: KITCHEN_PROP_SLEEP_SPEED,
+            sleepTimeLimit: KITCHEN_PROP_SLEEP_TIME,
             collisionFilterGroup: isCup ? PHYS_GROUP_CUP : PHYS_GROUP_PROP,
             // Solver contacts only with the table / floor (and, for pyramid
             // cups, with each other so they stack and topple). The car and the
@@ -2862,11 +2987,18 @@ let _worldSwitched = false;
               : ~(PHYS_GROUP_CAR | PHYS_GROUP_PROP | PHYS_GROUP_CUP),
             material: isCup ? cupPhysMaterial : propPhysMaterial,
           });
+          const tray = shapeKind === "tray" ? trayFromMesh(THREE, phys, meshCenter, visList[0].isMesh ? visList[0] : null) : null;
           if (shapeKind === "box") {
             const he = new CANNON.Vec3(size.x / 2, height / 2, size.z / 2);
             body.addShape(new CANNON.Box(he));
             body._propBox = he;
             body._propRadius = Math.hypot(he.x, he.z);
+          } else if (tray) {
+            addTrayShapes(CANNON, body, tray, KITCHEN_FOOD.trayMinWall, PHYS_GROUP_FOOD);
+            body._propTray = tray;
+            body.sleepSpeedLimit = KITCHEN_FOOD.plateSleep.speed;
+            body.sleepTimeLimit = KITCHEN_FOOD.plateSleep.time;
+            body._propRadius = radius;
           } else {
             body.addShape(new CANNON.Cylinder(radius, radius, height, 12));
             body._propRadius = radius;
@@ -2938,8 +3070,9 @@ let _worldSwitched = false;
           }
           // Only real sinking: a resting contact keeps a tiny overlap the
           // solver needs; removing it every step makes the prop jitter.
-          if (lowest < top - KITCHEN_PROP_TABLE_TOLERANCE) {
-            b.position.y += top - KITCHEN_PROP_TABLE_TOLERANCE - lowest;
+          const tol = b._propTray ? KITCHEN_PLATE_TABLE_TOLERANCE : KITCHEN_PROP_TABLE_TOLERANCE;
+          if (lowest < top - tol) {
+            b.position.y += top - tol - lowest;
             if (b.velocity.y < 0) b.velocity.y = 0;
           }
         }
@@ -4295,6 +4428,7 @@ let _worldSwitched = false;
           p.synced = false;
         }
         _cupHitByCar = false;
+        if (_kitchenFood) _kitchenFood.reset();
       }
 
       /** Turn arrows back to their default: no wave playing, all hidden. */
@@ -5073,8 +5207,10 @@ let _worldSwitched = false;
       // Cinematic intro (dark mode), letterboxed:
       //   1. table overview — a slow glide along the table, descending toward the track
       //   2. car beauty shot — (cut) a slow, low front-three-quarter orbit of the player's car
-      //   3. track run — fast and low along the track's centre line through a turn
-      //   4. arrival — back over the infield onto the gameplay camera
+      //   3. Mister Spot — (cut) a low three-quarter push-in on the robot firing
+      //      its lasers, the kitchen behind it
+      //   4. track run — fast and low along the track's centre line through a turn
+      //   5. arrival — back over the infield onto the gameplay camera
       // The race is held meanwhile (phase "intro": no input, AI paused, no timer /
       // laps, HUD hidden). It can't be skipped, and input does nothing while it
       // plays. Every shot is built from the race track and the cars' positions.
@@ -5088,6 +5224,7 @@ let _worldSwitched = false;
       const KITCHEN_INTRO_SHOTS = [
         { name: "overview", sec: 3.6, blendIn: 0 },
         { name: "carBeauty", sec: 3.6, blendIn: 0, fade: true },
+        { name: "misterSpot", sec: 3.6, blendIn: 0, fade: true }, // Mister Spot firing its lasers
         { name: "trackRun", sec: 3.4, blendIn: 0, fade: true },
         { name: "arrival", sec: 3.2, blendIn: 0 }, // continues from the run's last pose
       ];
@@ -5137,6 +5274,31 @@ let _worldSwitched = false;
         fovTo: 66,
         maxRollDeg: 7, // leaning into the turn
       };
+      /**
+       * 3. Mister Spot: wherever it is when the shot comes, it stops and fires
+       * its laser sequence (the normal effect) while the camera pushes in from
+       * a low front three-quarter, slightly to the side (below its eyes, so the
+       * beams pass above the camera and sweep across the frame). Sizes are
+       * shares of the robot's height (its bounds); the angle is the first of
+       * `azCandidatesDeg` (either side) with a clear view and the kitchen behind
+       * it (the jump camera's background check), else the one with the most.
+       */
+      const KITCHEN_INTRO_SPOT = {
+        azCandidatesDeg: [50, 38, 64, 78, 28, 95], // from the robot's facing, preferred first
+        orbitDeg: 12, // the camera's slow orbit over the shot (toward the front)
+        distFrom: 1.9, // × robot height
+        distTo: 1.6, // push-in
+        height: 0.36, // camera above the robot's base, × its height
+        lookHeight: 0.6, // look point above its base, × its height
+        lookAhead: 0.3, // look point ahead of it (where the beams go), × its height
+        fovFrom: 56,
+        fovTo: 50,
+        bgSpread: 0.45, // the background rays pass this far around it, × its height
+        openSpread: 2.0, // nothing in front of it across the frame: rays out to this far either side of it, × its height…
+        openNear: 0.6, // …with nothing in their nearer share (a foreground blocker; the boxes are too coarse near the robot)
+        laserLead: 0.3, // seconds: the lasers start this long before the shot (firing when it fades in)…
+        laserTail: 0.3, // …and fade out this long after it
+      };
       const KITCHEN_INTRO_TOTAL_SEC = KITCHEN_INTRO_SHOTS.reduce((t, s) => t + s.sec, 0);
       /** Arrow wave before the ramp during the overview (the ramp is in its view). */
       const KITCHEN_INTRO_RAMP_WAVE_AT_SEC = KITCHEN_INTRO_SHOTS[0].sec * 0.45;
@@ -5164,6 +5326,9 @@ let _worldSwitched = false;
           waveDone: false,
           runWaveDone: false,
           rampWaveDone: false,
+          spot: null, // Mister Spot shot frame (chosen when it starts)
+          spotStarted: false,
+          spotEnded: false,
         },
       );
       const _kIntroPose = { pos: new THREE.Vector3(), look: new THREE.Vector3(), fov: 50, roll: 0 };
@@ -5269,6 +5434,16 @@ let _worldSwitched = false;
           o.look.y = R.surf + C.lookHeight;
           o.fov = _kIntroLerp(C.fovFrom, C.fovTo, e);
           o.roll = 0;
+        } else if (name === "misterSpot") {
+          const P = _kIntro.spot;
+          if (!P) return _kIntroShotPose(0, 1, o); // no robot: hold the overview's last pose
+          const S = KITCHEN_INTRO_SPOT;
+          const e = _kIntroEaseSine(u);
+          _kIntroSpotCamPos(P, e, o.pos);
+          o.look.copy(P.base).addScaledVector(P.fwd, S.lookAhead * P.h);
+          o.look.y = P.base.y + S.lookHeight * P.h;
+          o.fov = _kIntroLerp(S.fovFrom, S.fovTo, e);
+          o.roll = 0;
         } else if (name === "trackRun") {
           const W = KITCHEN_INTRO_RUN;
           // Quick along the straight, slowing through the turn to rest; eased in
@@ -5309,6 +5484,177 @@ let _worldSwitched = false;
         return o;
       }
 
+      // ── Intro shot 3: Mister Spot firing its lasers ──────────────────────────
+      const _kIntroSpotBox = new THREE.Box3();
+      const _kIntroSpotC = new THREE.Vector3();
+      const _kIntroSpotA = new THREE.Vector3();
+      const _kIntroSpotB = new THREE.Vector3();
+
+      /** Camera position of the Mister Spot shot at eased progress e (angle P.az on side P.sign). */
+      function _kIntroSpotCamPos(P, e, out, az = P.az, sign = P.sign) {
+        const S = KITCHEN_INTRO_SPOT;
+        const a = (az - S.orbitDeg * e) * _kIntroDeg;
+        const d = _kIntroLerp(S.distFrom, S.distTo, e) * P.h;
+        out.copy(P.base).addScaledVector(P.fwd, Math.cos(a) * d).addScaledVector(P.side, Math.sin(a) * d * sign);
+        out.y = P.base.y + S.height * P.h;
+        return out;
+      }
+
+      /** Nearest box hit along `_jfxBgRay` beyond `from`, not counting the robot's own parts (inside its bounds). */
+      function _kIntroSpotNearest(P, from) {
+        let best = Infinity;
+        for (const b of _jfxBackgroundBoxes()) {
+          if (P.bounds.containsBox(b)) continue;
+          if (!_jfxBgRay.intersectBox(b, _jfxBgHit)) continue;
+          const d = _jfxBgHit.distanceTo(_jfxBgRay.origin);
+          if (d > from && d < best) best = d;
+        }
+        return best;
+      }
+
+      /** A clear line from the robot's centre to `cam`, and `cam` not inside anything. */
+      function _kIntroSpotClear(P, cam) {
+        for (const b of _jfxBackgroundBoxes()) if (b.containsPoint(cam) && !P.bounds.containsBox(b)) return false;
+        const toCam = _jfxDir.subVectors(cam, P.centre);
+        const dist = toCam.length();
+        _jfxBgRay.set(P.centre, toCam.normalize());
+        return _kIntroSpotNearest(P, 0) > dist;
+      }
+
+      /** Nothing between the camera and the framed area (rays across the frame reach the robot's depth). */
+      function _kIntroSpotOpen(P, cam) {
+        const S = KITCHEN_INTRO_SPOT;
+        _jfxDir.subVectors(P.centre, cam).normalize();
+        _jfxRight.crossVectors(_jfxDir, _flatUp).normalize();
+        for (const [r, up] of [[0, 0], [0.5, 0], [-0.5, 0], [1, 0], [-1, 0], [0.5, -0.3], [-0.5, -0.3], [0.5, 0.4], [-0.5, 0.4]]) {
+          _jfxAim.copy(P.centre).addScaledVector(_jfxRight, r * S.openSpread * P.h);
+          _jfxAim.y += up * P.h;
+          const d = _jfxAim.distanceTo(cam);
+          _jfxBgRay.set(cam, _jfxDir.subVectors(_jfxAim, cam).normalize());
+          if (_kIntroSpotNearest(P, 0.05) < d * S.openNear) return false;
+        }
+        _jfxDir.subVectors(P.centre, cam).normalize();
+        return true;
+      }
+
+      /** Share of rays from `cam` through and around the robot that meet the kitchen behind it. */
+      function _kIntroSpotCover(P, cam) {
+        const S = KITCHEN_INTRO_SPOT;
+        _jfxDir.subVectors(P.centre, cam).normalize();
+        _jfxRight.crossVectors(_jfxDir, _flatUp).normalize();
+        const offs = [[0, 0], [1, 0], [-1, 0], [0, 0.6], [0, -0.6]];
+        let hits = 0;
+        for (const [r, up] of offs) {
+          _jfxAim.copy(P.centre).addScaledVector(_jfxRight, r * S.bgSpread * P.h);
+          _jfxAim.y += up * S.bgSpread * P.h;
+          const d = _jfxAim.distanceTo(cam);
+          _jfxBgRay.set(cam, _jfxDir.subVectors(_jfxAim, cam).normalize());
+          if (_kIntroSpotNearest(P, d) < d + JUMP_CAM_BG_DIST) hits++;
+        }
+        return hits / offs.length;
+      }
+
+      /** The robot stops: its frame (from its bounds and facing) and the shot's angle. */
+      function _kIntroSpotFrame(m) {
+        m.object.updateMatrixWorld(true);
+        _kIntroSpotBox.setFromObject(m.object);
+        const h = _kIntroSpotBox.max.y - _kIntroSpotBox.min.y;
+        const base = new THREE.Vector3(m.object.position.x, _kIntroSpotBox.min.y, m.object.position.z);
+        const fwd = new THREE.Vector3(Math.sin(m.object.rotation.y), 0, Math.cos(m.object.rotation.y));
+        const P = {
+          h,
+          bounds: _kIntroSpotBox.clone().expandByScalar(0.5),
+          base,
+          centre: _kIntroSpotBox.getCenter(new THREE.Vector3()),
+          fwd,
+          side: new THREE.Vector3(fwd.z, 0, -fwd.x),
+          az: KITCHEN_INTRO_SPOT.azCandidatesDeg[0],
+          sign: 1,
+        };
+        let best = null;
+        for (const az of KITCHEN_INTRO_SPOT.azCandidatesDeg) {
+          for (const sign of [1, -1]) {
+            _kIntroSpotCamPos(P, 0, _kIntroSpotA, az, sign);
+            _kIntroSpotCamPos(P, 1, _kIntroSpotB, az, sign);
+            const clear =
+              _kIntroSpotClear(P, _kIntroSpotA) &&
+              _kIntroSpotClear(P, _kIntroSpotB) &&
+              _kIntroSpotOpen(P, _kIntroSpotA) &&
+              _kIntroSpotOpen(P, _kIntroSpotB);
+            const cover = Math.min(_kIntroSpotCover(P, _kIntroSpotA), _kIntroSpotCover(P, _kIntroSpotB));
+            const c = { az, sign, clear, cover };
+            if (clear && cover >= JUMP_CAM_BG_MIN) {
+              best = c;
+              break;
+            }
+            if (!best || (c.clear && !best.clear) || (c.clear === best.clear && c.cover > best.cover)) best = c;
+          }
+          if (best && best.clear && best.cover >= JUMP_CAM_BG_MIN) break;
+        }
+        P.az = best.az;
+        P.sign = best.sign;
+        P.cover = best.cover;
+        P.clear = best.clear;
+        return P;
+      }
+
+      /** Field names of Mister Spot's path / corner state, saved for the shot and restored after it. */
+      const MISTER_SPOT_STATE_KEYS = ["mode", "seg", "along", "drivePhase", "phaseT", "phaseDur", "easeLen", "easeFrom", "laserT", "laserLean", "holdT", "turnT", "yawFrom", "yawTo", "yawDelta"];
+
+      /** The shot's laser sequence: the robot stops where it is and fires (the normal effect). */
+      function _kIntroSpotBegin() {
+        const m = _misterSpot;
+        if (!m || !m.object || !m.segs || !m.segs.length) return;
+        const saved = {};
+        for (const k of MISTER_SPOT_STATE_KEYS) saved[k] = m[k];
+        saved.pos = m.object.position.clone();
+        saved.rotY = m.object.rotation.y;
+        const S = KITCHEN_INTRO_SPOT;
+        const sec = KITCHEN_INTRO_SHOTS.find((sh) => sh.name === "misterSpot").sec;
+        // Laser time runs so its own fade-out ends with the shot's tail.
+        m.introLaser = { t: 0, offset: MISTER_SPOT_LASER_DURATION - (S.laserLead + sec + S.laserTail), saved };
+        // The angle first (the beams aren't part of the kitchen the checks look for), then the lasers.
+        _kIntro.spot = _kIntroSpotFrame(m);
+        m.laserLean = 0;
+        startMisterSpotLaser(m);
+      }
+
+      /** After the shot: Mister Spot exactly as it was (same place on its path, same state). */
+      function _kIntroSpotEnd() {
+        const m = _misterSpot;
+        if (!m || !m.introLaser) return;
+        const { saved } = m.introLaser;
+        m.introLaser = null;
+        stopMisterSpotLaser(m);
+        for (const k of MISTER_SPOT_STATE_KEYS) m[k] = saved[k];
+        m.object.position.copy(saved.pos);
+        m.object.rotation.y = saved.rotY;
+        if (m.mode === MISTER_SPOT_MODE.LASER_1 || m.mode === MISTER_SPOT_MODE.LASER_2) {
+          // It was firing at a corner: that sequence carries on from where it was.
+          startMisterSpotLaser(m);
+          updateMisterSpotLaser(m, m.laserT, 0);
+        }
+      }
+
+      /** Start / end the shot's laser sequence on the intro's clock. */
+      function _kIntroSpotTick(t) {
+        let start = 0;
+        for (const sh of KITCHEN_INTRO_SHOTS) {
+          if (sh.name === "misterSpot") break;
+          start += sh.sec;
+        }
+        const S = KITCHEN_INTRO_SPOT;
+        const sec = KITCHEN_INTRO_SHOTS.find((sh) => sh.name === "misterSpot").sec;
+        if (!_kIntro.spotStarted && t >= start - S.laserLead) {
+          _kIntro.spotStarted = true;
+          _kIntroSpotBegin();
+        }
+        if (_kIntro.spotStarted && !_kIntro.spotEnded && t >= start + sec + S.laserTail) {
+          _kIntro.spotEnded = true;
+          _kIntroSpotEnd();
+        }
+      }
+
       /** Called when the loader starts fading out: the intro begins. */
       function startKitchenIntroPlayback() {
         if (_kIntro.state !== "pending") return;
@@ -5328,6 +5674,11 @@ let _worldSwitched = false;
         if (_kIntro.state === "done") return;
         const wasPlaying = _kIntro.state === "playing";
         _kIntro.state = "done";
+        // Mister Spot back to its normal path if the intro ends mid-shot.
+        if (_kIntro.spotStarted && !_kIntro.spotEnded) {
+          _kIntro.spotEnded = true;
+          _kIntroSpotEnd();
+        }
         _kIntro.updateFade(); // no fade left over
         if (wasPlaying) controls.enabled = _kIntro.controlsWereEnabled;
         // Nothing pressed during the intro carries into the race.
@@ -5391,6 +5742,7 @@ let _worldSwitched = false;
         if (_kIntro.state === "playing") {
           _kIntro.t += dt;
           _kIntroWaves(_kIntro.t);
+          _kIntroSpotTick(_kIntro.t);
           if (_kIntro.t >= KITCHEN_INTRO_TOTAL_SEC) {
             finishKitchenIntro();
             return false;
@@ -6069,9 +6421,13 @@ let _worldSwitched = false;
       function pushKitchenPropsOutOfCar() {
         _kitchenPropFrame++;
         pushKitchenPropsOutOfBumper(_carPropBumper, carFalling ? null : carState);
+        if (_kitchenFood) _kitchenFood.pushOutOfBumper(_carPropBumper, carFalling ? null : carState, _kitchenPropDt);
         for (let i = 0; i < _raceCars.length; i++) {
           const rc = _raceCars[i];
-          if (!rc.isPlayer && rc.bumper) pushKitchenPropsOutOfBumper(rc.bumper, rc.state);
+          if (!rc.isPlayer && rc.bumper) {
+            pushKitchenPropsOutOfBumper(rc.bumper, rc.state);
+            if (_kitchenFood) _kitchenFood.pushOutOfBumper(rc.bumper, rc.state, _kitchenPropDt);
+          }
         }
       }
       let _kitchenPropFrame = 0;
@@ -6205,6 +6561,8 @@ let _worldSwitched = false;
           const nl = Math.hypot(_pushN.x, _pushN.z) || 1;
           _pushN.x /= nl;
           _pushN.z /= nl;
+          // A fruit plate rests static (kitchenFood.js holdPlate): dynamic again before the push.
+          if (b._foodPlate && _kitchenFood) _kitchenFood.releasePlate(b);
           b.position.x += _pushN.x * depth;
           b.position.z += _pushN.z * depth;
           // Horizontal shove at the contact side, at the prop's centre height:
@@ -6236,6 +6594,8 @@ let _worldSwitched = false;
           }
           b.aabbNeedsUpdate = true;
           if (b.sleepState !== CANNON.Body.AWAKE) b.wakeUp();
+          // A fruit plate hit by a car: its food wakes (as the cup pyramid on a hit).
+          if (b._foodPlate && _kitchenFood) _kitchenFood.onPlateTouched(b);
         }
       }
 
@@ -6309,6 +6669,10 @@ let _worldSwitched = false;
             }
             if (!(depth > 0) || depth === Infinity) continue;
             const h = depth / 2;
+            if (_kitchenFood) {
+              if (a._foodPlate) _kitchenFood.releasePlate(a);
+              if (b._foodPlate) _kitchenFood.releasePlate(b);
+            }
             a.position.x -= nx * h;
             a.position.z -= nz * h;
             b.position.x += nx * h;
@@ -6339,6 +6703,7 @@ let _worldSwitched = false;
         wakeCupPyramidIfHit();
         separateKitchenProps();
         keepKitchenPropsAboveTable();
+        if (_kitchenFood) _kitchenFood.update();
         for (let i = 0; i < _kitchenProps.length; i++) {
           const p = _kitchenProps[i];
           const b = p.body;
@@ -6373,8 +6738,9 @@ let _worldSwitched = false;
         for (let i = 0; i < _kitchenProps.length; i++) {
           const b = _kitchenProps[i].body;
           if (b.sleepState !== CANNON.Body.SLEEPING) continue;
-          // Pyramid cups stay asleep (perfectly still) until actually hit.
-          if (b._propCup) continue;
+          // Pyramid cups, and the fruit plates with their food, stay asleep
+          // (perfectly still) until actually hit.
+          if (b._propCup || b._foodPlate) continue;
           const r = b.boundingRadius + KITCHEN_PROP_WAKE_MARGIN;
           const dx = car.position.x - b.position.x;
           const dz = car.position.z - b.position.z;
@@ -7553,7 +7919,7 @@ let _worldSwitched = false;
         const sidePlane = _findKitchenMesh(kmodel, "mainTableSidePlane", meshByName);
         if (!topPlane && !sidePlane) {
           console.warn(
-            "ul-kitchen24.gltf: mainTableTopPlane / mainTableSidePlane not found",
+            "ul-kitchen26.gltf: mainTableTopPlane / mainTableSidePlane not found",
           );
           return { coverCloneStepX: null, topMat: null, sideMat: null };
         }
@@ -8762,6 +9128,14 @@ let _worldSwitched = false;
         const m = _misterSpot;
         if (!m || !m.object || !m.segs || !m.segs.length) return;
         if (dt < 0) dt = 0;
+        // The intro's laser shot: stopped where it was, firing (its path state waits, see _kIntroSpotBegin).
+        if (m.introLaser) {
+          m.introLaser.t += dt;
+          m.object.position.copy(m.introLaser.saved.pos);
+          m.object.rotation.y = m.introLaser.saved.rotY;
+          updateMisterSpotLaser(m, Math.max(0, m.introLaser.t + m.introLaser.offset), dt);
+          return;
+        }
         const segs = m.segs;
         if (m.mode === MISTER_SPOT_MODE.LASER_1 || m.mode === MISTER_SPOT_MODE.LASER_2) {
           const before = m.mode === MISTER_SPOT_MODE.LASER_1;
@@ -9006,7 +9380,7 @@ let _worldSwitched = false;
         const loadToken = ++_kitchenLoadToken;
         const kLoader = new GLTFLoader();
         kLoader.load(
-          kitchenAsset("ul-kitchen24.gltf"),
+          kitchenAsset("ul-kitchen26.gltf"),
           (gltf) => {
             if (!_worldSwitched || loadToken !== _kitchenLoadToken) return;
 
@@ -9028,12 +9402,13 @@ let _worldSwitched = false;
             });
             const surfaceMesh = kitchenPlate || kitchenPlatePhysic;
             if (!surfaceMesh) {
-              console.warn("ul-kitchen24.gltf: no mainTablePlate/mainTablePlatePhysic mesh found");
+              console.warn("ul-kitchen26.gltf: no mainTablePlate/mainTablePlatePhysic mesh found");
               _worldSwitched = false;
               return;
             }
 
             scene.add(kmodel);
+            _kitchenDragRoot = kmodel;
             _currentWorldModel = kmodel;
             loadMisterSpot(kmodel, loadToken);
 
@@ -9192,8 +9567,11 @@ let _worldSwitched = false;
               roughness: 0.92,
               metalness: 0.0,
             });
+            // "Cube" (new in ul-kitchen25) shares coffeeMuchineBody's material
+            // instance (no textures, so its own UVs don't matter).
             const _blackPlasticMeshNames = new Set([
               "coffeeMuchineBody",
+              "Cube",
               "coffeeTankCup",
               "coffeeStrokEdge",
               "waterTapPlastic",
@@ -9822,6 +10200,20 @@ let _worldSwitched = false;
                 }
                 return;
               }
+              if (n.name === "soab1" || n.name === "soab2") {
+                const c = KITCHEN_SOAP_PASTEL[n.name];
+                const m = new THREE.MeshStandardMaterial({
+                  color: c,
+                  roughness: KITCHEN_SOAP_PASTEL.roughness,
+                  metalness: KITCHEN_SOAP_PASTEL.metalness,
+                  envMapIntensity: KITCHEN_SOAP_PASTEL.envMapIntensity,
+                  emissive: c,
+                  emissiveIntensity: KITCHEN_SOAP_PASTEL.selfLight.dark,
+                });
+                _kitchenPastelMats.push(m);
+                n.material = m;
+                return;
+              }
               if (_matteMetalMeshNames.has(n.name)) {
                 if (Array.isArray(n.material)) {
                   n.material = n.material.map(() => _matteMetalMat);
@@ -10241,6 +10633,7 @@ let _worldSwitched = false;
             rotateKitchenGreyBox(kmodel);
             setupKitchenPropPhysics(kmodel);
             buildKitchenRaceBoundaries(kmodel);
+            setupKitchenFood();
             setupKitchenRamp(kmodel, tablePlatePhysicsMaterial);
             _raceModel = kmodel;
 
@@ -10848,7 +11241,7 @@ let _worldSwitched = false;
           },
           undefined,
           (err) => {
-            console.error("Failed to load ul-kitchen24.gltf:", err);
+            console.error("Failed to load ul-kitchen26.gltf:", err);
             _worldSwitched = false;
           },
         );
@@ -11704,6 +12097,69 @@ let _worldSwitched = false;
 
       /** Reused each frame by the wheel physics sync (no per-frame array). */
       const _wheelBodiesList = [null, null, null, null];
+      /**
+       * Warm-up under the loader, once the kitchen is loaded and before its first
+       * real frame (the first frames uploaded every texture and compiled every
+       * shader at once: a ~290 ms and a ~120 ms main-thread stall during the
+       * transition): textures uploaded within a time budget per frame, then the
+       * shaders compiled with compileAsync (parallel where the GPU driver can).
+       */
+      const KITCHEN_WARMUP = { frameBudgetMs: 6, maxWaitMs: 4000 };
+      const _kitchenWarmup = { state: "idle" }; // idle | running | done
+      function _kitchenNextFrame() {
+        return new Promise((resolve) => requestAnimationFrame(() => resolve()));
+      }
+      async function runKitchenWarmup() {
+        _kitchenWarmup.state = "running";
+        try {
+          // The plates' food settles first (off-screen physics, a time budget per frame).
+          if (_kitchenFood) await _kitchenFood.settle(_kitchenNextFrame);
+          scene.updateMatrixWorld(true);
+          const textures = new Set();
+          scene.traverse((o) => {
+            const mats = o.material ? (Array.isArray(o.material) ? o.material : [o.material]) : [];
+            for (const m of mats) {
+              for (const k in m) {
+                const v = m[k];
+                if (v && v.isTexture && !v.isRenderTargetTexture) textures.add(v);
+              }
+            }
+          });
+          const list = [...textures];
+          await Promise.all(
+            list.map((t) => {
+              const img = t.image;
+              return img && typeof img.decode === "function" && img.complete !== false ? img.decode().catch(() => {}) : null;
+            }),
+          );
+          for (let i = 0; i < list.length; ) {
+            const start = performance.now();
+            while (i < list.length && performance.now() - start < KITCHEN_WARMUP.frameBudgetMs) {
+              try {
+                renderer.initTexture(list[i]);
+              } catch (e) {}
+              i++;
+            }
+            await _kitchenNextFrame();
+          }
+          if (renderer.compileAsync) {
+            // For the target the frames are really drawn into (the composer's
+            // buffer, not the screen): three.js builds different shader variants
+            // for the two (tone mapping, output colour), so compiling for the
+            // screen left the real ones to the first frame.
+            const prevTarget = renderer.getRenderTarget();
+            renderer.setRenderTarget(finalComposer.readBuffer);
+            const compiling = renderer.compileAsync(scene, camera).catch(() => {});
+            renderer.setRenderTarget(prevTarget);
+            await Promise.race([compiling, new Promise((resolve) => setTimeout(resolve, KITCHEN_WARMUP.maxWaitMs))]);
+          }
+
+        } catch (e) {
+          console.warn("[kitchen] warm-up failed:", e);
+        }
+        _kitchenWarmup.state = "done";
+      }
+
       function animate() {
         if (!_kitchenSceneRendering) {
           _kitchenSceneAnimationFrame = 0;
@@ -11711,6 +12167,12 @@ let _worldSwitched = false;
         }
         _kitchenSceneAnimationFrame = requestAnimationFrame(animate);
         if (!_tabVisible) return;
+        // Loaded but not warmed up yet: nothing is drawn (the loader covers it).
+        if (_kitchenSceneReady && _kitchenWarmup.state !== "done") {
+          if (_kitchenWarmup.state === "idle") runKitchenWarmup();
+          clock.getDelta();
+          return;
+        }
         try {
           const rawDt = clock.getDelta();
           const realDt = Math.min(rawDt, 0.05);
@@ -11823,10 +12285,13 @@ let _worldSwitched = false;
               keys.right ||
               keys.brake ||
               kitchenRaceCarsMoving() ||
-              kitchenPropsMoving();
+              kitchenPropsMoving() ||
+              (_kitchenFood && _kitchenFood.moving());
             if (realtimePhysics) {
               _kitchenIdlePhysicsAccumulator = 0;
-              physicsWorld.step(1 / 60, physicsStepDt, 3);
+              // A pile of food settling in a plate: finer steps meanwhile (kitchenFood.js pile.substeps).
+              const sub = _kitchenFood ? _kitchenFood.substeps() : 1;
+              physicsWorld.step(1 / 60 / sub, physicsStepDt, 3 * sub);
             } else {
               _kitchenIdlePhysicsAccumulator += physicsStepDt;
               if (_kitchenIdlePhysicsAccumulator >= 1 / 20) {
@@ -12032,6 +12497,17 @@ let _worldSwitched = false;
             syncCarFollowCamAnglesFromPosition(carCameraFollow);
             applyCarFollowCameraFromAngles();
           }
+          // The mouse drag's offset (under the intro / jump cameras; the landing shake stays on top).
+          {
+            const gameplayCam = camera === carCamera || camera === carCameraFollow;
+            if (kitchenCameraDrag.desktop && controls) {
+              // On the gameplay cameras the drag replaces the orbit controls' mouse rotate / pan.
+              controls.enableRotate = !gameplayCam;
+              controls.enablePan = !gameplayCam;
+            }
+            kitchenCameraDrag.update(Math.min(rawDt, 0.1));
+            if (car && gameplayCam) kitchenCameraDrag.apply(camera, getCarCameraLookAtPoint(_kitchenDragTarget));
+          }
           applyKitchenIntroCamera(Math.min(rawDt, 0.1));
           applyKitchenJumpCamera();
           if (sceneBloomEnabled) {
@@ -12051,12 +12527,14 @@ let _worldSwitched = false;
           finalComposer.render();
           restoreKitchenJumpCamera();
           restoreKitchenIntroCamera();
+          kitchenCameraDrag.restore(camera);
           if (_kitchenSceneReady && !_kitchenSceneShown && ++_kitchenSceneShownFrames >= KITCHEN_READY_FRAMES) {
             _kitchenSceneShown = true;
             emitKitchenSceneEvent("ready");
           }
         } catch (e) {
           restoreKitchenJumpCamera();
+          kitchenCameraDrag.restore(camera);
           restoreKitchenIntroCamera();
           console.error("Animate error:", e);
         }

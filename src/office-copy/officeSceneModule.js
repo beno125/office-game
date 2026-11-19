@@ -20,6 +20,7 @@ import {
   introEaseSine,
   introLerp,
 } from "../game/cinematicIntro.js";
+import { createCameraDrag } from "../game/cameraDrag.js";
 import { createCarLighting } from "../game/carLighting.js";
 import { createTouchDrive } from "../game/touch/touchDrive.js";
 import { addThresholdBloom, BLOOM_EMISSIVE, setBloomWeight } from "../game/thresholdBloom.js";
@@ -1645,6 +1646,22 @@ let _officeSceneAnimationFrame = 0;
         return c;
       }
       let controls = createOrbitControls(camera);
+
+      // Drag the camera with the mouse (shared, cameraDrag.js): an offset round the car,
+      // springing back on release; not during the intro or the ramp jump's camera.
+      const _officeDragTarget = new THREE.Vector3();
+      const officeCameraDrag = createCameraDrag({
+        THREE,
+        element: renderer.domElement,
+        scene: "office",
+        isEnabled: () =>
+          _officeSceneRendering && officeIntro.state === "done" && !isCarCameraJumpEffectActive() && getRampJumpSlowMoScale() >= 1,
+        collisionObjects: () => (_officeWorldRoot ? [_officeWorldRoot] : []),
+        ignore: (obj) => {
+          for (let x = obj; x; x = x.parent) if (x === car) return true;
+          return false;
+        },
+      });
       controls.target.set(0, 0, 0);
 
       // ---- Gameplay camera (camera 1) ------------------------------------
@@ -2466,6 +2483,15 @@ let _officeSceneAnimationFrame = 0;
         },
         /** The duck's eyeballs: a soft white glow so they read white (bright mode / dark mode). */
         eyeWhite: { bright: 0.18, dark: 0.42 },
+        /**
+         * A soft glow in the part's own colour (emissive = its colour), so only
+         * it gets brighter and its colour stays true (bright mode / dark mode):
+         * the duck's beak (duckMakor) and the star (the visible part of starPhysic).
+         */
+        selfGlow: {
+          duckMakor: { bright: 0.22, dark: 0.5 },
+          star: { bright: 0.2, dark: 0.45 },
+        },
         /** The two shadow-casting lights (car on the desk, desk side wall): bright mode keeps white @ 0.22. */
         shadowLights: { color: 0xdfe3f5, intensity: 0.12 }, // colour was lavender 0x9a8cff
         /** Emissive strength in dark mode (bright mode keeps its own values). */
@@ -2748,6 +2774,28 @@ let _officeSceneAnimationFrame = 0;
         const ew = GAMING_DARK.eyeWhite;
         const eyeGlow = ew.bright + (ew.dark - ew.bright) * k;
         for (const m of _eyeWhiteMats) m.emissiveIntensity = eyeGlow;
+        updateSelfGlow(k);
+      }
+
+      /** duckMakor / star: emissive in their own colour, strength by mode (k: 0 bright → 1 dark). */
+      const _selfGlowMats = { duckMakor: null, star: null };
+      function updateSelfGlow(k) {
+        const G = GAMING_DARK.selfGlow;
+        if (!_selfGlowMats.duckMakor) {
+          duckMakorMaterial.emissive.copy(duckMakorMaterial.color);
+          _selfGlowMats.duckMakor = duckMakorMaterial;
+        }
+        if (!_selfGlowMats.star) {
+          const star = findStarMesh();
+          if (star && star.material && star.material.emissive) {
+            star.material.emissive.copy(star.material.color);
+            _selfGlowMats.star = star.material;
+          }
+        }
+        for (const key of ["duckMakor", "star"]) {
+          const m = _selfGlowMats[key];
+          if (m) m.emissiveIntensity = G[key].bright + (G[key].dark - G[key].bright) * k;
+        }
       }
 
       /** Window glass: no direct light from spot lights (their highlights showed as dots on it). */
@@ -3971,6 +4019,8 @@ let _officeSceneAnimationFrame = 0;
       const rightScreenVideoTop = 0;
       const rightScreenVideoBottom = 0;
 
+      /** The office model (was office-table-embed94.gltf; the old office at /office-old keeps that one). */
+      const OFFICE_SCENE_GLTF = "office-scene1.gltf";
       const OUTDOOR_FALLBACK_GLTF = officeAsset("office-table-embed34.gltf");
       const OUTDOOR_BACKGROUND_Y_SCALE = 1.35;
       const OUTDOOR_BACKGROUND_OPACITY = 0.65;
@@ -5397,6 +5447,50 @@ let _officeSceneAnimationFrame = 0;
 
       /** Gums in the machine (80 filled about a third of the tank, 380 about 78%; 230 fills it to ~55%). */
       const GUM_COUNT = 230;
+      /**
+       * Gums out of the machine, on the table: spread out more, roll farther,
+       * bounce a little, and never sink into the table.
+       * - exitKick: random sideways speed added as a gum leaves the bottom hole
+       *   (world units / s; gravity here is 480), in a random direction around
+       *   the way it was already moving (± spreadDeg).
+       * - friction / restitution: gum on the table (were 0.6 / 0.05).
+       * - exitedAngularDamping: spin damping once out (was 0.9): rolls farther.
+       * - edgeBounce: near the table's edge, a gum rolling outward is turned back
+       *   with this share of its speed (stays on the table, like a soft lip).
+       * - sinkTolerance: a gum's centre may dip this share of its radius below
+       *   the top before it is lifted back (the car can press it down).
+       */
+      const GUM_TABLE = {
+        exitKick: { min: 4, max: 10 },
+        spreadDeg: 75,
+        friction: 0.42,
+        restitution: 0.18,
+        exitedAngularDamping: 0.6,
+        edgeBounce: 0.35,
+        edgeMargin: 1.5, // in radii from the edge
+        sinkTolerance: 0.05,
+        plateThickness: 0.5, // the table body's thickness (below this it's off the table)
+      };
+      /**
+       * Bottle and certified card physics (both were one box with heavy damping
+       * 0.95 / 0.4 and never slept):
+       * - bottle: three cylinders matching its parts (base, body, cap); its
+       *   origin is the centre of mass from their volumes (the base heavier), so
+       *   it tips, falls and rolls like a bottle;
+       * - certified card: one box matching the slab (its real shape);
+       * - realistic mass, light damping, table friction / low bounce, sleep once
+       *   settled; after each step pushed out of the car and kept above the table.
+       */
+      const KNOCKABLE_PHYS = {
+        bottle: { mass: 6, linearDamping: 0.12, angularDamping: 0.55, segments: 14, density: { base: 2, body: 1, cup: 1 } },
+        certified: { mass: 2.5, linearDamping: 0.15, angularDamping: 0.35 },
+        sleep: { speed: 0.3, time: 0.5 },
+        table: { friction: 0.5, restitution: 0.05 },
+        car: { friction: 0.45, restitution: 0.05 },
+        overlapTolerance: 0.01, // overlaps shallower than this are left to the solver
+        sinkTolerance: 0.06, // lowest point allowed below the table top (above normal contact depth, so resting objects aren't nudged and can sleep)
+      };
+
       const GUM_PHYS_FIXED_STEP = 1 / 120;
       const GUM_PHYS_FIXED_STEP_DYNAMIC = 1 / 60;
       const GUM_PHYS_MAX_SUBSTEPS_FILL = 5;
@@ -5583,8 +5677,8 @@ let _officeSceneAnimationFrame = 0;
       );
       physicsWorld.addContactMaterial(
         new CANNON.ContactMaterial(gumMaterial, tablePlatePhysicsMaterial, {
-          friction: 0.6,
-          restitution: 0.05,
+          friction: GUM_TABLE.friction,
+          restitution: GUM_TABLE.restitution,
           contactEquationStiffness: 1e7,
           contactEquationRelaxation: 3,
         }),
@@ -5607,32 +5701,32 @@ let _officeSceneAnimationFrame = 0;
       );
       physicsWorld.addContactMaterial(
         new CANNON.ContactMaterial(bottleMaterial, tablePlatePhysicsMaterial, {
-          friction: 0.8,
-          restitution: 0.02,
+          friction: KNOCKABLE_PHYS.table.friction,
+          restitution: KNOCKABLE_PHYS.table.restitution,
           contactEquationStiffness: 1e7,
           contactEquationRelaxation: 3,
         }),
       );
       physicsWorld.addContactMaterial(
         new CANNON.ContactMaterial(bottleMaterial, carMaterial, {
-          friction: 0.8,
-          restitution: 0.02,
+          friction: KNOCKABLE_PHYS.car.friction,
+          restitution: KNOCKABLE_PHYS.car.restitution,
           contactEquationStiffness: 5e6,
           contactEquationRelaxation: 4,
         }),
       );
       physicsWorld.addContactMaterial(
         new CANNON.ContactMaterial(certifiedMaterial, tablePlatePhysicsMaterial, {
-          friction: 0.8,
-          restitution: 0.02,
+          friction: KNOCKABLE_PHYS.table.friction,
+          restitution: KNOCKABLE_PHYS.table.restitution,
           contactEquationStiffness: 1e7,
           contactEquationRelaxation: 3,
         }),
       );
       physicsWorld.addContactMaterial(
         new CANNON.ContactMaterial(certifiedMaterial, carMaterial, {
-          friction: 0.8,
-          restitution: 0.02,
+          friction: KNOCKABLE_PHYS.car.friction,
+          restitution: KNOCKABLE_PHYS.car.restitution,
           contactEquationStiffness: 5e6,
           contactEquationRelaxation: 4,
         }),
@@ -6560,6 +6654,93 @@ let _officeSceneAnimationFrame = 0;
         return [rampLeftObject, rampBackObject].filter(Boolean);
       }
 
+      /**
+       * After each step, for the bottle and the certified card once they're
+       * loose: never below the table top, and never inside the car's footprint
+       * (the car's colliders are kinematic, so a deep overlap isn't always
+       * pushed out by the solver): pushed out the short way, inward speed removed.
+       */
+      function protectKnockables() {
+        const K = KNOCKABLE_PHYS;
+        const top = getTableTopY();
+        for (const pb of [bottlePhysBody, certifiedPhysBody]) {
+          if (!pb || pb._frozen) continue;
+          pb.updateAABB();
+          const low = pb.aabb.lowerBound.y;
+          const onTable =
+            Number.isFinite(tablePlateHalfX) &&
+            Math.abs(pb.position.x - tablePlateCenter.x) <= tablePlateHalfX &&
+            Math.abs(pb.position.z - tablePlateCenter.z) <= tablePlateHalfZ;
+          // "Fell off" is judged by its centre (a hard landing can dip its lowest point deep for a step).
+          if (onTable && low < top - K.sinkTolerance && pb.position.y > top - GUM_TABLE.plateThickness) {
+            pb.position.y += top - low;
+            if (pb.velocity.y < 0) pb.velocity.y = 0;
+            pb.aabbNeedsUpdate = true;
+          }
+          if (!car || carFalling) continue;
+          // Vertical: only while the object reaches below the car's roof.
+          const carTop = canonBodyPhys ? canonBodyPhys.aabb.upperBound.y : car.position.y + 1;
+          if (pb.aabb.lowerBound.y > carTop) continue;
+          // The object as a circle (its smaller half-width) against the car's rotated footprint.
+          const ex = (pb.aabb.upperBound.x - pb.aabb.lowerBound.x) / 2;
+          const ez = (pb.aabb.upperBound.z - pb.aabb.lowerBound.z) / 2;
+          const rin = Math.min(ex, ez);
+          const hx = halfW * storedCarScale;
+          const hz = halfL * storedCarScale;
+          const ca = Math.cos(carState.angle);
+          const sa = Math.sin(carState.angle);
+          const dx = pb.position.x - car.position.x;
+          const dz = pb.position.z - car.position.z;
+          const lx = dx * ca - dz * sa; // car right
+          const lz = dx * sa + dz * ca; // car forward
+          const qx = Math.max(-hx, Math.min(hx, lx));
+          const qz = Math.max(-hz, Math.min(hz, lz));
+          let nx = lx - qx;
+          let nz = lz - qz;
+          let dist = Math.hypot(nx, nz);
+          let push;
+          if (dist > 1e-6) {
+            if (dist >= rin - K.overlapTolerance) continue;
+            push = rin - dist;
+            nx /= dist;
+            nz /= dist;
+          } else {
+            // Centre inside the footprint: out through the nearest side.
+            const outX = hx - Math.abs(lx);
+            const outZ = hz - Math.abs(lz);
+            if (outX < outZ) {
+              nx = Math.sign(lx) || 1;
+              nz = 0;
+              push = outX + rin;
+            } else {
+              nx = 0;
+              nz = Math.sign(lz) || 1;
+              push = outZ + rin;
+            }
+          }
+          // Back to world (right = (cos, -sin), forward = (sin, cos)).
+          const wx = nx * ca + nz * sa;
+          const wz = -nx * sa + nz * ca;
+          pb.position.x += wx * push;
+          pb.position.z += wz * push;
+          const vIn = pb.velocity.x * wx + pb.velocity.z * wz;
+          if (vIn < 0) {
+            pb.velocity.x -= wx * vIn;
+            pb.velocity.z -= wz * vIn;
+          }
+          pb.aabbNeedsUpdate = true;
+          if (pb.sleepState !== CANNON.Body.AWAKE) pb.wakeUp();
+        }
+      }
+
+      /** Parts as cylinders (world box: radius, height, centre y) for the bottle's compound collider. */
+      function cylinderFromMesh(mesh) {
+        const b = new THREE.Box3().setFromObject(mesh);
+        const size = b.getSize(new THREE.Vector3());
+        const c = b.getCenter(new THREE.Vector3());
+        return { r: Math.max(size.x, size.z) / 2, h: size.y, c };
+      }
+
       function setupBottlePhysics(model) {
         model.traverse((node) => {
           if (!node.isMesh) return;
@@ -6575,11 +6756,30 @@ let _officeSceneAnimationFrame = 0;
         const phBB = new THREE.Box3().setFromObject(bottlePhisicMesh);
         const phCenter = phBB.getCenter(new THREE.Vector3());
         const phSize = phBB.getSize(new THREE.Vector3());
+        const K = KNOCKABLE_PHYS.bottle;
+
+        // Compound collider from the parts (or the physic box's size if a part is missing).
+        const parts3 = [
+          [bottleBaseMesh, K.density.base],
+          [bottleBodyMesh, K.density.body],
+          [bottleCupMesh, K.density.cup],
+        ].filter(([m]) => m);
+        const cyls = parts3.map(([m, d]) => ({ ...cylinderFromMesh(m), d }));
+        if (!cyls.length) cyls.push({ r: Math.max(phSize.x, phSize.z) / 2, h: phSize.y, c: phCenter.clone(), d: 1 });
+        // Centre of mass: volume × density weighted.
+        let wSum = 0;
+        const com = new THREE.Vector3();
+        for (const cy of cyls) {
+          const w = Math.PI * cy.r * cy.r * cy.h * cy.d;
+          com.addScaledVector(cy.c, w);
+          wSum += w;
+        }
+        com.multiplyScalar(1 / wSum);
 
         bottlePhisicMesh.visible = false;
 
         bottleGroup = new THREE.Group();
-        bottleGroup.position.copy(phCenter);
+        bottleGroup.position.copy(com);
         const phQuat = new THREE.Quaternion();
         bottlePhisicMesh.getWorldQuaternion(phQuat);
         bottleGroup.quaternion.copy(phQuat);
@@ -6591,26 +6791,31 @@ let _officeSceneAnimationFrame = 0;
           bottleGroup.attach(mesh);
         }
 
-        const hx = phSize.x / 2;
-        const hy = phSize.y / 2;
-        const hz = phSize.z / 2;
-        const shape = new CANNON.Box(new CANNON.Vec3(hx, hy, hz));
         bottlePhysBody = new CANNON.Body({
-          mass: 15,
+          mass: K.mass,
           type: CANNON.Body.DYNAMIC,
           material: bottleMaterial,
-          linearDamping: 0.95,
-          angularDamping: 0.95,
+          linearDamping: K.linearDamping,
+          angularDamping: K.angularDamping,
           allowSleep: true,
-          sleepSpeedLimit: 0.3,
-          sleepTimeLimit: 0.2,
+          sleepSpeedLimit: KNOCKABLE_PHYS.sleep.speed,
+          sleepTimeLimit: KNOCKABLE_PHYS.sleep.time,
           collisionFilterGroup: PHYS_GROUP_DEFAULT,
           collisionFilterMask: -1,
           ccdSpeedThreshold: 1,
           ccdIterations: 10,
         });
-        bottlePhysBody.addShape(shape);
-        bottlePhysBody.position.set(phCenter.x, phCenter.y, phCenter.z);
+        // Cylinders are along Y (as the bottle stands); offsets from the centre of mass.
+        const invQ = phQuat.clone().invert();
+        for (const cy of cyls) {
+          const off = cy.c.clone().sub(com).applyQuaternion(invQ);
+          bottlePhysBody.addShape(
+            new CANNON.Cylinder(cy.r, cy.r, cy.h, K.segments),
+            new CANNON.Vec3(off.x, off.y, off.z),
+          );
+        }
+        bottlePhysBody._sleepWhenSettled = true;
+        bottlePhysBody.position.set(com.x, com.y, com.z);
         bottlePhysBody.quaternion.set(phQuat.x, phQuat.y, phQuat.z, phQuat.w);
         bottlePhysBody._frozen = true;
         physicsWorld.addBody(bottlePhysBody);
@@ -6622,12 +6827,12 @@ let _officeSceneAnimationFrame = 0;
           }
         });
 
-        _bottleInitPos = new CANNON.Vec3(phCenter.x, phCenter.y, phCenter.z);
+        _bottleInitPos = new CANNON.Vec3(com.x, com.y, com.z);
         _bottleInitQuat = new CANNON.Quaternion(phQuat.x, phQuat.y, phQuat.z, phQuat.w);
         applyKnockableGroupShadow(bottleGroup);
         console.log("Bottle physics body created:", {
-          pos: [phCenter.x.toFixed(2), phCenter.y.toFixed(2), phCenter.z.toFixed(2)],
-          size: [phSize.x.toFixed(2), phSize.y.toFixed(2), phSize.z.toFixed(2)],
+          pos: [com.x.toFixed(2), com.y.toFixed(2), com.z.toFixed(2)],
+          shapes: cyls.map((cy) => [cy.r.toFixed(2), cy.h.toFixed(2)]),
           mass: bottlePhysBody.mass,
           type: bottlePhysBody.type,
           inWorld: physicsWorld.bodies.includes(bottlePhysBody),
@@ -7118,18 +7323,21 @@ let _officeSceneAnimationFrame = 0;
         const hz = phSize.z / 2;
         const shape = new CANNON.Box(new CANNON.Vec3(hx, hy, hz));
         certifiedPhysBody = new CANNON.Body({
-          mass: 5,
+          mass: KNOCKABLE_PHYS.certified.mass,
           type: CANNON.Body.DYNAMIC,
           material: certifiedMaterial,
-          linearDamping: 0.4,
-          angularDamping: 0.4,
-          allowSleep: false,
+          linearDamping: KNOCKABLE_PHYS.certified.linearDamping,
+          angularDamping: KNOCKABLE_PHYS.certified.angularDamping,
+          allowSleep: true,
+          sleepSpeedLimit: KNOCKABLE_PHYS.sleep.speed,
+          sleepTimeLimit: KNOCKABLE_PHYS.sleep.time,
           collisionFilterGroup: 1,
           collisionFilterMask: -1,
           ccdSpeedThreshold: 1,
           ccdIterations: 10,
         });
         certifiedPhysBody.addShape(shape);
+        certifiedPhysBody._sleepWhenSettled = true;
         certifiedPhysBody.position.set(phCenter.x, phCenter.y, phCenter.z);
         certifiedPhysBody.quaternion.set(phQuat.x, phQuat.y, phQuat.z, phQuat.w);
         certifiedPhysBody._frozen = true;
@@ -8758,7 +8966,7 @@ let _officeSceneAnimationFrame = 0;
       function unfreezeKnockableBody(pb) {
         if (!pb || !pb._frozen) return false;
         pb._frozen = false;
-        pb.allowSleep = pb === gumDispenserPhysBody;
+        pb.allowSleep = pb === gumDispenserPhysBody || !!pb._sleepWhenSettled;
         pb.wakeUp();
         return true;
       }
@@ -9402,7 +9610,7 @@ let _officeSceneAnimationFrame = 0;
       /** ...for this long in a row (s; was 0.5). */
       const GUM_EXITED_SLEEP_SEC = 0.35;
       /** Spin damping once a gum leaves the machine (was 0.55 after a hit; the cup release already used 0.90). */
-      const GUM_EXITED_ANGULAR_DAMPING = 0.9;
+      const GUM_EXITED_ANGULAR_DAMPING = GUM_TABLE.exitedAngularDamping;
       function anyGumLeftInTank() {
         for (let i = 0; i < gumsAddedCount; i++) if (!gumBodies[i]._exitedGumTank) return true;
         return false;
@@ -9996,12 +10204,22 @@ let _officeSceneAnimationFrame = 0;
         polygonOffsetFactor: 4,
         polygonOffsetUnits: 4,
       });
+      /**
+       * Depth bias for the certified card's text and logo: wixLogo and
+       * certifiedDesignText sit exactly on the glass body's front face
+       * (certifiedTitle is 1 mm in front), so the 50% white glass, drawn after
+       * them, painted over them where it was level with them.
+       */
+      const CERTIFIED_TEXT_DEPTH_BIAS = { factor: -2, units: -4 };
       const certifiedTextMaterial = new THREE.MeshStandardMaterial({
         color: 0xf8f8f8,
         roughness: 0.9,
         metalness: 0,
         emissive: 0xe8e8e8,
         emissiveIntensity: 0.45,
+        polygonOffset: true,
+        polygonOffsetFactor: CERTIFIED_TEXT_DEPTH_BIAS.factor,
+        polygonOffsetUnits: CERTIFIED_TEXT_DEPTH_BIAS.units,
       });
       const certifiedBodyMaterial = new THREE.MeshPhysicalMaterial({
         color: 0xffffff,
@@ -10264,7 +10482,19 @@ let _officeSceneAnimationFrame = 0;
        * glow (bloom) above the bloom threshold. (They were missing from the
        * model; the shared material below they used before is white @ 3.)
        */
-      const SCREEN_LED = { color: 0xf2f6ff, emissiveIntensity: 15 };
+      const SCREEN_LED = {
+        color: 0xf2f6ff,
+        emissiveIntensity: 14, // at the centre (was 15 everywhere)
+        /**
+         * Feathered glow: the brightness falls off from the centre toward the
+         * edges (an oval over the LED's two long sides), so only a soft core is
+         * above the bloom threshold and the bloom is round and smooth (the
+         * uniformly bright box bloomed as a hard, blocky rectangle).
+         */
+        featherFrom: 0.25, // full brightness inside this share of the half-size
+        featherTo: 1.0, // …fading to `edgeLevel` at the edge
+        edgeLevel: 0.12, // share of the brightness left at the edges (below the threshold)
+      };
       const screenLedMaterial = new THREE.MeshStandardMaterial({
         color: SCREEN_LED.color,
         emissive: SCREEN_LED.color,
@@ -10272,6 +10502,257 @@ let _officeSceneAnimationFrame = 0;
         roughness: 0.2,
         metalness: 0,
       });
+      /** One copy per LED (its own box: local centre, half-size, the two long axes) with the feathered glow. */
+      function makeScreenLedMaterial(mesh) {
+        const m = screenLedMaterial.clone();
+        const g = mesh.geometry;
+        if (!g.boundingBox) g.computeBoundingBox();
+        const b = g.boundingBox;
+        const center = b.getCenter(new THREE.Vector3());
+        const half = new THREE.Vector3().subVectors(b.max, b.min).multiplyScalar(0.5);
+        // The thinnest axis is the LED's depth: left out of the oval. Judged by the
+        // real (scaled) size: the LEDs are unit cubes shaped by their node's scale.
+        const ws = mesh.getWorldScale(new THREE.Vector3());
+        const sx = Math.abs(half.x * ws.x);
+        const sy = Math.abs(half.y * ws.y);
+        const sz = Math.abs(half.z * ws.z);
+        const thin = sx <= sy && sx <= sz ? 0 : sy <= sz ? 1 : 2;
+        const axes = new THREE.Vector3(thin === 0 ? 0 : 1, thin === 1 ? 0 : 1, thin === 2 ? 0 : 1);
+        m.onBeforeCompile = (shader) => {
+          shader.uniforms.uLedCenter = { value: center };
+          shader.uniforms.uLedHalf = { value: half };
+          shader.uniforms.uLedAxes = { value: axes };
+          shader.vertexShader = shader.vertexShader
+            .replace("#include <common>", "#include <common>\nvarying vec3 vLedLocal;")
+            .replace("#include <begin_vertex>", "#include <begin_vertex>\nvLedLocal = position;");
+          shader.fragmentShader = shader.fragmentShader
+            .replace(
+              "#include <common>",
+              "#include <common>\nvarying vec3 vLedLocal;\nuniform vec3 uLedCenter;\nuniform vec3 uLedHalf;\nuniform vec3 uLedAxes;",
+            )
+            .replace(
+              "#include <emissivemap_fragment>",
+              `#include <emissivemap_fragment>
+              {
+                vec3 q = (vLedLocal - uLedCenter) / max(uLedHalf, vec3(1e-5)) * uLedAxes;
+                float core = 1.0 - smoothstep(${SCREEN_LED.featherFrom.toFixed(3)}, ${SCREEN_LED.featherTo.toFixed(3)}, length(q));
+                totalEmissiveRadiance *= mix(${SCREEN_LED.edgeLevel.toFixed(3)}, 1.0, core);
+              }`,
+            );
+        };
+        // Own program per LED: its own uniforms (a shared program would reuse the first one's).
+        const key = "screenLedFeather" + m.id;
+        m.customProgramCacheKey = () => key;
+        return m;
+      }
+      /**
+       * The desk's control panel: the button strip (tableControlButtonLights)
+       * glows white, and its screen (tableControlScreen, in the strip's centre)
+       * shows "065" as a blue seven-segment LED display (DSEG7, OFL; a drawn
+       * seven-segment fallback until / unless the font loads).
+       */
+      const TABLE_CONTROL = {
+        buttonLights: { color: 0xffffff, emissiveIntensity: 12.6 }, // just over the bloom threshold (12): a subtle glow
+        display: {
+          text: "065",
+          unlit: "888", // the unlit segments behind, faintly
+          fontFamily: "DSEG7ClassicBold",
+          fontUrl: "https://cdn.jsdelivr.net/npm/dseg@0.46.0/fonts/DSEG7-Classic/DSEG7Classic-Bold.woff2",
+          canvas: { w: 512, h: 192 },
+          background: "#03060c",
+          lit: "#3d9bff", // LED blue
+          glow: "rgba(40, 140, 255, 0.85)",
+          glowBlur: 18, // canvas px
+          unlitAlpha: 0.08,
+          textHeight: 0.6, // share of the canvas height
+          gain: 1.6, // brightness of the plane (unlit, tone mapping off)
+          bloomWeight: 0.7, // soft bloom from its own colours
+          size: { w: 0.78, h: 0.62 }, // share of the screen face
+          offset: 0.003, // in front of the face (no z-fighting)
+        },
+      };
+
+      /** Seven-segment fallback: segments a–g per digit, drawn with rounded bars. */
+      const SEVEN_SEG = { 0: "abcdef", 1: "bc", 2: "abdeg", 3: "abcdg", 4: "bcfg", 5: "acdfg", 6: "acdefg", 7: "abc", 8: "abcdefg", 9: "abcdfg" };
+      function drawSevenSegText(c, text, x0, y0, digitW, digitH, gap) {
+        const t = digitW * 0.16;
+        const seg = {
+          a: [t * 0.6, 0, digitW - t * 1.2, t],
+          d: [t * 0.6, digitH - t, digitW - t * 1.2, t],
+          g: [t * 0.6, digitH / 2 - t / 2, digitW - t * 1.2, t],
+          f: [0, t * 0.6, t, digitH / 2 - t * 0.9],
+          b: [digitW - t, t * 0.6, t, digitH / 2 - t * 0.9],
+          e: [0, digitH / 2 + t * 0.3, t, digitH / 2 - t * 0.9],
+          c: [digitW - t, digitH / 2 + t * 0.3, t, digitH / 2 - t * 0.9],
+        };
+        [...text].forEach((ch, i) => {
+          const on = SEVEN_SEG[ch] || "";
+          const ox = x0 + i * (digitW + gap);
+          for (const k of on) {
+            const [sx, sy, sw, sh] = seg[k];
+            c.beginPath();
+            c.roundRect ? c.roundRect(ox + sx, y0 + sy, sw, sh, t / 2) : c.rect(ox + sx, y0 + sy, sw, sh);
+            c.fill();
+          }
+        });
+      }
+
+      function drawTableControlDisplay(c, fontReady) {
+        const D = TABLE_CONTROL.display;
+        const { w, h } = D.canvas;
+        c.clearRect(0, 0, w, h);
+        c.fillStyle = D.background;
+        c.fillRect(0, 0, w, h);
+        const th = h * D.textHeight;
+        if (fontReady) {
+          c.font = `${th}px "${D.fontFamily}"`;
+          c.textAlign = "center";
+          c.textBaseline = "middle";
+          c.fillStyle = D.lit;
+          c.globalAlpha = D.unlitAlpha;
+          c.fillText(D.unlit, w / 2, h / 2);
+          c.globalAlpha = 1;
+          c.shadowColor = D.glow;
+          c.shadowBlur = D.glowBlur;
+          c.fillText(D.text, w / 2, h / 2);
+          c.shadowBlur = 0;
+          c.fillText(D.text, w / 2, h / 2);
+        } else {
+          const digitH = th;
+          const digitW = digitH * 0.52;
+          const gap = digitW * 0.35;
+          const total = D.text.length * digitW + (D.text.length - 1) * gap;
+          const x0 = (w - total) / 2;
+          const y0 = (h - digitH) / 2;
+          c.fillStyle = D.lit;
+          c.globalAlpha = D.unlitAlpha;
+          drawSevenSegText(c, D.unlit, x0, y0, digitW, digitH, gap);
+          c.globalAlpha = 1;
+          c.shadowColor = D.glow;
+          c.shadowBlur = D.glowBlur;
+          drawSevenSegText(c, D.text, x0, y0, digitW, digitH, gap);
+          c.shadowBlur = 0;
+          drawSevenSegText(c, D.text, x0, y0, digitW, digitH, gap);
+        }
+      }
+
+      let _tableControlDisplayFontLoad = null;
+      function loadTableControlDisplayFont() {
+        const D = TABLE_CONTROL.display;
+        if (_tableControlDisplayFontLoad) return _tableControlDisplayFontLoad;
+        _tableControlDisplayFontLoad =
+          typeof FontFace === "undefined"
+            ? Promise.reject(new Error("no FontFace"))
+            : new FontFace(D.fontFamily, `url(${D.fontUrl})`).load().then((f) => {
+                document.fonts.add(f);
+                return f;
+              });
+        return _tableControlDisplayFontLoad;
+      }
+
+      /** The white button strip and the "065" display on the control panel's screen. */
+      function applyTableControlParts(model) {
+        const lights = model.getObjectByName("tableControlButtonLights");
+        if (lights && lights.isMesh) {
+          const B = TABLE_CONTROL.buttonLights;
+          lights.material = new THREE.MeshStandardMaterial({
+            color: B.color,
+            emissive: B.color,
+            emissiveIntensity: B.emissiveIntensity,
+            roughness: 0.3,
+            metalness: 0,
+          });
+        }
+        const screen = model.getObjectByName("tableControlScreen");
+        if (!screen || !screen.isMesh) return;
+        const D = TABLE_CONTROL.display;
+        // The screen's front face: the biggest face direction toward the front (+z), and its plane.
+        model.updateMatrixWorld(true);
+        const g = screen.geometry;
+        const pos = g.getAttribute("position");
+        const index = g.index;
+        const A = new THREE.Vector3();
+        const Bv = new THREE.Vector3();
+        const C = new THREE.Vector3();
+        const e1 = new THREE.Vector3();
+        const e2 = new THREE.Vector3();
+        const nrm = new THREE.Vector3();
+        const best = new THREE.Vector3();
+        const sums = new Map();
+        const tris = index ? index.count / 3 : pos.count / 3;
+        for (let t = 0; t < tris; t++) {
+          const ia = index ? index.getX(t * 3) : t * 3;
+          const ib = index ? index.getX(t * 3 + 1) : t * 3 + 1;
+          const ic = index ? index.getX(t * 3 + 2) : t * 3 + 2;
+          A.fromBufferAttribute(pos, ia).applyMatrix4(screen.matrixWorld);
+          Bv.fromBufferAttribute(pos, ib).applyMatrix4(screen.matrixWorld);
+          C.fromBufferAttribute(pos, ic).applyMatrix4(screen.matrixWorld);
+          nrm.crossVectors(e1.subVectors(Bv, A), e2.subVectors(C, A));
+          const area = nrm.length() / 2;
+          if (area <= 0) continue;
+          nrm.normalize();
+          if (nrm.z <= 0) continue;
+          const key = `${nrm.x.toFixed(1)},${nrm.y.toFixed(1)},${nrm.z.toFixed(1)}`;
+          const e = sums.get(key) || { area: 0, n: new THREE.Vector3() };
+          e.area += area;
+          e.n.addScaledVector(nrm, area);
+          sums.set(key, e);
+        }
+        let bestArea = 0;
+        for (const e of sums.values()) {
+          if (e.area > bestArea) {
+            bestArea = e.area;
+            best.copy(e.n).normalize();
+          }
+        }
+        if (bestArea <= 0) return;
+        // Face plane: the furthest vertices along the normal; face size from the box across it.
+        let front = -Infinity;
+        const box = new THREE.Box3();
+        for (let i = 0; i < pos.count; i++) {
+          A.fromBufferAttribute(pos, i).applyMatrix4(screen.matrixWorld);
+          front = Math.max(front, A.dot(best));
+          box.expandByPoint(A);
+        }
+        const center = box.getCenter(new THREE.Vector3());
+        center.addScaledVector(best, front - center.dot(best) + D.offset);
+        const right = new THREE.Vector3(1, 0, 0);
+        const up = new THREE.Vector3().crossVectors(best, right).normalize();
+        right.crossVectors(up, best).normalize();
+        const faceW = box.max.x - box.min.x;
+        const faceH = bestArea / Math.max(1e-4, faceW);
+        const planeW = faceW * D.size.w;
+        const planeH = Math.min(faceH * D.size.h, planeW * (D.canvas.h / D.canvas.w));
+        const canvas = document.createElement("canvas");
+        canvas.width = D.canvas.w;
+        canvas.height = D.canvas.h;
+        const ctx = canvas.getContext("2d");
+        drawTableControlDisplay(ctx, false);
+        const tex = new THREE.CanvasTexture(canvas);
+        tex.colorSpace = THREE.SRGBColorSpace;
+        tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
+        const mat = new THREE.MeshBasicMaterial({ map: tex, toneMapped: false });
+        mat.color.setScalar(D.gain);
+        setBloomWeight(mat, D.bloomWeight);
+        const plane = new THREE.Mesh(new THREE.PlaneGeometry(planeW, planeH), mat);
+        plane.name = "tableControlDisplay";
+        plane.position.copy(center);
+        plane.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(right, up, best));
+        plane.castShadow = false;
+        plane.receiveShadow = false;
+        scene.add(plane);
+        // Follows the screen if its part of the model moves (world placement kept).
+        if (screen.parent && screen.parent !== scene) screen.parent.attach(plane);
+        loadTableControlDisplayFont()
+          .then(() => {
+            drawTableControlDisplay(ctx, true);
+            tex.needsUpdate = true;
+          })
+          .catch(() => {
+            /* the drawn seven-segment fallback stays */
+          });
+      }
+
       function applyScreenLightsMaterial(model) {
         model.traverse((node) => {
           if (!node.isMesh) return;
@@ -10281,10 +10762,11 @@ let _officeSceneAnimationFrame = 0;
             node.name === "rightScreenLight" ||
             (node.parent && node.parent.name === "rightScreenLight")
           ) {
+            const ledMat = makeScreenLedMaterial(node);
             if (Array.isArray(node.material)) {
-              for (let i = 0; i < node.material.length; i++) node.material[i] = screenLedMaterial;
+              for (let i = 0; i < node.material.length; i++) node.material[i] = ledMat;
             } else {
-              node.material = screenLedMaterial;
+              node.material = ledMat;
             }
             node.frustumCulled = false;
             return;
@@ -13690,6 +14172,46 @@ diffuseColor.a = 1.0;
       }
 
 
+      /**
+       * office-scene1.gltf export fixes (the file lost these compared with embed94):
+       * - the figure (musa, material all_Low_Alon_001) lost its colour texture
+       *   (TEX_color): the same image, saved from embed94, is put back;
+       * - SVGMat / SVGMat.001 (cone stripes, wixLogo, certifiedTitle) lost their
+       *   PBR values, so glTF's defaults made them fully metallic: back to the
+       *   embed94 values (not metallic, roughness 0.4).
+       */
+      const OFFICE_EXPORT_FIX = {
+        musaColorMap: { material: "all_Low_Alon_001", file: "musa-color.jpg" },
+        svgMaterials: { names: ["SVGMat", "SVGMat.001"], metalness: 0, roughness: 0.4 },
+      };
+      function fixOfficeSceneExport(model) {
+        const F = OFFICE_EXPORT_FIX;
+        const seen = new Set();
+        model.traverse((node) => {
+          if (!node.isMesh) return;
+          const mats = Array.isArray(node.material) ? node.material : [node.material];
+          for (const m of mats) {
+            if (!m || seen.has(m)) continue;
+            seen.add(m);
+            if (F.svgMaterials.names.includes(m.name) && m.isMeshStandardMaterial) {
+              m.metalness = F.svgMaterials.metalness;
+              m.roughness = F.svgMaterials.roughness;
+              m.needsUpdate = true;
+            }
+            if (m.name === F.musaColorMap.material && !m.map) {
+              // Attached right away (the image fills in when it arrives): the office
+              // later swaps the figure's material and copies this map across.
+              const tex = new THREE.TextureLoader().load(officeAsset(F.musaColorMap.file));
+              tex.flipY = false; // as the GLTFLoader sets up its own textures
+              tex.colorSpace = THREE.SRGBColorSpace;
+              tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
+              m.map = tex;
+              m.needsUpdate = true;
+            }
+          }
+        });
+      }
+
       const OFFICE_PARTS_SUPPLEMENT_GLTF = officeAsset("office-table-embed87.gltf");
       const OFFICE_SUPPLEMENT_PART_NAMES = [
         "conus2", "conusStrips2", "conusPhysic2",
@@ -14103,7 +14625,7 @@ diffuseColor.a = 1.0;
         });
 
         window.officeMeshParts = parts;
-        console.log("office-table-embed94.gltf parts:", parts);
+        console.log("office-scene1.gltf parts:", parts);
         return parts;
       }
 
@@ -14136,10 +14658,11 @@ diffuseColor.a = 1.0;
         airPlaneFlight.pathBuilt = false;
       });
       loader.load(
-        officeAsset("office-table-embed94.gltf"),
+        officeAsset(OFFICE_SCENE_GLTF),
         (gltf) => {
           logOfficeMeshParts(gltf);
           const model = gltf.scene;
+          fixOfficeSceneExport(model);
           scene.add(model);
           _officeWorldRoot = model;
           _currentWorldModel = model;
@@ -14161,7 +14684,7 @@ diffuseColor.a = 1.0;
                 });
                 if (!src) {
                   console.warn(
-                    "No outdoorBackground in office-table-embed94.gltf or fallback " +
+                    "No outdoorBackground in office-scene1.gltf or fallback " +
                       OUTDOOR_FALLBACK_GLTF +
                       ". Re-export embed36 with an object named outdoorBackground.",
                   );
@@ -14928,6 +15451,7 @@ diffuseColor.a = 1.0;
           registerGamingEmissive(headphonesLightMaterial, "headphonesLight");
           registerGamingEmissive(roomLightMaterial, "roomLight");
           applyScreenLightsMaterial(model);
+          applyTableControlParts(model);
           applyTableControlScreenMaterial(model);
           applyPenMaterials(model);
           applyDuckMaterials(model);
@@ -15608,7 +16132,7 @@ diffuseColor.a = 1.0;
         },
         undefined,
         (err) => {
-          console.error("[office] office-table-embed94.gltf failed to load:", err);
+          console.error("[office] office-scene1.gltf failed to load:", err);
         },
       );
 
@@ -16490,6 +17014,56 @@ diffuseColor.a = 1.0;
         return body && body._carDisturbedUntil && performance.now() < body._carDisturbedUntil;
       }
 
+      /** A gum leaving the bottom hole: a random sideways push, so they spread out over the table. */
+      function kickExitedGum(body) {
+        const G = GUM_TABLE;
+        const vx = body.velocity.x;
+        const vz = body.velocity.z;
+        const base = vx * vx + vz * vz > 0.25 ? Math.atan2(vz, vx) : Math.random() * Math.PI * 2;
+        const a = base + (Math.random() - 0.5) * 2 * THREE.MathUtils.degToRad(G.spreadDeg);
+        const speed = G.exitKick.min + Math.random() * (G.exitKick.max - G.exitKick.min);
+        body.velocity.x += Math.cos(a) * speed;
+        body.velocity.z += Math.sin(a) * speed;
+      }
+
+      /**
+       * After each physics step: gums on the table never below its top (the car
+       * is kinematic, so a gum pressed between it and the static table was
+       * pushed through the top; lifted back, the solver pushes it out sideways),
+       * and turned back softly at the table's edge.
+       */
+      function protectGumsOnTable() {
+        if (!Number.isFinite(tablePlateHalfX) || !gumsAddedCount) return false;
+        let lifted = false;
+        const G = GUM_TABLE;
+        const top = getTableTopY();
+        const r = gumRadiusGlobal;
+        const cx = tablePlateCenter.x;
+        const cz = tablePlateCenter.z;
+        const edgeX = tablePlateHalfX - r * G.edgeMargin;
+        const edgeZ = tablePlateHalfZ - r * G.edgeMargin;
+        const minY = top + r * (1 - G.sinkTolerance);
+        for (let i = 0; i < gumsAddedCount; i++) {
+          const b = gumBodies[i];
+          if (!b._exitedGumTank) continue;
+          const dx = b.position.x - cx;
+          const dz = b.position.z - cz;
+          if (Math.abs(dx) > tablePlateHalfX || Math.abs(dz) > tablePlateHalfZ) continue; // off the table
+          const y = b.position.y;
+          if (y < top - G.plateThickness) continue; // already fell past the table
+          if (y < minY) {
+            b.position.y = top + r;
+            if (b.velocity.y < 0) b.velocity.y = 0;
+            if (b.type === CANNON.Body.STATIC) b.aabbNeedsUpdate = true;
+            lifted = true;
+          }
+          if (b.type !== CANNON.Body.DYNAMIC || y > top + r * 3) continue;
+          if (Math.abs(dx) > edgeX && dx * b.velocity.x > 0) b.velocity.x *= -G.edgeBounce;
+          if (Math.abs(dz) > edgeZ && dz * b.velocity.z > 0) b.velocity.z *= -G.edgeBounce;
+        }
+        return lifted;
+      }
+
       function syncGumInstancedTransforms() {
         if (!gumInstancedMesh) return;
         const mesh = gumInstancedMesh;
@@ -16681,6 +17255,7 @@ diffuseColor.a = 1.0;
               body.allowSleep = true; // out of the tank: may rest again
               // Out of the machine: spin dies down like the cup release's gums, so they come to rest.
               body.angularDamping = Math.max(body.angularDamping, GUM_EXITED_ANGULAR_DAMPING);
+              kickExitedGum(body);
             }
             continue;
           }
@@ -18238,6 +18813,7 @@ diffuseColor.a = 1.0;
             }
           }
 
+          protectKnockables();
           syncBottleFromPhysics();
           syncCertifiedFromPhysics();
           syncGumDispenserFromPhysics();
@@ -18258,7 +18834,8 @@ diffuseColor.a = 1.0;
             gumTankAllStaticThisFrame &&
             _gumPrevFrameTankAllStatic &&
             !_dispenserMoving;
-          if (!_skipGumInstSync || gumsTankBusy) syncGumInstancedTransforms();
+          const _gumsLifted = protectGumsOnTable();
+          if (!_skipGumInstSync || gumsTankBusy || _gumsLifted) syncGumInstancedTransforms();
           _gumPrevFrameTankAllStatic = gumTankAllStaticThisFrame;
 
           syncSceneShadows();
@@ -18395,6 +18972,13 @@ diffuseColor.a = 1.0;
               applyCarCameraLookAtCar();
             }
           }
+          // The mouse drag's offset (its own orbit controls' mouse rotate / pan are replaced by it on desktop).
+          if (officeCameraDrag.desktop && controls) {
+            controls.enableRotate = false;
+            controls.enablePan = false;
+          }
+          officeCameraDrag.update(Math.min(rawDt, 0.1));
+          if (car) officeCameraDrag.apply(camera, getCarCameraLookAtPoint(_officeDragTarget));
           // Intro: its camera only for this frame's render (camera 1 is restored right after).
           updateOfficeSceneReady();
           const introPose = updateOfficeIntro(rawDt);
@@ -18423,8 +19007,10 @@ diffuseColor.a = 1.0;
           finalComposer.render();
           if (sceneBloomEnabled) setCarLightsEmissiveForMainPass(false);
           officeIntro.restoreCamera();
+          officeCameraDrag.restore(camera);
         } catch (e) {
           officeIntro.restoreCamera();
+          officeCameraDrag.restore(camera);
           console.error("Animate error:", e);
         }
       }

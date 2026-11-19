@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { Label, Panel, Snap } from "./ui/ui.jsx";
 import "./ui/loaders.css";
+import { createCameraDrag } from "./cameraDrag.js";
 
 const TRANSITION_DURATION = 8600;
 const TRANSITION_STRIP_COLORS = [
@@ -27,6 +28,11 @@ const TRANSITION_STRIPS = Array.from({ length: 120 }, (_, index) => {
 const CAPTION_EYEBROW = "Page 02 · Kitchen";
 /** Caption entrance delay (ms). */
 const CAPTION_DELAY_MS = 200;
+/**
+ * The mouse camera drag (cameraDrag.js, "kitchenTransition") is off this long
+ * before the transition ends (ms): it springs back to the fixed angle in time.
+ */
+const CAMERA_DRAG_END_MS = 1200; // the spring is exactly back at zero in ~1 s
 
 export default function WorldTransition({ onComplete, description }) {
   const stageRef = useRef(null);
@@ -47,6 +53,8 @@ export default function WorldTransition({ onComplete, description }) {
 
     let disposed = false;
     let animationFrame = 0;
+    const mountedAt = performance.now();
+    let cameraDrag = null;
     let resizeObserver = null;
     let renderer = null;
     let carPivot = null;
@@ -75,6 +83,14 @@ export default function WorldTransition({ onComplete, description }) {
       renderer.toneMappingExposure = 0.72;
       renderer.setClearColor(0x000000, 0);
       stage.appendChild(renderer.domElement);
+      // Drag to orbit round the scene's centre; never changes the transition's timing.
+      const cameraDragTarget = new THREE.Vector3(0, 0, 0);
+      cameraDrag = createCameraDrag({
+        THREE,
+        element: renderer.domElement,
+        scene: "kitchenTransition",
+        isEnabled: () => performance.now() - mountedAt < TRANSITION_DURATION - CAMERA_DRAG_END_MS,
+      });
 
       scene.add(new THREE.HemisphereLight(0xbce8ff, 0x33125c, 0.8));
       const keyLight = new THREE.DirectionalLight(0xffffff, 1.6);
@@ -424,7 +440,10 @@ export default function WorldTransition({ onComplete, description }) {
               7 + stripEase * 4.2 + Math.sin(elapsed * 4 + index) * 0.65;
           });
         }
+        cameraDrag.update(delta);
+        cameraDrag.apply(camera, cameraDragTarget);
         renderer.render(scene, camera);
+        cameraDrag.restore(camera);
         animationFrame = requestAnimationFrame(animate);
       };
       animationFrame = requestAnimationFrame(animate);
@@ -433,6 +452,10 @@ export default function WorldTransition({ onComplete, description }) {
     return () => {
       disposed = true;
       cancelAnimationFrame(animationFrame);
+      if (cameraDrag) {
+        cameraDrag.reset();
+        cameraDrag.dispose();
+      }
       resizeObserver?.disconnect();
       if (carPivot) disposeObject(carPivot);
       if (lightPipe) disposeObject(lightPipe);

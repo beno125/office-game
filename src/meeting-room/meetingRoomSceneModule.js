@@ -19,6 +19,7 @@ import { COUNTDOWN_GO_TEXT, COUNTDOWN_STEP_TONE, drawCountdown } from "../game/u
 import { createTouchDrive } from "../game/touch/touchDrive.js";
 import { SCENE_ROUTES, nextLevelPath, goToLevelWithTransition } from "../game/sceneRoutes.js";
 import { createCinematicIntro, introEaseSine, introLerp } from "../game/cinematicIntro.js";
+import { createCameraDrag } from "../game/cameraDrag.js";
 
 /**
  * Dev-only perf tooling (both false in production builds):
@@ -12024,6 +12025,30 @@ function _perfEndFrame(dt) {
   p.acc = 0;
 }
 
+/**
+ * Drag the camera with the mouse (shared, cameraDrag.js): an offset round the
+ * arena view's target, springing back on release; only while the round is
+ * live, on the arena view (not the Digit1 car-follow view).
+ */
+const meetingRoomCameraDrag = createCameraDrag({
+  THREE,
+  element: canvas,
+  scene: "meetingRoom",
+  isEnabled: () =>
+    _meetingRoomSceneRendering &&
+    (!_mrIntro.enabled || _mrIntro.state === "done") &&
+    _arenaGame.phase === "live" &&
+    !_carFollowCam,
+  collisionObjects: () => (_model ? [_model] : []),
+  ignore: (obj) => {
+    for (let x = obj; x; x = x.parent) {
+      if (x === car) return true;
+      for (let i = 0; i < arenaCars.length; i++) if (x === arenaCars[i].car) return true;
+    }
+    return false;
+  },
+});
+
 function animate() {
   _meetingRoomSceneAnimationFrame = 0;
   if (!_meetingRoomSceneRendering) return;
@@ -12071,11 +12096,20 @@ function animate() {
   updateArenaScreens(dt);
   updateArenaReplay(dt);
   controls.update();
+  // The mouse drag's offset round the arena view's target (under the shake and the intro camera).
+  if (meetingRoomCameraDrag.desktop) {
+    // On the arena view the drag replaces the orbit controls' mouse rotate / pan.
+    controls.enableRotate = _carFollowCam;
+    controls.enablePan = _carFollowCam;
+  }
+  meetingRoomCameraDrag.update(dt);
+  if (!_carFollowCam) meetingRoomCameraDrag.apply(camera, controls.target);
   applyCameraShake(dt);
   const introCam = applyMeetingRoomIntroCamera(dt);
   renderer.render(scene, camera);
   if (introCam) _mrIntro.restoreCamera();
   clearCameraShake();
+  meetingRoomCameraDrag.restore(camera);
   if (MR_PERF) _perfEndFrame(dt);
 }
 

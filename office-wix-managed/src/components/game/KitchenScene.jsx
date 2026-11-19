@@ -49,8 +49,17 @@ export default function KitchenScene({ waitForTransition = false }) {
     return () => window.clearTimeout(timer);
   }, []);
 
+  // While the transition covers it, the ready kitchen doesn't render (it's hidden;
+  // the transition gets the GPU to itself). It resumes for the intro.
+  const revealRef = useRef(false);
+  revealRef.current = reveal;
+  const holdUntilReveal = () => {
+    if (!revealRef.current) moduleRef.current?.setKitchenSceneRendering?.(false);
+  };
+
   useEffect(() => {
     if (!reveal) return;
+    moduleRef.current?.setKitchenSceneRendering?.(true);
     moduleRef.current?.startKitchenIntro?.();
     const timer = window.setTimeout(() => setLoaderGone(true), LOADER_FADE_MS);
     return () => window.clearTimeout(timer);
@@ -84,6 +93,7 @@ export default function KitchenScene({ waitForTransition = false }) {
     const unsubscribeReady = onKitchenSceneEvent("ready", () => {
       if (disposed) return;
       setSceneReady(true);
+      holdUntilReveal();
     });
 
     import("../kitchen/kitchenSceneModule.js")
@@ -93,6 +103,7 @@ export default function KitchenScene({ waitForTransition = false }) {
         module.setKitchenSceneRendering(!disposed);
         if (disposed || !module.isKitchenSceneReady()) return;
         setSceneReady(true);
+        holdUntilReveal();
       })
       .catch((error) => {
         if (disposed) return;

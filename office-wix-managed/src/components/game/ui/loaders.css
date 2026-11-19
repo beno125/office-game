@@ -3,13 +3,24 @@
   --wx-caption-bottom: clamp(28px, 10vh, 88px); /* level caption distance from the bottom */
 }
 
-/* Level caption under the car: a small frosted panel that snaps into place. */
+/*
+ * Level caption under the car: a small panel that snaps into place.
+ * It flickered: it sat under the transition's 3D canvas (z-index 3), whose
+ * glowing light strips were drawn across the text every frame, and its panel
+ * let the racing strips behind it show through. Now above the canvas, nearly
+ * opaque, and on its own compositing layer (not repainted with the animation).
+ */
+:root {
+  --wx-caption-z: 5; /* above the transition's 3D canvas (3) and its copy (4) */
+  --wx-caption-surface: rgba(13, 15, 21, 0.94);
+}
 .wx-level-caption {
   position: absolute;
   left: 50%;
   bottom: var(--wx-caption-bottom);
-  z-index: 2;
-  transform: translateX(-50%);
+  z-index: var(--wx-caption-z);
+  transform: translateX(-50%) translateZ(0);
+  will-change: transform;
   width: max-content;
   max-width: min(34rem, calc(100% - 32px));
   pointer-events: none;
@@ -18,7 +29,7 @@
   display: grid;
   gap: var(--wx-space-2);
   padding: var(--wx-space-4) var(--wx-space-5);
-  background: var(--wx-surface-strong);
+  background: var(--wx-caption-surface);
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
   text-align: left;
