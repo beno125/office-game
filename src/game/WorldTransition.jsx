@@ -37,7 +37,7 @@ const CAMERA_DRAG_END_MS = 1200; // the spring is exactly back at zero in ~1 s
 /**
  * The car's pass, after the lines' release (transitionStrips.js STRIP_SEQUENCE):
  * hidden until the lines reach full speed, then it rushes in from deep in the
- * tunnel (a few px at the vanishing point) and flies through the camera with
+ * tunnel (a few px at the vanishing point) and flies just past the camera with
  * the punch. Its distance to the camera shrinks exponentially (the same growth
  * rate on screen all the way, smooth speed), crossing zero and going behind.
  */
@@ -47,9 +47,26 @@ const CAR_PASS = {
   from: 1200, // distance in front of the camera at the start (world units: the car is 4.8 long → ~6 px; was 2500)
   to: -12, // distance at the end (behind the camera, out of view)
   curveOffset: 20, // shapes the approach: distance = (from + c)·((to + c)/(from + c))^u − c
-  /** Slight camera shake while the car is this close (world units), at most this far (world units). */
-  shake: { within: 14, amount: 0.045, frequency: 31 },
+  /**
+   * Its lane: it passes just beside and below the camera (world units off the camera's axis) instead of
+   * through it, so it sweeps out of the frame's lower left while huge. Far away the offset is invisible.
+   */
+  lane: { x: -2.1, y: -0.9 },
+  /** Camera shake while the car is this close (world units), at most this far (world units). Was 14 / 0.045. */
+  shake: { within: 28, amount: 0.11, frequency: 31 },
+  /**
+   * The moment it passes the camera: field of view +6° and the lines' glow +70%, as a smooth bump this wide
+   * (s, the bump's half width), then exactly back to normal.
+   */
+  impact: { fov: 6, glow: 0.7, width: 0.28 },
 };
+{
+  const c = CAR_PASS.curveOffset;
+  const passU = Math.log(c / (CAR_PASS.from + c)) / Math.log((CAR_PASS.to + c) / (CAR_PASS.from + c)); // distance 0
+  CAR_PASS.passAt = CAR_PASS.startAt + passU * CAR_PASS.duration;
+}
+/** 0 → 1 → 0 around the moment the car passes the camera. */
+const carImpactAt = (t) => Math.exp(-(((t - CAR_PASS.passAt) / CAR_PASS.impact.width) ** 2));
 /** The light bar copies on the car's roof, as in the other scenes (lightBarBody1 + lightBar1, 2 on each side). */
 const CAR_LIGHT_BAR_COPIES = { perSide: 2, spacing: 1.6 };
 
@@ -70,7 +87,13 @@ export default function WorldTransition({ onComplete, description }) {
   }, []);
 
   // The flying coloured lines (drawn on a canvas: always complete on screen).
-  useEffect(() => startTransitionStrips(stripsRef.current, TRANSITION_STRIPS, sceneStartRef.current), []);
+  useEffect(
+    () =>
+      startTransitionStrips(stripsRef.current, TRANSITION_STRIPS, sceneStartRef.current, {
+        glowAt: (t) => 1 + CAR_PASS.impact.glow * carImpactAt(t), // the lines flare as the car passes
+      }),
+    [],
+  );
 
   useEffect(() => {
     const stage = stageRef.current;
@@ -473,8 +496,8 @@ export default function WorldTransition({ onComplete, description }) {
           const distance = (CAR_PASS.from + c) * Math.pow((CAR_PASS.to + c) / (CAR_PASS.from + c), Math.min(Math.max(passU, 0), 1)) - c;
           carPivot.visible = passU >= 0 && passU <= 1;
           carPivot.position.z = camera.position.z - distance;
-          carPivot.position.x = 0;
-          carPivot.position.y = Math.sin(elapsed * 2.8) * 0.035;
+          carPivot.position.x = CAR_PASS.lane.x;
+          carPivot.position.y = CAR_PASS.lane.y + Math.sin(elapsed * 2.8) * 0.035;
           carPivot.rotation.y = 0;
           carPivot.rotation.z = Math.sin(elapsed * 2.1) * 0.008;
           stripCarLights.forEach((light, index) => {
@@ -493,7 +516,7 @@ export default function WorldTransition({ onComplete, description }) {
           });
         }
         // The sequence's field of view (exactly the normal value once it's over).
-        const fov = baseFov + stripSequenceAt(elapsed).fov;
+        const fov = baseFov + stripSequenceAt(elapsed).fov + CAR_PASS.impact.fov * carImpactAt(elapsed);
         if (camera.fov !== fov) {
           camera.fov = fov;
           camera.updateProjectionMatrix();

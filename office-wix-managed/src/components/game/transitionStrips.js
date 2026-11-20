@@ -179,9 +179,10 @@ function cubicBezier(x1, y1, x2, y2) {
  * @param {HTMLCanvasElement} canvas  fills the strips container
  * @param {{angle:number,color:string,delay:number,duration:number,length:number,start:number,width:number}[]} strips
  * @param {number} [startTime]  performance.now() of the scene's start (shared with the car)
+ * @param {{ glowAt?: (t: number) => number }} [extra]  an extra glow multiplier at scene time t (the car's pass)
  * @returns {() => void} stop
  */
-export function startTransitionStrips(canvas, strips, startTime = performance.now()) {
+export function startTransitionStrips(canvas, strips, startTime = performance.now(), extra = {}) {
   const F = STRIP_FLIGHT;
   const ease = cubicBezier(...F.curve);
   const fadeEase = ease; // the old keyframes used the same curve between opacity steps
@@ -290,7 +291,8 @@ export function startTransitionStrips(canvas, strips, startTime = performance.no
     }
     const T = flightClock;
     const q = stripSequenceAt(t);
-    const { bright, glow: glowBoost } = q;
+    const { bright } = q;
+    const glowBoost = q.glow * (extra.glowAt ? extra.glowAt(t) : 1);
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     if (reduceMotion) return;
