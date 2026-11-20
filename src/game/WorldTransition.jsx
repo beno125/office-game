@@ -37,21 +37,23 @@ const CAMERA_DRAG_END_MS = 1200; // the spring is exactly back at zero in ~1 s
 /**
  * The car's pass, after the lines' release (transitionStrips.js STRIP_SEQUENCE):
  * hidden until the lines reach full speed, then it rushes in from deep in the
- * tunnel (a few px at the vanishing point) and flies just past the camera with
- * the punch. Its distance to the camera shrinks exponentially (the same growth
- * rate on screen all the way, smooth speed), crossing zero and going behind.
+ * tunnel (a few px at the vanishing point) and flies through the camera with
+ * the punch: a fast entrance easing to a short hover, then accelerating through
+ * (see `entrance`). Its distance runs on a log scale (even growth on screen),
+ * crossing zero and going behind.
  */
 const CAR_PASS = {
   startAt: STRIP_SEQUENCE.fullAt, // s after the scene starts: as the lines hit full speed (the punch)
   duration: 2.6, // s, from deep in the tunnel to just behind the camera (passes the camera at ~2.1 s; was 0.95, then 1.6)
   from: 1200, // distance in front of the camera at the start (world units: the car is 4.8 long → ~6 px; was 2500)
   to: -12, // distance at the end (behind the camera, out of view)
-  curveOffset: 20, // shapes the approach: distance = (from + c)·((to + c)/(from + c))^u − c
+  curveOffset: 20, // shapes the approach: distance = (from + c)·((to + c)/(from + c))^g − c
   /**
-   * Its lane: it passes just beside and below the camera (world units off the camera's axis) instead of
-   * through it, so it sweeps out of the frame's lower left while huge. Far away the offset is invisible.
+   * The entrance's easing (g above, over time u): it rushes in from deep in the tunnel and eases out to a
+   * hover at `hangDistance` (world units, ~130 px wide) at `hangAt` of the pass, keeping `keep` of its speed
+   * there, then eases in and accelerates through the camera.
    */
-  lane: { x: -2.1, y: -0.9 },
+  entrance: { hangAt: 0.55, hangDistance: 22, keep: 0.15 },
   /** Camera shake while the car is this close (world units), at most this far (world units). Was 14 / 0.045. */
   shake: { within: 28, amount: 0.11, frequency: 31 },
   /**
@@ -60,10 +62,29 @@ const CAR_PASS = {
    */
   impact: { fov: 6, glow: 0.7, width: 0.28 },
 };
+/** The car's distance in front of the camera at pass progress u (0 → 1). */
+function carPassDistance(u) {
+  const { from, to, curveOffset: c, entrance: E } = CAR_PASS;
+  const ratio = (to + c) / (from + c);
+  const gHang = Math.log((E.hangDistance + c) / (from + c)) / Math.log(ratio);
+  const x = Math.min(Math.max(u, 0), 1);
+  let g;
+  if (x < E.hangAt) {
+    const s = x / E.hangAt; // fast in, easing out to the hover
+    g = gHang * (E.keep * s + (1 - E.keep) * (1 - (1 - s) ** 3));
+  } else {
+    const s = (x - E.hangAt) / (1 - E.hangAt); // easing in from the hover, accelerating through the camera
+    g = gHang + (1 - gHang) * (E.keep * s + (1 - E.keep) * s ** 3);
+  }
+  return (from + c) * Math.pow(ratio, g) - c;
+}
 {
-  const c = CAR_PASS.curveOffset;
-  const passU = Math.log(c / (CAR_PASS.from + c)) / Math.log((CAR_PASS.to + c) / (CAR_PASS.from + c)); // distance 0
-  CAR_PASS.passAt = CAR_PASS.startAt + passU * CAR_PASS.duration;
+  let lo = 0, hi = 1; // the moment it passes the camera (distance 0)
+  for (let i = 0; i < 40; i++) {
+    const mid = (lo + hi) / 2;
+    if (carPassDistance(mid) > 0) lo = mid; else hi = mid;
+  }
+  CAR_PASS.passAt = CAR_PASS.startAt + lo * CAR_PASS.duration;
 }
 /** 0 → 1 → 0 around the moment the car passes the camera. */
 const carImpactAt = (t) => Math.exp(-(((t - CAR_PASS.passAt) / CAR_PASS.impact.width) ** 2));
@@ -492,12 +513,11 @@ export default function WorldTransition({ onComplete, description }) {
         );
         if (carPivot) {
           const passU = (elapsed - CAR_PASS.startAt) / CAR_PASS.duration;
-          const c = CAR_PASS.curveOffset;
-          const distance = (CAR_PASS.from + c) * Math.pow((CAR_PASS.to + c) / (CAR_PASS.from + c), Math.min(Math.max(passU, 0), 1)) - c;
+          const distance = carPassDistance(passU);
           carPivot.visible = passU >= 0 && passU <= 1;
           carPivot.position.z = camera.position.z - distance;
-          carPivot.position.x = CAR_PASS.lane.x;
-          carPivot.position.y = CAR_PASS.lane.y + Math.sin(elapsed * 2.8) * 0.035;
+          carPivot.position.x = 0;
+          carPivot.position.y = Math.sin(elapsed * 2.8) * 0.035;
           carPivot.rotation.y = 0;
           carPivot.rotation.z = Math.sin(elapsed * 2.1) * 0.008;
           stripCarLights.forEach((light, index) => {
