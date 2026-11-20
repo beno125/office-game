@@ -16,16 +16,19 @@
 
 /** Defaults (angles in degrees). */
 export const CAMERA_DRAG = {
-  /** Degrees of (unresisted) orbit per pixel dragged. */
-  sensitivity: 0.22,
-  /** Soft maximum offsets (never passed). */
-  maxYaw: 40,
+  /** Degrees of (unresisted) orbit per pixel dragged (was 0.22: the wider yaw needs a shorter drag). */
+  sensitivity: 0.35,
+  /**
+   * Soft maximum offsets (never passed), the same to both sides (±). Yaw was 40: now ~110° takes a ~480 px drag.
+   * Pitch: ±maxPitch, scaled down to the smaller of the two sides the elevation limits leave (so it's symmetric).
+   */
+  maxYaw: 120,
   maxPitch: 17,
   /**
-   * Resistance curve: offset = max · tanh(drag / (max · resistance)).
-   * 1: the first part of the drag moves it 1:1; higher: resistance starts earlier.
+   * Resistance curve: offset = max · tanh(drag / (max · resistance)), the same for both directions.
+   * The first part of the drag moves it 1:1; lower: the soft limit comes in sooner (was 1.15).
    */
-  resistance: 1.15,
+  resistance: 0.9,
   /** The orbit never goes below / above these elevations (degrees above the target's horizon). */
   minElevation: 3,
   maxElevation: 78,
@@ -45,8 +48,9 @@ export const CAMERA_DRAG_SCENES = {
   office: {},
   kitchen: {},
   meetingRoom: {},
-  kitchenTransition: { maxYaw: 28, maxPitch: 12, minElevation: -40, maxElevation: 40 },
-  signTransition: { maxYaw: 22, maxPitch: 10, minElevation: -30, maxElevation: 30 },
+  // Their own smaller, symmetric limits, and the drag feel they had (sensitivity / resistance before the levels' change).
+  kitchenTransition: { maxYaw: 28, maxPitch: 12, minElevation: -40, maxElevation: 40, sensitivity: 0.22, resistance: 1.15 },
+  signTransition: { maxYaw: 22, maxPitch: 10, minElevation: -30, maxElevation: 30, sensitivity: 0.22, resistance: 1.15 },
 };
 
 const DEG = Math.PI / 180;
@@ -176,7 +180,9 @@ export function createCameraDrag(o) {
     _qYaw.setFromAxisAngle(_up, st.yaw * DEG);
     _v.applyQuaternion(_qYaw);
     const elev0 = Math.asin(Math.max(-1, Math.min(1, _v.y / r)));
-    const elev = Math.max(C.minElevation * DEG, Math.min(C.maxElevation * DEG, elev0 + st.pitch * DEG));
+    // Symmetric pitch: the same range up and down, as wide as the closer elevation limit allows.
+    const pitchRoom = Math.max(0, Math.min(C.maxPitch, elev0 / DEG - C.minElevation, C.maxElevation - elev0 / DEG));
+    const elev = elev0 + (st.pitch / C.maxPitch) * pitchRoom * DEG;
     _axis.set(_v.z, 0, -_v.x);
     if (_axis.lengthSq() < 1e-10) _axis.set(1, 0, 0);
     _axis.normalize();
