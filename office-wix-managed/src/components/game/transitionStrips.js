@@ -79,19 +79,13 @@ export const STRIP_SEQUENCE = {
    */
   release: { duration: 0.8, from: 0.7, curve: (u) => 1 - (1 - u) ** 3 },
   /**
-   * After the release, one wave flowing into the normal flight: the released lines are the burst wave (each
-   * pushed a little further along its flight, up to `stagger` of it, so they don't move as one ring) and retire
-   * once they've left the screen; a stream of the same lines starts at the release, each at a random point of
-   * its first cycle (spread over the whole cycle), so the tunnel fills behind the wave at full density at once.
-   * (Was: every line restarted together from the cluster, so they left and came back together: a second wave.)
+   * After the release, one field: every line leaves the cluster and gets its own extra push along its flight,
+   * evenly spread from none to `advance` of a cycle (random per line), given over `duration` s (`curve`,
+   * fast at once and easing off; the same curve for every line). The field spreads continuously from the
+   * centre outward, with no front, and ends spread out as in the normal flight, so its restarts are spread
+   * too. (Was: the released lines and a separate stream of new lines, each group moving as its own front.)
    */
-  stream: { stagger: 0.04 },
-  /**
-   * The burst wave's own push: it starts at the very beginning of its flight, where the path's curve is
-   * nearly flat (it crawled out at ~10 px/s for the first frames). Its flight runs `boost`× faster at the
-   * release, easing back to 1× over `duration` s, so it explodes out at once and still only accelerates.
-   */
-  burstBoost: { boost: 8, duration: 0.55 },
+  spread: { advance: 0.9, duration: 0.6, curve: (u) => 1 - (1 - u) ** 4 },
   /** The flash at the moment of release: line glow +120% and the centre glow up to this opacity, fading over this long (s). */
   flash: { glow: 1.2, opacity: 0.6, duration: 0.35 },
   /**
@@ -200,18 +194,21 @@ export function startTransitionStrips(canvas, strips, startTime = performance.no
   let flightClock = 0; // s of flight at full speed (the lines' own time)
   let clockAt = 0; // scene time the clock was last advanced to
   let released = false;
-  let burstClock = 0; // the burst wave's flight clock (the flight clock with its push)
 
   // Each line: when its current flight began (flight-clock s). Negative delays: already mid-flight at the start (as before).
   // All of them on screen from the first frame. Every few: a faint trace (sucked in less).
   const random = (i, salt) => { const x = Math.sin(i * 12.9898 + salt * 78.233) * 43758.5453; return x - Math.floor(x); };
-  const burstLines = strips.map((s, i) => {
+  const lines = strips.map((s, i) => {
     const rad = (s.angle * Math.PI) / 180;
-    return { ...s, sin: Math.sin(rad), cos: Math.cos(rad), born: s.delay, trace: i % SEQ.traces.every === 0, burst: true };
+    // push: this line's share of the release's spread (evenly distributed, random per line)
+    const push = ((i + random(i, 1)) / strips.length) * SEQ.spread.advance;
+    return { ...s, sin: Math.sin(rad), cos: Math.cos(rad), born: s.delay, trace: i % SEQ.traces.every === 0, push };
   });
-  // The stream after the release (not drawn before it): the same lines, each at a random point of its first cycle.
-  const streamLines = burstLines.map((l, i) => ({ ...l, trace: false, burst: false, stream: true, waitFor: random(i, 1) }));
-  let lines = burstLines;
+  // Shuffle which line gets which push (the angles follow the index).
+  for (let i = lines.length - 1; i > 0; i--) {
+    const j = Math.floor(random(i, 3) * (i + 1));
+    [lines[i].push, lines[j].push] = [lines[j].push, lines[i].push];
+  }
 
   let W = 0, H = 0, dpr = 1, frame = 0;
   const resize = () => {
@@ -272,10 +269,7 @@ export function startTransitionStrips(canvas, strips, startTime = performance.no
     // Advance the flight clock by the speed (integrated: a slow frame moves the lines the same distance).
     while (clockAt < t) {
       const h = Math.min(SEQ.step, t - clockAt);
-      const v = stripSequenceAt(clockAt + h / 2).speed * h;
-      flightClock += v;
-      const u = Math.min(1, Math.max(0, (clockAt + h / 2 - SEQ.releaseAt) / SEQ.burstBoost.duration));
-      burstClock += v * (1 + (SEQ.burstBoost.boost - 1) * (1 - u) ** 2);
+      flightClock += stripSequenceAt(clockAt + h / 2).speed * h;
       clockAt += h;
     }
     const vmin = Math.min(window.innerWidth, window.innerHeight) / 100;
@@ -286,19 +280,18 @@ export function startTransitionStrips(canvas, strips, startTime = performance.no
       const atPeak = stripSequenceAt(SEQ.releaseAt - 1e-6);
       const after = stripSequenceAt(SEQ.releaseAt);
       const clockAtRelease = 0; // the flight is still until the release
-      burstLines.forEach((l, i) => {
+      lines.forEach((l) => {
         const target = place(l, (clockAtRelease - l.born) / l.duration, vmin, vmax, {}, atPeak).r0;
         let lo = 0, hi = 1;
         for (let k = 0; k < 30; k++) {
           const mid = (lo + hi) / 2;
           if (place(l, mid, vmin, vmax, pos, after).r0 < target) lo = mid; else hi = mid;
         }
-        l.born = clockAtRelease - (lo + SEQ.stream.stagger * random(i, 2)) * l.duration;
+        l.born = clockAtRelease - lo * l.duration;
       });
-      // The stream starts now: line i comes out of the centre after waitFor × its cycle.
-      for (const l of streamLines) l.born = clockAtRelease + l.waitFor * l.duration;
-      lines = burstLines.concat(streamLines);
     }
+    // The release's spread so far (0 → 1), the same for every line.
+    const spread = released ? SEQ.spread.curve(Math.min(1, (t - SEQ.releaseAt) / SEQ.spread.duration)) : 0;
     const T = flightClock;
     const q = stripSequenceAt(t);
     const { bright } = q;
@@ -320,15 +313,9 @@ export function startTransitionStrips(canvas, strips, startTime = performance.no
     }
 
     for (const l of lines) {
-      if (l.retired) continue;
-      let p = ((l.burst ? burstClock : T) - l.born) / l.duration;
-      if (p < 0) continue; // a stream line not out yet
-      // Back to the start only once the flight is over AND it has fully left the screen (the burst wave retires then).
+      let p = (T - l.born) / l.duration + l.push * spread;
+      // Back to the start only once the flight is over AND it has fully left the screen.
       if (p >= 1 && offScreen(l, place(l, 1, vmin, vmax, pos, q))) {
-        if (l.burst && released) {
-          l.retired = true;
-          continue;
-        }
         l.born += Math.floor(p) * l.duration;
         p -= Math.floor(p);
       }

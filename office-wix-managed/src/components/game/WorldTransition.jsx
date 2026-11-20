@@ -44,7 +44,7 @@ const CAMERA_DRAG_END_MS = 1200; // the spring is exactly back at zero in ~1 s
  */
 const CAR_PASS = {
   startAt: STRIP_SEQUENCE.fullAt, // s after the scene starts: as the lines hit full speed (the punch)
-  duration: 2.6, // s, from deep in the tunnel to just behind the camera (passes the camera at ~2.1 s; was 0.95, then 1.6)
+  duration: 3.2, // s, from deep in the tunnel to just behind the camera (was 0.95, 1.6, then 2.6: +0.6 s seen clearly)
   from: 1200, // distance in front of the camera at the start (world units: the car is 4.8 long → ~6 px; was 2500)
   to: -12, // distance at the end (behind the camera, out of view)
   curveOffset: 20, // shapes the approach: distance = (from + c)·((to + c)/(from + c))^g − c
@@ -53,7 +53,7 @@ const CAR_PASS = {
    * hover at `hangDistance` (world units, ~130 px wide) at `hangAt` of the pass, keeping `keep` of its speed
    * there, then eases in and accelerates through the camera.
    */
-  entrance: { hangAt: 0.55, hangDistance: 22, keep: 0.15 },
+  entrance: { hangAt: 0.6, hangDistance: 22, keep: 0.15 }, // hangAt was 0.55
   /**
    * Motion blur while the car is on screen: each frame is the average of renders of the car spread over the
    * last `shutter` seconds of its motion (a film camera's open shutter; was 1/30 s). Enough renders that the
@@ -61,6 +61,11 @@ const CAR_PASS = {
    * aren't enough (right at the camera) the shutter is shortened instead (down to `minShutter`), so the smear stays smooth.
    */
   motionBlur: { shutter: 1 / 12, minShutter: 1 / 40, stepPx: 4, minSamples: 8, maxSamples: 32, edge: 2.4 }, // edge: world units off-axis
+  /**
+   * The car is seen sharp first: no blur during its rush in and its hover, then `sharpExtra` s more; then the
+   * shutter grows from 0 to full over `easeIn` s as it accelerates (sharp → blurred, never switched on).
+   */
+  blurIn: { sharpExtra: 0.3, easeIn: 0.4 },
   /**
    * The moment it passes the camera: field of view +6° and the lines' glow +70%, as a smooth bump this wide
    * (s, the bump's half width), then exactly back to normal.
@@ -91,6 +96,12 @@ function carPassDistance(u) {
   }
   CAR_PASS.passAt = CAR_PASS.startAt + lo * CAR_PASS.duration;
 }
+/** 0 → 1: how much of the motion blur's shutter is open at scene time t (eased in after the hover). */
+const carBlurAt = (t) => {
+  const start = CAR_PASS.startAt + CAR_PASS.entrance.hangAt * CAR_PASS.duration + CAR_PASS.blurIn.sharpExtra;
+  const u = Math.min(1, Math.max(0, (t - start) / CAR_PASS.blurIn.easeIn));
+  return u * u * (3 - 2 * u);
+};
 /** 0 → 1 → 0 around the moment the car passes the camera. */
 const carImpactAt = (t) => Math.exp(-(((t - CAR_PASS.passAt) / CAR_PASS.impact.width) ** 2));
 /** The light bar copies on the car's roof, as in the other scenes (lightBarBody1 + lightBar1, 2 on each side). */
@@ -564,15 +575,16 @@ export default function WorldTransition({ onComplete, description }) {
           const d = Math.max(0.6, carPassDistance((x - CAR_PASS.startAt) / CAR_PASS.duration));
           return (edge * stage.clientHeight) / (2 * Math.tan((camera.fov * Math.PI) / 360) * d);
         };
-        let shutter = CAR_PASS.motionBlur.shutter;
+        let shutter = CAR_PASS.motionBlur.shutter * carBlurAt(time);
         let samples = Math.ceil(Math.abs(pxAt(time) - pxAt(time - shutter)) / stepPx);
         if (samples > maxSamples) {
-          for (let k = 0; k < 20 && samples > maxSamples && shutter > CAR_PASS.motionBlur.minShutter; k++) {
-            shutter = Math.max(CAR_PASS.motionBlur.minShutter, shutter * 0.8);
+          const floor = Math.min(shutter, CAR_PASS.motionBlur.minShutter);
+          for (let k = 0; k < 20 && samples > maxSamples && shutter > floor; k++) {
+            shutter = Math.max(floor, shutter * 0.8);
             samples = Math.ceil(Math.abs(pxAt(time) - pxAt(time - shutter)) / stepPx);
           }
         }
-        samples = Math.min(maxSamples, Math.max(minSamples, samples));
+        samples = shutter > 0 ? Math.min(maxSamples, Math.max(minSamples, samples)) : 1; // sharp: one render
         const autoClear = renderer.autoClear;
         renderer.autoClear = false;
         renderer.setRenderTarget(blurSum);
