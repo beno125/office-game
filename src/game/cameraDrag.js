@@ -16,19 +16,19 @@
 
 /** Defaults (angles in degrees). */
 export const CAMERA_DRAG = {
-  /** Degrees of (unresisted) orbit per pixel dragged (was 0.22: the wider yaw needs a shorter drag). */
-  sensitivity: 0.35,
+  /** Degrees of (unresisted) orbit per pixel dragged (was 0.22, then 0.35 for ±120°). */
+  sensitivity: 0.28,
   /**
-   * Soft maximum offsets (never passed), the same to both sides (±). Yaw was 40: now ~110° takes a ~480 px drag.
+   * Soft maximum offsets (never passed), the same to both sides (±). Yaw was 40, then 120: now ~63° (90%) takes ~310 px.
    * Pitch: ±maxPitch, scaled down to the smaller of the two sides the elevation limits leave (so it's symmetric).
    */
-  maxYaw: 120,
+  maxYaw: 70,
   maxPitch: 17,
   /**
    * Resistance curve: offset = max · tanh(drag / (max · resistance)), the same for both directions.
-   * The first part of the drag moves it 1:1; lower: the soft limit comes in sooner (was 1.15).
+   * The first part of the drag moves it 1:1; lower: the soft limit comes in sooner (was 1.15, then 0.9).
    */
-  resistance: 0.9,
+  resistance: 0.85,
   /** The orbit never goes below / above these elevations (degrees above the target's horizon). */
   minElevation: 3,
   maxElevation: 78,
