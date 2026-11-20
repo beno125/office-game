@@ -4020,7 +4020,7 @@ let _officeSceneAnimationFrame = 0;
       const rightScreenVideoBottom = 0;
 
       /** The office model (was office-table-embed94.gltf; the old office at /office-old keeps that one). */
-      const OFFICE_SCENE_GLTF = "office-scene1.glb"; // binary office-scene1.gltf, hand textures 4096² PNG -> 2048² JPEG (57.2 MB -> 6.2 MB)
+      const OFFICE_SCENE_GLTF = "office-scene1.glb"; // binary office-scene1.gltf, original 4096² hand textures kept (57.2 MB -> 42.9 MB)
       const OUTDOOR_FALLBACK_GLTF = officeAsset("office-table-embed34.gltf");
       const OUTDOOR_BACKGROUND_Y_SCALE = 1.35;
       const OUTDOOR_BACKGROUND_OPACITY = 0.65;
