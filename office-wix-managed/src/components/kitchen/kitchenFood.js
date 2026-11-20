@@ -48,6 +48,8 @@ export const KITCHEN_FOOD = {
   sizeScale: 0.95,
   /** Bananas relative to the rest (was 1): real banana size next to the apples and pears; collider and mass scale with it. */
   bananaScale: 1.4,
+  /** Fruit and vegetables relative to the snacks (was 1, a little small): collider and mass scale with it. */
+  produceScale: 1.1,
   /** Per-item variation: size (± share), colour tone (± brightness) and warmth (± red / blue shift). */
   variation: { size: 0.09, tone: 0.09, warmth: 0.035 },
   /** Fixed seed: the plates look the same on every load. */
@@ -80,7 +82,7 @@ export const KITCHEN_FOOD = {
   proxy: {
     banana: { halfLength: 0.42, halfHeight: 0.8, depthPad: 0.7 },
     cucumber: { radius: 0.97, length: 0.92 },
-    carrot: { thickEnd: 0.9, thinEnd: 0.3, length: 0.88 },
+    carrot: { thickEnd: 0.9, thinEnd: 0.4, length: 0.88 }, // thinEnd was 0.3 (the tip is blunter now)
     cylinderSegments: 12, // as the cups' cylinders
   },
   /**
@@ -1119,7 +1121,8 @@ export function createKitchenFood(o) {
       const L = 1.0 * U;
       const rb = 0.13 * U;
       const prof = splineProfile(
-        [[0, 0], [0.07, 0.012], [0.25, 0.15], [0.5, 0.4], [0.72, 0.65], [0.88, 0.85], [0.97, 0.95], [1.0, 0.985], [0.82, 1.0], [0.35, 1.008], [0, 1.008]],
+        // A rounded, blunt tip (was [0, 0], [0.07, 0.012], [0.25, 0.15], [0.5, 0.4]: a sharp point).
+        [[0, 0], [0.14, 0.006], [0.24, 0.03], [0.36, 0.13], [0.54, 0.38], [0.72, 0.65], [0.88, 0.85], [0.97, 0.95], [1.0, 0.985], [0.82, 1.0], [0.35, 1.008], [0, 1.008]],
         D.carrot.length,
         rb,
         L,
@@ -1251,7 +1254,7 @@ export function createKitchenFood(o) {
       let design = 0;
       for (const kindName of list) {
         const def = kindDefs[kindName];
-        const s = 1 + rr(-V.size, V.size);
+        const s = (1 + rr(-V.size, V.size)) * (kindName === "bar" || kindName === "pack" ? 1 : F.produceScale);
         const k = 1 + rr(-V.tone, V.tone);
         const wm = rr(-V.warmth, V.warmth);
         // One mesh per kind (parts merged in): red / green apples differ by texture only.
@@ -1393,6 +1396,7 @@ export function createKitchenFood(o) {
           b.velocity.scale(T.depenetrateDamping, b.velocity);
           b.angularVelocity.scale(T.depenetrateDamping, b.angularVelocity);
         }
+        yield; // one step at a time (all items awake: the 24 steps in one go took ~80 ms, a jolt in the kitchen transition)
       }
       yield;
       // Store the resting poses (in the plate body's frame), out of the floor (a resting overlap here

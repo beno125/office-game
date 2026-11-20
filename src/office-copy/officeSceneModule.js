@@ -2490,7 +2490,7 @@ let _officeSceneAnimationFrame = 0;
          */
         selfGlow: {
           duckMakor: { bright: 0.22, dark: 0.5 },
-          star: { bright: 0.2, dark: 0.45 },
+          star: { bright: 0.08, dark: 0.28 }, // was 0.2 / 0.45: the star looked too light
         },
         /** The two shadow-casting lights (car on the desk, desk side wall): bright mode keeps white @ 0.22. */
         shadowLights: { color: 0xdfe3f5, intensity: 0.12 }, // colour was lavender 0x9a8cff
@@ -2980,6 +2980,21 @@ let _officeSceneAnimationFrame = 0;
         warmKey: { color: 0xfff0dd, intensity: 0.6 },
         warmFill: { color: 0xffe8cc, intensity: 0.35 },
       };
+      /**
+       * A gentle warm tone on bright mode (seen in the intro's opening, before the
+       * lights go out): every bright-mode light colour is mixed this much toward a
+       * warm amber. Intensities, the background and dark mode are unchanged.
+       */
+      const OFFICE_BRIGHT_WARMTH = { color: 0xffd9a8, amount: 0.12 };
+      {
+        const warm = new THREE.Color(OFFICE_BRIGHT_WARMTH.color);
+        const c = new THREE.Color();
+        const tint = (hex) => c.setHex(hex).lerp(warm, OFFICE_BRIGHT_WARMTH.amount).getHex();
+        for (const v of Object.values(brightMode)) {
+          if (!v || typeof v !== "object") continue;
+          for (const k of ["color", "sky", "ground"]) if (typeof v[k] === "number") v[k] = tint(v[k]);
+        }
+      }
       let lightBlend = 0;
       let lightBlendTarget = 0;
       let _portalSceneDarkness = 0;
