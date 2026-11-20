@@ -35,7 +35,7 @@ const CAPTION_DELAY_MS = 200;
  */
 const CAMERA_DRAG_END_MS = 1200; // the spring is exactly back at zero in ~1 s
 /**
- * The car's pass, after the lines' launch (transitionStrips.js STRIP_SEQUENCE):
+ * The car's pass, after the lines' release (transitionStrips.js STRIP_SEQUENCE):
  * hidden until the lines reach full speed, then it rushes in from deep in the
  * tunnel (a few px at the vanishing point) and flies through the camera with
  * the punch. Its distance to the camera shrinks exponentially (the same growth

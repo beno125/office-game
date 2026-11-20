@@ -47,78 +47,90 @@ export const STRIP_FLIGHT = {
 };
 
 /**
- * The start of the scene, like a film's time tunnel: the lines are sucked
- * backward, brake to a stop, hold (pulled slightly toward the centre, glow
- * building), then launch forward into warp speed with a short punch. One
- * global, signed speed drives every line (negative = backward, 0 = stopped,
- * 1 = the normal flight); afterwards they fly exactly as before.
+ * The start of the scene, like a film's time tunnel, in two directions only:
+ * 1. Suck in: the whole field is pulled into the vanishing point, faster and
+ *    stronger toward the end, until nearly every line is gathered in a tight,
+ *    bright cluster at the centre (a few faint traces left around it). The lines
+ *    shrink and gather there (squashed toward the centre), never vanishing.
+ * 2. Release: at the peak, a glow flash, and they burst back out and fly
+ *    forward, accelerating into warp speed with a short punch; afterwards they
+ *    fly exactly as before.
  */
 export const STRIP_SEQUENCE = {
-  suck: { duration: 1.0, speed: 0.6, curve: (u) => u * u }, // s; backward speed (fraction of full); accelerating
-  brake: { duration: 0.5, curve: (u) => 1 - (1 - u) ** 3 }, // to a full stop, strong ease-out
-  hold: { duration: 0.4, compress: 0.07, glow: 0.45 }, // s; pulled this much toward the centre; glow +45%
-  launch: { duration: 1.1, curve: (u) => (u <= 0 ? 0 : 2 ** (10 * u - 10)) }, // easeInExpo to full speed
+  /** Suck in: duration (s) and curve of the suction (0 → 1): an ease-in, faster and stronger toward the end. */
+  suck: { duration: 1.3, curve: (u) => u * u * u },
+  /**
+   * How far the lines are sucked in, at the peak: every distance from the centre
+   * is scaled by `scale` and squashed so nothing is further out than ~`radius` px
+   * (distance' = distance·(1 − suction·(1 − scale)) / (1 + suction²·distance/radius)).
+   * Widths and glow shrink with the line, but stay at least `minWidth` px wide.
+   */
+  pull: { scale: 0.35, radius: 40, minWidth: 1.4 },
+  /** The bright cluster: a soft glow at the centre (radius px, opacity at the peak), also the release flash. */
+  cluster: { radius: 70, opacity: 0.55, color: "170, 200, 255" },
+  /** A few lines are left as faint traces around the cluster: every `every`-th line, sucked in only this much, at this opacity. */
+  traces: { every: 9, suction: 0.55, opacity: 0.45 },
+  /** Release: the burst back out (s, ease-out: fast at once) and the flight speed's rise to full speed (s, ease-in). */
+  burst: { duration: 0.7, curve: (u) => 1 - (1 - u) ** 3 },
+  release: { duration: 1.2, curve: (u) => u * u * u },
+  /** The flash at the moment of release: line glow +120% and the centre glow up to this opacity, fading over this long (s). */
+  flash: { glow: 1.2, opacity: 0.6, duration: 0.35 },
   /** Punch on reaching full speed: speed +12% and glow +35% for 0.4 s (a smooth bump), then exactly normal. */
   punch: { speed: 0.12, glow: 0.35, duration: 0.4 },
-  /** Streaks: this fraction of their length when stopped, full length at full speed (either direction). */
+  /** Streaks: this fraction of their length when still, full length at full speed (pointing along the motion). */
   minStreak: 0.3,
   /** Below this speed the streak's anchor moves smoothly from the leading end of one direction to the other. */
   anchorSpeed: 0.15,
-  /** Density: all lines at the start; the ones sucked into the centre aren't replaced down to this fraction; back to all of them over the launch. */
-  minDensity: 0.4,
-  /** Brightness (opacity × glow): this much when stopped, 1 at full speed. */
+  /** Brightness (opacity × glow): this much when still, 1 at full speed (and in the cluster). */
   minBrightness: 0.6,
-  /** Camera field of view change (degrees, added to the normal value): narrower while sucked back and holding, wider on the launch, then exactly normal. */
-  fov: { hold: -2.5, launch: 3, settle: 0.8 }, // settle: s after the punch to get back to normal
+  /** Camera field of view change (degrees, added to the normal value): narrower while sucked in, wider on the release, then exactly normal. */
+  fov: { suck: -2.5, release: 3, settle: 0.8 }, // settle: s after the punch to get back to normal
   /** Speed is integrated in steps no longer than this (s), so slow frames keep the same motion. */
   step: 1 / 240,
 };
 {
   const S = STRIP_SEQUENCE;
-  S.brakeAt = S.suck.duration;
-  S.holdAt = S.brakeAt + S.brake.duration;
-  S.launchAt = S.holdAt + S.hold.duration;
-  S.fullAt = S.launchAt + S.launch.duration; // full speed (the punch starts)
+  S.releaseAt = S.suck.duration;
+  S.fullAt = S.releaseAt + S.release.duration; // full speed (the punch starts)
   S.normalAt = S.fullAt + S.punch.duration;
 }
 
 const smooth = (u) => (u <= 0 ? 0 : u >= 1 ? 1 : u * u * (3 - 2 * u));
+const clamp01 = (u) => Math.max(0, Math.min(1, u));
 
 /** Everything the sequence sets at scene time t (s). */
 export function stripSequenceAt(t) {
   const S = STRIP_SEQUENCE;
-  let speed, hold = 0, ramp;
-  if (t < S.brakeAt) speed = -S.suck.speed * S.suck.curve(Math.max(0, t) / S.suck.duration);
-  else if (t < S.holdAt) speed = -S.suck.speed * (1 - S.brake.curve((t - S.brakeAt) / S.brake.duration));
-  else if (t < S.launchAt) speed = 0;
-  else if (t < S.fullAt) speed = S.launch.curve((t - S.launchAt) / S.launch.duration);
-  else speed = 1;
+  const h = 1e-3;
+  // Suction 0 → 1 (suck in), back to 0 (burst); its rate drives the streaks while the flight is still.
+  const suctionAt = (x) =>
+    x < S.releaseAt
+      ? S.suck.curve(clamp01(x / S.suck.duration))
+      : 1 - S.burst.curve(clamp01((x - S.releaseAt) / S.burst.duration));
+  const suction = suctionAt(t);
+  const rate = (suctionAt(t + h) - suctionAt(t - h)) / (2 * h);
+  const maxRate = 3 / S.suck.duration; // the suck-in curve's rate at its end
+  const speed = t < S.releaseAt ? 0 : t < S.fullAt ? S.release.curve((t - S.releaseAt) / S.release.duration) : 1;
   const punchU = (t - S.fullAt) / S.punch.duration;
   const punch = punchU > 0 && punchU < 1 ? Math.sin(Math.PI * punchU) : 0;
-  speed += S.punch.speed * punch;
-  // Hold: rises over the end of the brake and the hold, released over the first part of the launch.
-  if (t > S.holdAt - S.brake.duration * 0.5 && t < S.launchAt + S.launch.duration * 0.5)
-    hold = t < S.launchAt
-      ? smooth((t - (S.holdAt - S.brake.duration * 0.5)) / (S.hold.duration + S.brake.duration * 0.5))
-      : 1 - smooth((t - S.launchAt) / (S.launch.duration * 0.5));
-  // Density: 1 → minDensity over the suck back and brake, minDensity in the hold, → 1 with the launch speed.
-  if (t < S.holdAt) ramp = 1 - smooth(t / S.holdAt);
-  else if (t < S.launchAt) ramp = 0;
-  else ramp = Math.min(1, Math.max(0, speed));
-  const a = Math.min(1, Math.abs(speed));
+  const flightSpeed = speed + S.punch.speed * punch;
+  // Motion along the lines: inward while sucked in (−), outward on the burst and the flight (+).
+  const motion = t < S.releaseAt ? -Math.min(1, rate / maxRate) : Math.max(flightSpeed, Math.min(1, -rate / maxRate));
+  const flashU = (t - S.releaseAt) / S.flash.duration;
+  const flash = flashU >= 0 && flashU < 1 ? (1 - flashU) ** 2 : 0;
+  const a = Math.max(Math.min(1, Math.abs(motion)), suction);
   let fov;
-  if (t < S.holdAt) fov = S.fov.hold * smooth(t / S.holdAt);
-  else if (t < S.launchAt) fov = S.fov.hold;
-  else if (t < S.fullAt) fov = S.fov.hold + (S.fov.launch - S.fov.hold) * S.launch.curve((t - S.launchAt) / S.launch.duration);
-  else fov = S.fov.launch * (1 - smooth((t - S.fullAt) / (S.punch.duration + S.fov.settle)));
+  if (t < S.releaseAt) fov = S.fov.suck * S.suck.curve(clamp01(t / S.suck.duration));
+  else if (t < S.fullAt) fov = S.fov.suck + (S.fov.release - S.fov.suck) * smooth((t - S.releaseAt) / S.release.duration);
+  else fov = S.fov.release * (1 - smooth((t - S.fullAt) / (S.punch.duration + S.fov.settle)));
   return {
-    speed,
-    streak: S.minStreak + (1 - S.minStreak) * Math.abs(speed),
-    anchor: Math.max(-1, Math.min(1, speed / S.anchorSpeed)), // 1: forward (trailing end inner), -1: backward
-    compress: 1 - S.hold.compress * hold,
-    glow: 1 + S.hold.glow * hold + S.punch.glow * punch,
+    speed: flightSpeed, // the lines' own flight (0 during the suck in)
+    suction,
+    streak: S.minStreak + (1 - S.minStreak) * Math.abs(motion),
+    anchor: Math.max(-1, Math.min(1, motion / S.anchorSpeed)), // 1: outward (trailing end inner), -1: inward
+    glow: 1 + S.flash.glow * flash + S.punch.glow * punch,
+    centreGlow: Math.min(1, S.cluster.opacity * suction * suction + S.flash.opacity * flash),
     bright: S.minBrightness + (1 - S.minBrightness) * a,
-    density: S.minDensity + (1 - S.minDensity) * ramp,
     fov,
   };
 }
@@ -168,12 +180,11 @@ export function startTransitionStrips(canvas, strips, startTime = performance.no
   let clockAt = 0; // scene time the clock was last advanced to
 
   // Each line: when its current flight began (flight-clock s). Negative delays: already mid-flight at the start (as before).
-  // All of them on screen from the first frame; density then follows the sequence (lines only leave / join at the centre).
-  const lines = strips.map((s) => {
+  // All of them on screen from the first frame. Every few: a faint trace (sucked in less).
+  const lines = strips.map((s, i) => {
     const rad = (s.angle * Math.PI) / 180;
-    return { ...s, sin: Math.sin(rad), cos: Math.cos(rad), born: s.delay, active: true };
+    return { ...s, sin: Math.sin(rad), cos: Math.cos(rad), born: s.delay, trace: i % SEQ.traces.every === 0 };
   });
-  let activeCount = lines.length;
 
   let W = 0, H = 0, dpr = 1, frame = 0;
   const resize = () => {
@@ -188,7 +199,7 @@ export function startTransitionStrips(canvas, strips, startTime = performance.no
   resize();
 
   /** Where line `l` is at flight progress p (CSS px, relative to the centre). */
-  const place = (l, p, vmin, vmax, out, q = { streak: 1, anchor: 1, compress: 1 }) => {
+  const place = (l, p, vmin, vmax, out, q = { streak: 1, anchor: 1, suction: 0 }) => {
     const e = ease(p);
     const z = F.z[0] + (F.z[1] - F.z[0]) * e;
     const k = F.perspective / (F.perspective - z);
@@ -198,13 +209,25 @@ export function startTransitionStrips(canvas, strips, startTime = performance.no
     // rotate(angle) of (0, y): (-y·sin, y·cos); the span's origin sits w/2 right of the centre.
     out.r0 = ty * k; // inner end, distance from the centre (px)
     out.r1 = (ty + l.length * vmin * sy) * k; // outer end
-    // Shorter streak along the motion: forward, the trailing (inner) end catches up; backward, the outer end.
+    // Shorter streak along the motion: outward, the trailing (inner) end catches up; inward, the outer end.
     const len = out.r1 - out.r0, mid = (out.r0 + out.r1) / 2 + (q.anchor * len * (1 - q.streak)) / 2;
-    out.r0 = (mid - (len * q.streak) / 2) * q.compress;
-    out.r1 = (mid + (len * q.streak) / 2) * q.compress;
-    out.ox = (l.width / 2) * k;
-    out.s = sx * k; // local → screen across the line
+    out.r0 = mid - (len * q.streak) / 2;
+    out.r1 = mid + (len * q.streak) / 2;
+    // Sucked in: every distance scaled down and squashed toward the centre (same order: lines shrink, never jump).
+    const su = q.suction * (l.trace ? SEQ.traces.suction : 1);
+    out.su = su;
+    if (su > 0) {
+      const c = 1 - su * (1 - SEQ.pull.scale);
+      const squash = (r) => (r * c) / (1 + (su * su * r) / SEQ.pull.radius);
+      out.r0 = squash(out.r0);
+      out.r1 = squash(out.r1);
+    }
+    const midBefore = Math.max(1e-6, mid);
+    const ws = su > 0 ? Math.min(1, (out.r0 + out.r1) / 2 / midBefore) : 1; // shrinks as much as the line
+    out.ox = (l.width / 2) * k * ws;
+    out.s = sx * k * ws; // local → screen across the line
     out.w = l.width * out.s; // true on-screen width (px)
+    if (su > 0) out.w = Math.max(out.w, Math.min(l.width * sx * k, SEQ.pull.minWidth));
     return out;
   };
   const pos = {};
@@ -228,7 +251,6 @@ export function startTransitionStrips(canvas, strips, startTime = performance.no
     const T = flightClock;
     const q = stripSequenceAt(t);
     const { bright, glow: glowBoost } = q;
-    const targetCount = Math.round(lines.length * q.density);
     const vmin = Math.min(window.innerWidth, window.innerHeight) / 100;
     const vmax = Math.max(window.innerWidth, window.innerHeight) / 100;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -236,27 +258,23 @@ export function startTransitionStrips(canvas, strips, startTime = performance.no
     if (reduceMotion) return;
     ctx.setTransform(dpr, 0, 0, dpr, W / 2 * dpr, H / 2 * dpr);
     ctx.lineCap = "round";
+    if (q.centreGlow > 0.002) {
+      // The bright cluster / the release flash at the centre.
+      const R = SEQ.cluster.radius;
+      const g = ctx.createRadialGradient(0, 0, 0, 0, 0, R);
+      g.addColorStop(0, `rgba(${SEQ.cluster.color}, ${q.centreGlow})`);
+      g.addColorStop(0.35, `rgba(${SEQ.cluster.color}, ${q.centreGlow * 0.35})`);
+      g.addColorStop(1, `rgba(${SEQ.cluster.color}, 0)`);
+      ctx.fillStyle = g;
+      ctx.fillRect(-R, -R, 2 * R, 2 * R);
+    }
 
     for (const l of lines) {
       let p = (T - l.born) / l.duration;
       // Back to the start only once the flight is over AND it has fully left the screen.
-      if (p >= 1 && (!l.active || offScreen(l, place(l, 1, vmin, vmax, pos, q)))) {
+      if (p >= 1 && offScreen(l, place(l, 1, vmin, vmax, pos, q))) {
         l.born += Math.floor(p) * l.duration;
         p -= Math.floor(p);
-      } else if (p < 0) {
-        // Sucked back: gone into the vanishing point (faded out there), back to the far end of its flight, off screen.
-        l.born -= Math.ceil(-p) * l.duration;
-        p += Math.ceil(-p);
-        if (l.active && activeCount > targetCount) {
-          l.active = false;
-          activeCount--;
-        }
-      }
-      if (!l.active) {
-        // Joins only while at the vanishing point, flying forward and fading in (never mid-path).
-        if (activeCount >= targetCount || q.speed <= 0 || p >= F.fadeIn.until / 2) continue;
-        l.active = true;
-        activeCount++;
       }
       const P = place(l, p, vmin, vmax, pos, q);
       if (offScreen(l, P)) continue;
@@ -268,6 +286,7 @@ export function startTransitionStrips(canvas, strips, startTime = performance.no
           : F.full.opacity;
       const width = Math.max(P.w, F.minWidth);
       alpha *= Math.min(1, P.w / F.minWidth) * bright;
+      if (l.trace) alpha *= 1 - (1 - SEQ.traces.opacity) * (P.su / SEQ.traces.suction); // a faint trace around the cluster
       if (alpha <= 0) continue;
 
       // Round caps add half the width at each end: keep the drawn length the same as the span's.
