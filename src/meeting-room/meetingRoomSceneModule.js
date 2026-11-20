@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import * as CANNON from "cannon-es";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { DRACOLoader } from "three/addons/loaders/DRACOLoader.js";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
 import { RectAreaLightUniformsLib } from "three/addons/lights/RectAreaLightUniformsLib.js";
@@ -44,7 +45,14 @@ const meetingRoomAsset = (path) =>
 const officeAsset = (path) =>
   _OFFICE_BASE + String(path).replace(/^\.\//, "");
 
-const MEETING_ROOM_GLTF = "meeting-room2.gltf";
+/**
+ * Binary meeting-room2.gltf (68.2 MB -> 3.5 MB): the plant's unused embedded textures and
+ * vertex colours removed (applyBanjoFigPlantMaterial replaces both), the plant mesh
+ * Draco-compressed (positions 14 bit, normals 10, UVs 12). Other meshes unchanged.
+ */
+const MEETING_ROOM_GLTF = "meeting-room2.glb";
+/** Draco decoder (three/examples/jsm/libs/draco/gltf, copied to public/draco/). */
+const MEETING_ROOM_DRACO_PATH = `${import.meta.env.BASE_URL}draco/`;
 const MEETING_ROOM_SCREEN_IMAGE = "textures/welcome-screen.jpg";
 const MEETING_ROOM_WOOD_TILE_M = 2;
 const MEETING_ROOM_WALL_WOOD = "Poliigon_WoodVeneerOak_7760";
@@ -2687,7 +2695,7 @@ function loadKitchenCarOnTable() {
   const loader = new GLTFLoader();
   loader.setResourcePath(_OFFICE_BASE);
   loader.load(
-    officeAsset("car-game14.gltf"),
+    officeAsset("car-game14.glb"),
     (carGltf) => {
       const pristineCarScene = carGltf.scene;
       // Clone before the player build mutates materials / hierarchy so every
@@ -3079,11 +3087,11 @@ function loadPoliigon2KMaps(setName) {
     `textures/${setName}/2K/${setName}_${suffix}`;
   return Promise.all([
     loadMeetingRoomTexture(file("BaseColor.jpg"), true),
-    loadMeetingRoomTexture(file("Normal.png"), false),
+    loadMeetingRoomTexture(file("Normal.jpg"), false), // JPEG of Normal.png (11.5 MB -> 1.9 MB for all four sets)
     loadMeetingRoomTexture(file("Roughness.jpg"), false),
     loadMeetingRoomTexture(file("Metallic.jpg"), false),
     loadMeetingRoomTexture(file("AmbientOcclusion.jpg"), false),
-    loadMeetingRoomTexture(file("Displacement.png"), false),
+    loadMeetingRoomTexture(file("Displacement.jpg"), false), // JPEG of the 16-bit Displacement.png (browsers read 8 bits anyway)
   ]).then(
     ([map, normalMap, roughnessMap, metalnessMap, aoMap, displacementMap]) => ({
       map,
@@ -3098,7 +3106,7 @@ function loadPoliigon2KMaps(setName) {
 
 function loadBanjoFigMaps() {
   const file = (suffix, ext) =>
-    `textures/${MEETING_ROOM_PLANT}/${MEETING_ROOM_PLANT}_${suffix}_2K_METALNESS.${ext}`;
+    `textures/${MEETING_ROOM_PLANT}-opt/${MEETING_ROOM_PLANT}_${suffix}_2K_METALNESS.${ext}`; // re-encoded (14.9 MB -> 6.1 MB)
   const uvMaps = {
     flipY: false,
     wrapS: THREE.ClampToEdgeWrapping,
@@ -3106,7 +3114,7 @@ function loadBanjoFigMaps() {
   };
   return Promise.all([
     loadMeetingRoomTexture(file("COL", "jpg"), true, uvMaps),
-    loadMeetingRoomTexture(file("NRM", "png"), false, uvMaps),
+    loadMeetingRoomTexture(file("NRM", "jpg"), false, uvMaps),
     loadMeetingRoomTexture(file("ROUGHNESS", "jpg"), false, uvMaps),
     loadMeetingRoomTexture(file("METALNESS", "png"), false, uvMaps),
   ]).then(([map, normalMap, roughnessMap, metalnessMap]) => ({
@@ -8093,6 +8101,11 @@ const ARENA_CAM_AIM_LIFT = 0.55;
  * Falls back to loader.load if workers aren't available.
  */
 function loadGltfOffMainThread(loader, url, onLoad, onProgress, onError) {
+  // A .glb has no base64 to decode: GLTFLoader parses it directly (Draco in its own workers).
+  if (/\.glb(\?|$)/i.test(url)) {
+    loader.load(url, onLoad, onProgress, onError);
+    return;
+  }
   let worker;
   try {
     worker = new Worker(new URL("./gltfParseWorker.js", import.meta.url), { type: "module" });
@@ -8396,6 +8409,7 @@ function loadMeetingRoom() {
   ]);
   const loader = new GLTFLoader();
   loader.setResourcePath(_MEETING_ROOM_BASE);
+  loader.setDRACOLoader(new DRACOLoader().setDecoderPath(MEETING_ROOM_DRACO_PATH));
   loadGltfOffMainThread(
     loader,
     meetingRoomAsset(MEETING_ROOM_GLTF),
@@ -11247,7 +11261,7 @@ function loadMeetingRoomAirPlane() {
   const loader = new GLTFLoader();
   loader.setResourcePath(_OFFICE_BASE);
   loader.load(
-    officeAsset("airPlane2.gltf"),
+    officeAsset("airPlane2.glb"),
     (gltf) => {
       const rawScene = gltf.scene;
       const paper = _airPlaneMaterial();
@@ -11274,7 +11288,7 @@ function loadMeetingRoomAirPlane() {
       airPlaneFlight.pathBuilt = false;
     },
     undefined,
-    (err) => console.warn("[MeetingRoom] airPlane2.gltf failed to load:", err),
+    (err) => console.warn("[MeetingRoom] airPlane2.glb failed to load:", err),
   );
 }
 

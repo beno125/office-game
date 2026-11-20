@@ -4,7 +4,7 @@ import { createCameraDrag } from "./cameraDrag.js";
 
 /**
  * Loader before the meeting room: an illuminated lightbox sign hanging in a
- * dark room (meeting-room-sign.gltf: base, cup, lights). The meeting room loads
+ * dark room (meeting-room-sign.glb: base, cup, lights). The meeting room loads
  * underneath; the sign's printed loader shows its real download progress. When
  * the room is ready the bar completes, the lights dim and onFinished() is
  * called (the page then fades this overlay out).
@@ -14,7 +14,7 @@ import { createCameraDrag } from "./cameraDrag.js";
  * counting the bytes of the meeting room's .gltf as the loader reads them.
  */
 
-const SIGN_GLTF = "meeting-room-sign.gltf";
+const SIGN_GLTF = "meeting-room-sign.glb";
 const SIGN_DIR = "meeting-room-optimized/";
 /** Node in the meeting room model whose material colour the sign's base takes. */
 const TABLE_NODE_NAME = "tablePlate";
@@ -149,7 +149,7 @@ function installModelProgress() {
     const result = originalFetch.apply(this, arguments);
     if (!isMeetingRoomModelUrl(String(url || ""))) return result;
     state.started++;
-    if (!state.gltfUrl && /\.gltf(\?|$)/i.test(url)) state.gltfUrl = new URL(url, location.href).href;
+    if (!state.gltfUrl && /\.(gltf|glb)(\?|$)/i.test(url)) state.gltfUrl = new URL(url, location.href).href;
     return result.then(
       (res) => {
         if (!res.ok || !res.body || typeof ReadableStream === "undefined") {
@@ -224,14 +224,32 @@ async function readTableColor(THREE, gltfUrl, fetchFn) {
   const decoder = new TextDecoder();
   let text = "";
   let cut = -1;
-  while (cut < 0 && text.length < 4e6) {
+  let json = null;
+  // .glb: a 12-byte header, then the JSON chunk (its length in bytes 12..15, the text from byte 20).
+  let head = new Uint8Array(0);
+  let glbJsonLength = -1;
+  while (json === null && cut < 0 && text.length < 4e6) {
     const { done, value } = await reader.read();
     if (done) break;
-    text += decoder.decode(value, { stream: true });
+    if (glbJsonLength !== 0) {
+      const merged = new Uint8Array(head.length + value.length);
+      merged.set(head);
+      merged.set(value, head.length);
+      head = merged;
+      if (glbJsonLength < 0 && head.length >= 20) {
+        const view = new DataView(head.buffer);
+        glbJsonLength = view.getUint32(0, true) === 0x46546c67 ? view.getUint32(12, true) : 0;
+        if (glbJsonLength === 0) text = decoder.decode(head, { stream: true }); // a .gltf after all
+      }
+      if (glbJsonLength > 0 && head.length >= 20 + glbJsonLength) json = new TextDecoder().decode(head.subarray(20, 20 + glbJsonLength));
+      if (glbJsonLength !== 0) continue;
+    } else {
+      text += decoder.decode(value, { stream: true });
+    }
     cut = text.search(/[\r\n]\s*"(accessors|bufferViews|buffers)"\s*:/);
   }
   reader.cancel().catch(() => {});
-  const json = cut < 0 ? text : text.slice(0, cut).replace(/,\s*$/, "") + "}";
+  if (json === null) json = cut < 0 ? text : text.slice(0, cut).replace(/,\s*$/, "") + "}";
   const gltf = JSON.parse(json);
   const node = (gltf.nodes || []).find((n) => n.name === TABLE_NODE_NAME);
   const mesh = node && gltf.meshes && gltf.meshes[node.mesh];

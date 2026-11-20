@@ -302,7 +302,7 @@ export default function WorldTransition({ onComplete, description }) {
 
       const loader = new GLTFLoader();
       loader.load(
-        `${import.meta.env.BASE_URL}office-scene-optimized/car-game14.gltf`,
+        `${import.meta.env.BASE_URL}office-scene-optimized/car-game14.glb`,
         (gltf) => {
           if (disposed) {
             disposeObject(gltf.scene);

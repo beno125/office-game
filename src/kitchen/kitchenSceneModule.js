@@ -7919,7 +7919,7 @@ let _worldSwitched = false;
         const sidePlane = _findKitchenMesh(kmodel, "mainTableSidePlane", meshByName);
         if (!topPlane && !sidePlane) {
           console.warn(
-            "ul-kitchen26.gltf: mainTableTopPlane / mainTableSidePlane not found",
+            "ul-kitchen26.glb: mainTableTopPlane / mainTableSidePlane not found",
           );
           return { coverCloneStepX: null, topMat: null, sideMat: null };
         }
@@ -9380,7 +9380,7 @@ let _worldSwitched = false;
         const loadToken = ++_kitchenLoadToken;
         const kLoader = new GLTFLoader();
         kLoader.load(
-          kitchenAsset("ul-kitchen26.gltf"),
+          kitchenAsset("ul-kitchen26.glb"),
           (gltf) => {
             if (!_worldSwitched || loadToken !== _kitchenLoadToken) return;
 
@@ -9402,7 +9402,7 @@ let _worldSwitched = false;
             });
             const surfaceMesh = kitchenPlate || kitchenPlatePhysic;
             if (!surfaceMesh) {
-              console.warn("ul-kitchen26.gltf: no mainTablePlate/mainTablePlatePhysic mesh found");
+              console.warn("ul-kitchen26.glb: no mainTablePlate/mainTablePlatePhysic mesh found");
               _worldSwitched = false;
               return;
             }
@@ -11241,7 +11241,7 @@ let _worldSwitched = false;
           },
           undefined,
           (err) => {
-            console.error("Failed to load ul-kitchen26.gltf:", err);
+            console.error("Failed to load ul-kitchen26.glb:", err);
             _worldSwitched = false;
           },
         );
@@ -11266,7 +11266,7 @@ let _worldSwitched = false;
         tableSurfaceY = 0;
         loader.setResourcePath(_OFFICE_BASE);
         loader.load(
-          officeAsset("car-game14.gltf"),
+          officeAsset("car-game14.glb"),
           (carGltf) => {
 
         const carScene = carGltf.scene;

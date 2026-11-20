@@ -3198,7 +3198,7 @@ let _officeSceneAnimationFrame = 0;
         }
       });
 
-      // --- Car from car-game14.gltf (loaded when table is ready) ---
+      // --- Car from car-game14.glb (loaded when table is ready) ---
       // GLTF wheel names: wheelFl=front left, wheelFr=front right, wheelRl=rear left, wheelRr=rear right
       // Wheel covers (wheelCoverFl etc.) are parented to their wheel so they follow steer + roll.
       const WHEEL_RADIUS = 0.28;
@@ -4020,7 +4020,7 @@ let _officeSceneAnimationFrame = 0;
       const rightScreenVideoBottom = 0;
 
       /** The office model (was office-table-embed94.gltf; the old office at /office-old keeps that one). */
-      const OFFICE_SCENE_GLTF = "office-scene1.gltf";
+      const OFFICE_SCENE_GLTF = "office-scene1.glb"; // binary office-scene1.gltf, hand textures 4096² PNG -> 2048² JPEG (57.2 MB -> 6.2 MB)
       const OUTDOOR_FALLBACK_GLTF = officeAsset("office-table-embed34.gltf");
       const OUTDOOR_BACKGROUND_Y_SCALE = 1.35;
       const OUTDOOR_BACKGROUND_OPACITY = 0.65;
@@ -4062,7 +4062,7 @@ let _officeSceneAnimationFrame = 0;
       function applyOutdoorPanoramaTexture(outdoorBgMesh) {
         outdoorBackdropMesh = outdoorBgMesh;
         new THREE.TextureLoader().load(
-          officeAsset("panoramicView.jpg"),
+          officeAsset("panoramicView-4k.jpg"),
           (tex) => {
             tex.colorSpace = THREE.SRGBColorSpace;
             tex.flipY = false;
@@ -4296,7 +4296,7 @@ let _officeSceneAnimationFrame = 0;
           if (node.name === "poster1") {
             const posterMesh = node;
             new THREE.TextureLoader().load(
-              officeAsset("poster1.jpg"),
+              officeAsset("poster1-2k.jpg"),
               (tex) => {
                 tex.colorSpace = THREE.SRGBColorSpace;
                 tex.flipY = false;
@@ -4335,7 +4335,7 @@ let _officeSceneAnimationFrame = 0;
                 posterDup.position.x += widthX * 2.05 + gap;
                 if (posterMesh.parent) posterMesh.parent.add(posterDup);
                 new THREE.TextureLoader().load(
-                  officeAsset("poster2.png"),
+                  officeAsset("poster2-2k.jpg"),
                   (tex2) => {
                     tex2.colorSpace = THREE.SRGBColorSpace;
                     tex2.flipY = false;
@@ -4402,7 +4402,7 @@ let _officeSceneAnimationFrame = 0;
               metalness: 0.3,
               roughness: 0.6,
             });
-            new THREE.TextureLoader().load(officeAsset("keyboard-image.jpg"), (tex) => {
+            new THREE.TextureLoader().load(officeAsset("keyboard-image-2k.jpg"), (tex) => {
               tex.colorSpace = THREE.SRGBColorSpace;
               tex.wrapS = THREE.ClampToEdgeWrapping;
               tex.wrapT = THREE.ClampToEdgeWrapping;
@@ -13167,7 +13167,7 @@ let _officeSceneAnimationFrame = 0;
         });
 
         new THREE.TextureLoader().load(
-          officeAsset("wixNoteBook.jpg"),
+          officeAsset("wixNoteBook-2k.jpg"),
           (tex) => {
             tex.colorSpace = THREE.SRGBColorSpace;
             tex.flipY = false;
@@ -13205,7 +13205,7 @@ let _officeSceneAnimationFrame = 0;
         if (page.getObjectByName("bookLeftPageDecal")) return;
 
         new THREE.TextureLoader().load(
-          officeAsset("bookLeftPage.jpg"),
+          officeAsset("bookLeftPage-2k.jpg"),
           (tex) => {
             tex.colorSpace = THREE.SRGBColorSpace;
             tex.flipY = true;
@@ -13596,7 +13596,7 @@ let _officeSceneAnimationFrame = 0;
         setupBookPageDecal(
           model,
           "bookRightPage",
-          "bookRightPage.jpg",
+          "bookRightPage-2k.jpg",
           "bookRightPageDecal",
           Math.PI / 2,
           0,
@@ -13632,7 +13632,7 @@ let _officeSceneAnimationFrame = 0;
         }
 
         new THREE.TextureLoader().load(
-          officeAsset("techDesignerMagnet.jpg"),
+          officeAsset("techDesignerMagnet-2k.jpg"),
           (tex) => {
             tex.colorSpace = THREE.SRGBColorSpace;
             tex.flipY = true;
@@ -14181,7 +14181,7 @@ diffuseColor.a = 1.0;
        *   embed94 values (not metallic, roughness 0.4).
        */
       const OFFICE_EXPORT_FIX = {
-        musaColorMap: { material: "all_Low_Alon_001", file: "musa-color.jpg" },
+        musaColorMap: { material: "all_Low_Alon_001", file: "musa-color-2k.jpg" },
         svgMaterials: { names: ["SVGMat", "SVGMat.001"], metalness: 0, roughness: 0.4 },
       };
       function fixOfficeSceneExport(model) {
@@ -14234,8 +14234,8 @@ diffuseColor.a = 1.0;
        * tracking) and the monitors' power LEDs (leftScreenLight / rightScreenLight).
        */
       const OFFICE_EXTRA_PARTS = [
-        { file: officeAsset("office-duck-pupils.gltf"), names: ["eyePupleLeft", "eyePupleRight"] },
-        { file: officeAsset("office-screen-lights.gltf"), names: ["leftScreenLight", "rightScreenLight"] },
+        { file: officeAsset("office-duck-pupils.glb"), names: ["eyePupleLeft", "eyePupleRight"] },
+        { file: officeAsset("office-screen-lights.glb"), names: ["leftScreenLight", "rightScreenLight"] },
       ];
 
       function withDuckPupils(model, done, index = 0) {
@@ -14631,7 +14631,7 @@ diffuseColor.a = 1.0;
 
       const loader = new GLTFLoader();
       loader.setResourcePath("./");
-      loader.load(officeAsset("airPlane2.gltf"), (gltf) => {
+      loader.load(officeAsset("airPlane2.glb"), (gltf) => {
         const rawScene = gltf.scene;
         rawScene.traverse((node) => {
           if (node.isMesh) {
@@ -15669,7 +15669,7 @@ diffuseColor.a = 1.0;
             } catch (e) {
               console.warn("Prop table placement failed:", e);
             }
-            const carGltfPath = "./car-game14.gltf";
+            const carGltfPath = "./car-game14.glb";
             const installCarFromGltf = (carGltf) => {
                 car.visible = false;
                 const carScene = carGltf.scene;
