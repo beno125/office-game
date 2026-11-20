@@ -2985,7 +2985,7 @@ let _officeSceneAnimationFrame = 0;
        * lights go out): every bright-mode light colour is mixed this much toward a
        * warm amber. Intensities, the background and dark mode are unchanged.
        */
-      const OFFICE_BRIGHT_WARMTH = { color: 0xffd9a8, amount: 0.2 }; // amount was 0.12
+      const OFFICE_BRIGHT_WARMTH = { color: 0xffd9a8, amount: 0.3 }; // amount was 0.12, then 0.2
       {
         const warm = new THREE.Color(OFFICE_BRIGHT_WARMTH.color);
         const c = new THREE.Color();
