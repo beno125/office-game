@@ -46,6 +46,27 @@ export const STRIP_FLIGHT = {
   maxPixelRatio: 2,
 };
 
+/**
+ * The jump into warp speed at the start of the scene: one global speed
+ * multiplier for every line (also the ones already on screen), from almost
+ * still to full speed, then a short, slight punch and the normal flight.
+ */
+export const STRIP_EASE_IN = {
+  duration: 2.2, // s, to full speed
+  startSpeed: 0.03, // speed multiplier at the start (almost still)
+  curve: (x) => x * x * x * x, // easeInQuart: slow and heavy, then a sudden rush
+  /** Punch on reaching full speed: speed +12% and glow +35% for 0.4 s (a smooth bump), then exactly normal. */
+  overshoot: { speed: 0.12, glow: 0.35, duration: 0.4 },
+  /** Streaks: this fraction of their length at the start, full length at full speed (the trailing end shortens). */
+  startStreak: 0.3,
+  /** Density: this fraction of the lines at the start (already spread across the screen), all of them at full speed. */
+  startDensity: 0.4,
+  /** Brightness (opacity × glow): this much at the start, 1 at full speed. */
+  startBrightness: 0.6,
+  /** Speed is integrated in steps no longer than this (s), so slow frames keep the same motion. */
+  step: 1 / 240,
+};
+
 function cubicBezier(x1, y1, x2, y2) {
   const cx = 3 * x1, bx = 3 * (x2 - x1) - cx, ax = 1 - cx - bx;
   const cy = 3 * y1, by = 3 * (y2 - y1) - cy, ay = 1 - cy - by;
@@ -85,12 +106,30 @@ export function startTransitionStrips(canvas, strips) {
   const reduceMotion =
     typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   const startedAt = performance.now();
+  const EI = STRIP_EASE_IN;
 
-  // Each line: when its current flight began (s). Negative delays: already mid-flight at the start (as before).
+  /** Global speed multiplier at scene time t (s), and the punch (0 → 1 → 0) just after full speed. */
+  const punchAt = (t) => {
+    const u = (t - EI.duration) / EI.overshoot.duration;
+    return u > 0 && u < 1 ? Math.sin(Math.PI * u) : 0;
+  };
+  const speedAt = (t) =>
+    t >= EI.duration
+      ? 1 + EI.overshoot.speed * punchAt(t)
+      : EI.startSpeed + (1 - EI.startSpeed) * EI.curve(Math.max(0, t) / EI.duration);
+  let flightClock = 0; // s of flight at full speed (the lines' own time)
+  let clockAt = 0; // scene time the clock was last advanced to
+
+  // Each line: when its current flight began (flight-clock s). Negative delays: already mid-flight at the start (as before).
+  // Density: a spread-out subset is active from the start, the others join at the centre as the speed rises.
+  const order = strips.map((_, i) => i).sort((a, b) => ((a * 37) % strips.length) - ((b * 37) % strips.length));
   const lines = strips.map((s) => {
     const rad = (s.angle * Math.PI) / 180;
-    return { ...s, sin: Math.sin(rad), cos: Math.cos(rad), born: s.delay };
+    return { ...s, sin: Math.sin(rad), cos: Math.cos(rad), born: s.delay, active: false };
   });
+  const startCount = Math.round(lines.length * EI.startDensity);
+  order.forEach((idx, rank) => (lines[idx].active = rank < startCount));
+  let activeCount = startCount;
 
   let W = 0, H = 0, dpr = 1, frame = 0;
   const resize = () => {
@@ -105,7 +144,7 @@ export function startTransitionStrips(canvas, strips) {
   resize();
 
   /** Where line `l` is at flight progress p (CSS px, relative to the centre). */
-  const place = (l, p, vmin, vmax, out) => {
+  const place = (l, p, vmin, vmax, out, streak = 1) => {
     const e = ease(p);
     const z = F.z[0] + (F.z[1] - F.z[0]) * e;
     const k = F.perspective / (F.perspective - z);
@@ -115,6 +154,7 @@ export function startTransitionStrips(canvas, strips) {
     // rotate(angle) of (0, y): (-y·sin, y·cos); the span's origin sits w/2 right of the centre.
     out.r0 = ty * k; // inner end, distance from the centre (px)
     out.r1 = (ty + l.length * vmin * sy) * k; // outer end
+    out.r0 = out.r1 - (out.r1 - out.r0) * streak; // shorter streak: the trailing (inner) end catches up
     out.ox = (l.width / 2) * k;
     out.s = sx * k; // local → screen across the line
     out.w = l.width * out.s; // true on-screen width (px)
@@ -132,6 +172,19 @@ export function startTransitionStrips(canvas, strips) {
   const draw = (now) => {
     frame = requestAnimationFrame(draw);
     const t = (now - startedAt) / 1000;
+    // Advance the flight clock by the speed (integrated: a slow frame moves the lines the same distance).
+    while (clockAt < t) {
+      const h = Math.min(EI.step, t - clockAt);
+      flightClock += speedAt(clockAt + h / 2) * h;
+      clockAt += h;
+    }
+    const T = flightClock;
+    const speed = speedAt(t);
+    const ramp = Math.min(1, (speed - EI.startSpeed) / (1 - EI.startSpeed)); // 0 → 1 over the ease-in
+    const streak = EI.startStreak + (1 - EI.startStreak) * Math.max(0, speed - EI.startSpeed) / (1 - EI.startSpeed);
+    const bright = EI.startBrightness + (1 - EI.startBrightness) * ramp;
+    const glowBoost = 1 + EI.overshoot.glow * punchAt(t);
+    const targetCount = Math.round(lines.length * (EI.startDensity + (1 - EI.startDensity) * ramp));
     const vmin = Math.min(window.innerWidth, window.innerHeight) / 100;
     const vmax = Math.max(window.innerWidth, window.innerHeight) / 100;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -141,13 +194,19 @@ export function startTransitionStrips(canvas, strips) {
     ctx.lineCap = "round";
 
     for (const l of lines) {
-      let p = (t - l.born) / l.duration;
+      let p = (T - l.born) / l.duration;
       // Back to the start only once the flight is over AND it has fully left the screen.
-      if (p >= 1 && offScreen(l, place(l, 1, vmin, vmax, pos))) {
+      if (p >= 1 && (!l.active || offScreen(l, place(l, 1, vmin, vmax, pos, streak)))) {
         l.born += Math.floor(p) * l.duration;
         p -= Math.floor(p);
       }
-      const P = place(l, p, vmin, vmax, pos);
+      if (!l.active) {
+        // Joins only while at the vanishing point, fading in (never mid-path).
+        if (activeCount >= targetCount || p >= F.fadeIn.until / 2) continue;
+        l.active = true;
+        activeCount++;
+      }
+      const P = place(l, p, vmin, vmax, pos, streak);
       if (offScreen(l, P)) continue;
 
       let alpha = p < F.fadeIn.until
@@ -156,7 +215,7 @@ export function startTransitionStrips(canvas, strips) {
           ? F.fadeIn.opacity + (F.full.opacity - F.fadeIn.opacity) * fadeEase((p - F.fadeIn.until) / (F.full.at - F.fadeIn.until))
           : F.full.opacity;
       const width = Math.max(P.w, F.minWidth);
-      alpha *= Math.min(1, P.w / F.minWidth);
+      alpha *= Math.min(1, P.w / F.minWidth) * bright;
       if (alpha <= 0) continue;
 
       // Round caps add half the width at each end: keep the drawn length the same as the span's.
@@ -173,7 +232,7 @@ export function startTransitionStrips(canvas, strips) {
       for (const [d, o] of F.glow) {
         const g = d * P.s;
         if (g < F.minGlow) continue;
-        ctx.globalAlpha = o * alpha;
+        ctx.globalAlpha = Math.min(1, o * alpha * glowBoost);
         ctx.lineWidth = P.w + 2 * g;
         ctx.stroke();
       }
