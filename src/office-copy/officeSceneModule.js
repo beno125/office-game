@@ -2490,7 +2490,7 @@ let _officeSceneAnimationFrame = 0;
          */
         selfGlow: {
           duckMakor: { bright: 0.22, dark: 0.5 },
-          star: { bright: 0.08, dark: 0.28 }, // was 0.2 / 0.45: the star looked too light
+          star: { bright: 0.04, dark: 0.2 }, // was 0.2 / 0.45, then 0.08 / 0.28: the star looked too light
         },
         /** The two shadow-casting lights (car on the desk, desk side wall): bright mode keeps white @ 0.22. */
         shadowLights: { color: 0xdfe3f5, intensity: 0.12 }, // colour was lavender 0x9a8cff
