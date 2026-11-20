@@ -43,7 +43,7 @@ const CAMERA_DRAG_END_MS = 1200; // the spring is exactly back at zero in ~1 s
  */
 const CAR_PASS = {
   startAt: STRIP_SEQUENCE.fullAt, // s after the scene starts: as the lines hit full speed (the punch)
-  duration: 0.95, // s, from deep in the tunnel to just behind the camera (passes the camera at ~0.8 s)
+  duration: 1.6, // s, from deep in the tunnel to just behind the camera (passes the camera at ~1.35 s; was 0.95)
   from: 2500, // distance in front of the camera at the start (world units: the car is 4.8 long → ~3 px)
   to: -12, // distance at the end (behind the camera, out of view)
   curveOffset: 20, // shapes the approach: distance = (from + c)·((to + c)/(from + c))^u − c
