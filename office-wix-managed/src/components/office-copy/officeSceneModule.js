@@ -2490,8 +2490,10 @@ let _officeSceneAnimationFrame = 0;
          */
         selfGlow: {
           duckMakor: { bright: 0.22, dark: 0.5 },
-          star: { bright: 0.04, dark: 0.2 }, // was 0.2 / 0.45, then 0.08 / 0.28: the star looked too light
+          star: { bright: 0.04, dark: 0.17 }, // was 0.2 / 0.45, 0.08 / 0.28, then 0.04 / 0.2: the star looked too light
         },
+        /** The star's own colour × this (its glow follows its colour), so it reads a little less bright in both modes. */
+        starColorScale: 0.88,
         /** The two shadow-casting lights (car on the desk, desk side wall): bright mode keeps white @ 0.22. */
         shadowLights: { color: 0xdfe3f5, intensity: 0.12 }, // colour was lavender 0x9a8cff
         /** Emissive strength in dark mode (bright mode keeps its own values). */
@@ -2788,6 +2790,8 @@ let _officeSceneAnimationFrame = 0;
         if (!_selfGlowMats.star) {
           const star = findStarMesh();
           if (star && star.material && star.material.emissive) {
+            star.material = star.material.clone(); // its own copy: the model's material may be shared
+            star.material.color.multiplyScalar(GAMING_DARK.starColorScale);
             star.material.emissive.copy(star.material.color);
             _selfGlowMats.star = star.material;
           }
