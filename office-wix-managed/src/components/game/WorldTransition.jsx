@@ -2,7 +2,7 @@ import { useEffect, useRef } from "react";
 import { Label, Panel, Snap } from "./ui/ui.jsx";
 import "./ui/loaders.css";
 import { createCameraDrag } from "./cameraDrag.js";
-import { startTransitionStrips } from "./transitionStrips.js";
+import { startTransitionStrips, stripSequenceAt, STRIP_SEQUENCE } from "./transitionStrips.js";
 
 const TRANSITION_DURATION = 8600;
 const TRANSITION_STRIP_COLORS = [
@@ -34,10 +34,30 @@ const CAPTION_DELAY_MS = 200;
  * before the transition ends (ms): it springs back to the fixed angle in time.
  */
 const CAMERA_DRAG_END_MS = 1200; // the spring is exactly back at zero in ~1 s
+/**
+ * The car's pass, after the lines' launch (transitionStrips.js STRIP_SEQUENCE):
+ * hidden until the lines reach full speed, then it rushes in from deep in the
+ * tunnel (a few px at the vanishing point) and flies through the camera with
+ * the punch. Its distance to the camera shrinks exponentially (the same growth
+ * rate on screen all the way, smooth speed), crossing zero and going behind.
+ */
+const CAR_PASS = {
+  startAt: STRIP_SEQUENCE.fullAt, // s after the scene starts: as the lines hit full speed (the punch)
+  duration: 0.95, // s, from deep in the tunnel to just behind the camera (passes the camera at ~0.8 s)
+  from: 2500, // distance in front of the camera at the start (world units: the car is 4.8 long → ~3 px)
+  to: -12, // distance at the end (behind the camera, out of view)
+  curveOffset: 20, // shapes the approach: distance = (from + c)·((to + c)/(from + c))^u − c
+  /** Slight camera shake while the car is this close (world units), at most this far (world units). */
+  shake: { within: 14, amount: 0.045, frequency: 31 },
+};
+/** The light bar copies on the car's roof, as in the other scenes (lightBarBody1 + lightBar1, 2 on each side). */
+const CAR_LIGHT_BAR_COPIES = { perSide: 2, spacing: 1.6 };
 
 export default function WorldTransition({ onComplete, description }) {
   const stageRef = useRef(null);
   const stripsRef = useRef(null);
+  const sceneStartRef = useRef(0); // the lines' sequence and the car share this clock
+  if (!sceneStartRef.current) sceneStartRef.current = performance.now();
   const onCompleteRef = useRef(onComplete);
   onCompleteRef.current = onComplete;
 
@@ -50,7 +70,7 @@ export default function WorldTransition({ onComplete, description }) {
   }, []);
 
   // The flying coloured lines (drawn on a canvas: always complete on screen).
-  useEffect(() => startTransitionStrips(stripsRef.current, TRANSITION_STRIPS), []);
+  useEffect(() => startTransitionStrips(stripsRef.current, TRANSITION_STRIPS, sceneStartRef.current), []);
 
   useEffect(() => {
     const stage = stageRef.current;
@@ -74,7 +94,7 @@ export default function WorldTransition({ onComplete, description }) {
       if (disposed) return;
 
       const scene = new THREE.Scene();
-      const camera = new THREE.PerspectiveCamera(32, 1, 0.1, 100);
+      const camera = new THREE.PerspectiveCamera(32, 1, 0.1, CAR_PASS.from + 100); // far: the car's start is in view (was 100)
       camera.position.set(0, 0, 7.5);
 
       renderer = new THREE.WebGLRenderer({
@@ -378,6 +398,33 @@ export default function WorldTransition({ onComplete, description }) {
             }
           });
 
+          // The light bar and its copies, as in the other scenes (same glowing material on each copy).
+          car.updateMatrixWorld(true);
+          const lbBody = car.getObjectByName("lightBarBody1");
+          const lbLight = car.getObjectByName("lightBar1");
+          if (lbBody && lbLight) {
+            const parent = lbBody.parent;
+            const group = new THREE.Group();
+            const lbBox = new THREE.Box3().setFromObject(lbBody).expandByObject(lbLight);
+            const center = parent.worldToLocal(lbBox.getCenter(new THREE.Vector3()));
+            group.position.copy(center);
+            parent.add(group);
+            for (const part of [lbBody, lbLight]) {
+              part.position.sub(center);
+              parent.remove(part);
+              group.add(part);
+            }
+            const lbSize = lbBox.getSize(new THREE.Vector3());
+            const spacing = Math.max(lbSize.x, lbSize.z);
+            for (let side = -1; side <= 1; side += 2) {
+              for (let i = 1; i <= CAR_LIGHT_BAR_COPIES.perSide; i++) {
+                const copy = group.clone(true);
+                copy.position.x += side * i * spacing * CAR_LIGHT_BAR_COPIES.spacing;
+                parent.add(copy);
+              }
+            }
+          }
+
           const box = new THREE.Box3().setFromObject(car);
           const center = box.getCenter(new THREE.Vector3());
           const size = box.getSize(new THREE.Vector3());
@@ -386,6 +433,7 @@ export default function WorldTransition({ onComplete, description }) {
           car.scale.setScalar(scale);
 
           carPivot = new THREE.Group();
+          carPivot.visible = false; // until its pass
           carPivot.rotation.set(0.08, -0.62, -0.03);
           carPivot.add(car);
           [
@@ -405,7 +453,8 @@ export default function WorldTransition({ onComplete, description }) {
         },
       );
 
-      const startedAt = performance.now();
+      const startedAt = sceneStartRef.current;
+      const baseFov = camera.fov;
       let previousFrame = startedAt;
       const animate = (now) => {
         if (disposed) return;
@@ -419,13 +468,11 @@ export default function WorldTransition({ onComplete, description }) {
           stripEase,
         );
         if (carPivot) {
-          const driveProgress = Math.min(elapsed / 6.2, 1);
-          const acceleratedProgress = Math.pow(driveProgress, 2.4);
-          carPivot.position.z = THREE.MathUtils.lerp(
-            -90,
-            14,
-            acceleratedProgress,
-          );
+          const passU = (elapsed - CAR_PASS.startAt) / CAR_PASS.duration;
+          const c = CAR_PASS.curveOffset;
+          const distance = (CAR_PASS.from + c) * Math.pow((CAR_PASS.to + c) / (CAR_PASS.from + c), Math.min(Math.max(passU, 0), 1)) - c;
+          carPivot.visible = passU >= 0 && passU <= 1;
+          carPivot.position.z = camera.position.z - distance;
           carPivot.position.x = 0;
           carPivot.position.y = Math.sin(elapsed * 2.8) * 0.035;
           carPivot.rotation.y = 0;
@@ -445,10 +492,28 @@ export default function WorldTransition({ onComplete, description }) {
               7 + stripEase * 4.2 + Math.sin(elapsed * 4 + index) * 0.65;
           });
         }
+        // The sequence's field of view (exactly the normal value once it's over).
+        const fov = baseFov + stripSequenceAt(elapsed).fov;
+        if (camera.fov !== fov) {
+          camera.fov = fov;
+          camera.updateProjectionMatrix();
+        }
+        // A slight shake while the car passes close.
+        let shakeX = 0, shakeY = 0;
+        if (carPivot && carPivot.visible) {
+          const d = Math.abs(camera.position.z - carPivot.position.z);
+          const k = Math.max(0, 1 - d / CAR_PASS.shake.within) * CAR_PASS.shake.amount;
+          shakeX = Math.sin(elapsed * CAR_PASS.shake.frequency) * k;
+          shakeY = Math.sin(elapsed * CAR_PASS.shake.frequency * 1.37 + 1) * k;
+        }
+        camera.position.x += shakeX;
+        camera.position.y += shakeY;
         cameraDrag.update(delta);
         cameraDrag.apply(camera, cameraDragTarget);
         renderer.render(scene, camera);
         cameraDrag.restore(camera);
+        camera.position.x -= shakeX;
+        camera.position.y -= shakeY;
         animationFrame = requestAnimationFrame(animate);
       };
       animationFrame = requestAnimationFrame(animate);
