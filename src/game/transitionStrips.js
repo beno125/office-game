@@ -78,6 +78,14 @@ export const STRIP_SEQUENCE = {
    * slowed down to ~1/6 in between, then sped up again.)
    */
   release: { duration: 0.8, from: 0.7, curve: (u) => 1 - (1 - u) ** 3 },
+  /**
+   * After the release, one wave flowing into the normal flight: the released lines are the burst wave (each
+   * pushed a little further along its flight, up to `stagger` of it, so they don't move as one ring) and retire
+   * once they've left the screen; a stream of the same lines starts at the release, each at a random point of
+   * its first cycle (spread over the whole cycle), so the tunnel fills behind the wave at full density at once.
+   * (Was: every line restarted together from the cluster, so they left and came back together: a second wave.)
+   */
+  stream: { stagger: 0.04 },
   /** The flash at the moment of release: line glow +120% and the centre glow up to this opacity, fading over this long (s). */
   flash: { glow: 1.2, opacity: 0.6, duration: 0.35 },
   /**
@@ -188,10 +196,14 @@ export function startTransitionStrips(canvas, strips, startTime = performance.no
 
   // Each line: when its current flight began (flight-clock s). Negative delays: already mid-flight at the start (as before).
   // All of them on screen from the first frame. Every few: a faint trace (sucked in less).
-  const lines = strips.map((s, i) => {
+  const random = (i, salt) => { const x = Math.sin(i * 12.9898 + salt * 78.233) * 43758.5453; return x - Math.floor(x); };
+  const burstLines = strips.map((s, i) => {
     const rad = (s.angle * Math.PI) / 180;
-    return { ...s, sin: Math.sin(rad), cos: Math.cos(rad), born: s.delay, trace: i % SEQ.traces.every === 0 };
+    return { ...s, sin: Math.sin(rad), cos: Math.cos(rad), born: s.delay, trace: i % SEQ.traces.every === 0, burst: true };
   });
+  // The stream after the release (not drawn before it): the same lines, each at a random point of its first cycle.
+  const streamLines = burstLines.map((l, i) => ({ ...l, trace: false, burst: false, stream: true, waitFor: random(i, 1) }));
+  let lines = burstLines;
 
   let W = 0, H = 0, dpr = 1, frame = 0;
   const resize = () => {
@@ -263,15 +275,18 @@ export function startTransitionStrips(canvas, strips, startTime = performance.no
       const atPeak = stripSequenceAt(SEQ.releaseAt - 1e-6);
       const after = stripSequenceAt(SEQ.releaseAt);
       const clockAtRelease = 0; // the flight is still until the release
-      for (const l of lines) {
+      burstLines.forEach((l, i) => {
         const target = place(l, (clockAtRelease - l.born) / l.duration, vmin, vmax, {}, atPeak).r0;
         let lo = 0, hi = 1;
-        for (let i = 0; i < 30; i++) {
+        for (let k = 0; k < 30; k++) {
           const mid = (lo + hi) / 2;
           if (place(l, mid, vmin, vmax, pos, after).r0 < target) lo = mid; else hi = mid;
         }
-        l.born = clockAtRelease - lo * l.duration;
-      }
+        l.born = clockAtRelease - (lo + SEQ.stream.stagger * random(i, 2)) * l.duration;
+      });
+      // The stream starts now: line i comes out of the centre after waitFor × its cycle.
+      for (const l of streamLines) l.born = clockAtRelease + l.waitFor * l.duration;
+      lines = burstLines.concat(streamLines);
     }
     const T = flightClock;
     const q = stripSequenceAt(t);
@@ -293,9 +308,15 @@ export function startTransitionStrips(canvas, strips, startTime = performance.no
     }
 
     for (const l of lines) {
+      if (l.retired) continue;
       let p = (T - l.born) / l.duration;
-      // Back to the start only once the flight is over AND it has fully left the screen.
+      if (p < 0) continue; // a stream line not out yet
+      // Back to the start only once the flight is over AND it has fully left the screen (the burst wave retires then).
       if (p >= 1 && offScreen(l, place(l, 1, vmin, vmax, pos, q))) {
+        if (l.burst && released) {
+          l.retired = true;
+          continue;
+        }
         l.born += Math.floor(p) * l.duration;
         p -= Math.floor(p);
       }
