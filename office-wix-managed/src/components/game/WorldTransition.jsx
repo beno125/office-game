@@ -55,10 +55,12 @@ const CAR_PASS = {
    */
   entrance: { hangAt: 0.55, hangDistance: 22, keep: 0.15 },
   /**
-   * Motion blur while the car is on screen: each frame is the average of `samples` renders of the car
-   * spread over the last `shutter` seconds of its motion (a film camera's open shutter).
+   * Motion blur while the car is on screen: each frame is the average of renders of the car spread over the
+   * last `shutter` seconds of its motion (a film camera's open shutter; was 1/30 s). Enough renders that the
+   * car's edge moves at most `stepPx` screen px between two of them, within min/max; where even `maxSamples`
+   * aren't enough (right at the camera) the shutter is shortened instead (down to `minShutter`), so the smear stays smooth.
    */
-  motionBlur: { samples: 8, shutter: 1 / 30 },
+  motionBlur: { shutter: 1 / 12, minShutter: 1 / 40, stepPx: 4, minSamples: 8, maxSamples: 32, edge: 2.4 }, // edge: world units off-axis
   /**
    * The moment it passes the camera: field of view +6° and the lines' glow +70%, as a smooth bump this wide
    * (s, the bump's half width), then exactly back to normal.
@@ -556,7 +558,21 @@ export default function WorldTransition({ onComplete, description }) {
           blurSample.setSize(size.x, size.y);
           blurSum.setSize(size.x, size.y);
         }
-        const { samples, shutter } = CAR_PASS.motionBlur;
+        const { stepPx, minSamples, maxSamples, edge } = CAR_PASS.motionBlur;
+        // How far (screen px) the car's edge moves over the shutter.
+        const pxAt = (x) => {
+          const d = Math.max(0.6, carPassDistance((x - CAR_PASS.startAt) / CAR_PASS.duration));
+          return (edge * stage.clientHeight) / (2 * Math.tan((camera.fov * Math.PI) / 360) * d);
+        };
+        let shutter = CAR_PASS.motionBlur.shutter;
+        let samples = Math.ceil(Math.abs(pxAt(time) - pxAt(time - shutter)) / stepPx);
+        if (samples > maxSamples) {
+          for (let k = 0; k < 20 && samples > maxSamples && shutter > CAR_PASS.motionBlur.minShutter; k++) {
+            shutter = Math.max(CAR_PASS.motionBlur.minShutter, shutter * 0.8);
+            samples = Math.ceil(Math.abs(pxAt(time) - pxAt(time - shutter)) / stepPx);
+          }
+        }
+        samples = Math.min(maxSamples, Math.max(minSamples, samples));
         const autoClear = renderer.autoClear;
         renderer.autoClear = false;
         renderer.setRenderTarget(blurSum);
