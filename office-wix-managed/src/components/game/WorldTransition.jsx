@@ -478,6 +478,7 @@ export default function WorldTransition({ onComplete, description }) {
               "--strip-length": `${strip.length}vmin`,
               "--strip-start": `${strip.start}vmin`,
               "--strip-width": `${strip.width}px`,
+              "--strip-w": strip.width, // unitless, for the keyframes' minimum on-screen width
             }}
           />
         ))}
