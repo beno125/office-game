@@ -54,8 +54,11 @@ const CAR_PASS = {
    * there, then eases in and accelerates through the camera.
    */
   entrance: { hangAt: 0.55, hangDistance: 22, keep: 0.15 },
-  /** Camera shake while the car is this close (world units), at most this far (world units). Was 14 / 0.045. */
-  shake: { within: 28, amount: 0.11, frequency: 31 },
+  /**
+   * Motion blur while the car is on screen: each frame is the average of `samples` renders of the car
+   * spread over the last `shutter` seconds of its motion (a film camera's open shutter).
+   */
+  motionBlur: { samples: 8, shutter: 1 / 30 },
   /**
    * The moment it passes the camera: field of view +6° and the lines' glow +70%, as a smooth bump this wide
    * (s, the bump's half width), then exactly back to normal.
@@ -130,6 +133,7 @@ export default function WorldTransition({ onComplete, description }) {
     let lightPipe = null;
     let updateLightPipe = () => {};
     let disposeObject = () => {};
+    let disposeBlur = () => {};
 
     Promise.all([
       import("three"),
@@ -497,6 +501,92 @@ export default function WorldTransition({ onComplete, description }) {
         },
       );
 
+      /** The car's place on its pass at scene time `time` (s). */
+      const placeCar = (time) => {
+        const passU = (time - CAR_PASS.startAt) / CAR_PASS.duration;
+        carPivot.visible = passU >= 0 && passU <= 1;
+        carPivot.position.z = camera.position.z - carPassDistance(passU);
+        carPivot.position.x = 0;
+        carPivot.position.y = Math.sin(time * 2.8) * 0.035;
+        carPivot.rotation.y = 0;
+        carPivot.rotation.z = Math.sin(time * 2.1) * 0.008;
+      };
+      // Motion blur: the car rendered at several moments of the shutter into a render target, averaged
+      // (premultiplied, so its edges blend into the transparent canvas), then tone mapped to the screen.
+      const blurSize = renderer.getDrawingBufferSize(new THREE.Vector2());
+      const blurOptions = { type: THREE.HalfFloatType, depthBuffer: true };
+      const blurSample = new THREE.WebGLRenderTarget(blurSize.x, blurSize.y, { ...blurOptions, samples: 4 });
+      const blurSum = new THREE.WebGLRenderTarget(blurSize.x, blurSize.y, { ...blurOptions, depthBuffer: false });
+      const quadCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+      const quadVertex = "varying vec2 vUv; void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }";
+      const addMaterial = new THREE.ShaderMaterial({
+        uniforms: { map: { value: null }, weight: { value: 1 } },
+        vertexShader: quadVertex,
+        fragmentShader: "uniform sampler2D map; uniform float weight; varying vec2 vUv; void main() { gl_FragColor = texture2D(map, vUv) * weight; }",
+        blending: THREE.CustomBlending,
+        blendSrc: THREE.OneFactor,
+        blendDst: THREE.OneFactor,
+        depthTest: false,
+        depthWrite: false,
+        toneMapped: false,
+      });
+      const outputMaterial = new THREE.ShaderMaterial({
+        uniforms: { map: { value: blurSum.texture } },
+        vertexShader: quadVertex,
+        fragmentShader: [
+          "uniform sampler2D map; varying vec2 vUv;",
+          "void main() {",
+          "  vec4 c = texture2D(map, vUv);",
+          "  gl_FragColor = vec4(c.a > 0.0 ? c.rgb / c.a : vec3(0.0), c.a);", // straight colour for tone mapping
+          "  #include <tonemapping_fragment>",
+          "  #include <colorspace_fragment>",
+          "  gl_FragColor.rgb *= gl_FragColor.a;", // back to premultiplied for the canvas
+          "}",
+        ].join("\n"),
+        blending: THREE.NoBlending,
+        depthTest: false,
+        depthWrite: false,
+      });
+      const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), addMaterial);
+      const quadScene = new THREE.Scene();
+      quadScene.add(quad);
+      const renderMotionBlurred = (time) => {
+        const size = renderer.getDrawingBufferSize(blurSize);
+        if (blurSample.width !== size.x || blurSample.height !== size.y) {
+          blurSample.setSize(size.x, size.y);
+          blurSum.setSize(size.x, size.y);
+        }
+        const { samples, shutter } = CAR_PASS.motionBlur;
+        const autoClear = renderer.autoClear;
+        renderer.autoClear = false;
+        renderer.setRenderTarget(blurSum);
+        renderer.clear();
+        quad.material = addMaterial;
+        addMaterial.uniforms.map.value = blurSample.texture;
+        addMaterial.uniforms.weight.value = 1 / samples;
+        for (let i = 0; i < samples; i++) {
+          placeCar(time - (shutter * i) / Math.max(1, samples - 1));
+          renderer.setRenderTarget(blurSample);
+          renderer.clear();
+          renderer.render(scene, camera);
+          renderer.setRenderTarget(blurSum);
+          renderer.render(quadScene, quadCamera);
+        }
+        placeCar(time);
+        renderer.setRenderTarget(null);
+        renderer.clear();
+        quad.material = outputMaterial;
+        renderer.render(quadScene, quadCamera);
+        renderer.autoClear = autoClear;
+      };
+      disposeBlur = () => {
+        blurSample.dispose();
+        blurSum.dispose();
+        addMaterial.dispose();
+        outputMaterial.dispose();
+        quad.geometry.dispose();
+      };
+
       const startedAt = sceneStartRef.current;
       const baseFov = camera.fov;
       let previousFrame = startedAt;
@@ -512,14 +602,7 @@ export default function WorldTransition({ onComplete, description }) {
           stripEase,
         );
         if (carPivot) {
-          const passU = (elapsed - CAR_PASS.startAt) / CAR_PASS.duration;
-          const distance = carPassDistance(passU);
-          carPivot.visible = passU >= 0 && passU <= 1;
-          carPivot.position.z = camera.position.z - distance;
-          carPivot.position.x = 0;
-          carPivot.position.y = Math.sin(elapsed * 2.8) * 0.035;
-          carPivot.rotation.y = 0;
-          carPivot.rotation.z = Math.sin(elapsed * 2.1) * 0.008;
+          placeCar(elapsed);
           stripCarLights.forEach((light, index) => {
             const colorPhase = elapsed * 0.75 + index * 1.35;
             const colorIndex =
@@ -541,22 +624,11 @@ export default function WorldTransition({ onComplete, description }) {
           camera.fov = fov;
           camera.updateProjectionMatrix();
         }
-        // A slight shake while the car passes close.
-        let shakeX = 0, shakeY = 0;
-        if (carPivot && carPivot.visible) {
-          const d = Math.abs(camera.position.z - carPivot.position.z);
-          const k = Math.max(0, 1 - d / CAR_PASS.shake.within) * CAR_PASS.shake.amount;
-          shakeX = Math.sin(elapsed * CAR_PASS.shake.frequency) * k;
-          shakeY = Math.sin(elapsed * CAR_PASS.shake.frequency * 1.37 + 1) * k;
-        }
-        camera.position.x += shakeX;
-        camera.position.y += shakeY;
         cameraDrag.update(delta);
         cameraDrag.apply(camera, cameraDragTarget);
-        renderer.render(scene, camera);
+        if (carPivot && carPivot.visible) renderMotionBlurred(elapsed);
+        else renderer.render(scene, camera);
         cameraDrag.restore(camera);
-        camera.position.x -= shakeX;
-        camera.position.y -= shakeY;
         animationFrame = requestAnimationFrame(animate);
       };
       animationFrame = requestAnimationFrame(animate);
@@ -572,6 +644,7 @@ export default function WorldTransition({ onComplete, description }) {
       resizeObserver?.disconnect();
       if (carPivot) disposeObject(carPivot);
       if (lightPipe) disposeObject(lightPipe);
+      disposeBlur();
       renderer?.dispose();
       renderer?.domElement.remove();
     };
