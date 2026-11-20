@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import { Label, Panel, Snap } from "./ui/ui.jsx";
 import "./ui/loaders.css";
 import { createCameraDrag } from "./cameraDrag.js";
+import { startTransitionStrips } from "./transitionStrips.js";
 
 const TRANSITION_DURATION = 8600;
 const TRANSITION_STRIP_COLORS = [
@@ -36,6 +37,7 @@ const CAMERA_DRAG_END_MS = 1200; // the spring is exactly back at zero in ~1 s
 
 export default function WorldTransition({ onComplete, description }) {
   const stageRef = useRef(null);
+  const stripsRef = useRef(null);
   const onCompleteRef = useRef(onComplete);
   onCompleteRef.current = onComplete;
 
@@ -46,6 +48,9 @@ export default function WorldTransition({ onComplete, description }) {
     );
     return () => window.clearTimeout(timer);
   }, []);
+
+  // The flying coloured lines (drawn on a canvas: always complete on screen).
+  useEffect(() => startTransitionStrips(stripsRef.current, TRANSITION_STRIPS), []);
 
   useEffect(() => {
     const stage = stageRef.current;
@@ -467,21 +472,7 @@ export default function WorldTransition({ onComplete, description }) {
   return (
     <section className="world-transition" aria-label="Travelling to the kitchen">
       <div className="world-transition-strips" aria-hidden="true">
-        {TRANSITION_STRIPS.map((strip, index) => (
-          <span
-            key={index}
-            style={{
-              "--strip-angle": `${strip.angle}deg`,
-              "--strip-color": strip.color,
-              "--strip-delay": `${strip.delay}s`,
-              "--strip-duration": `${strip.duration}s`,
-              "--strip-length": `${strip.length}vmin`,
-              "--strip-start": `${strip.start}vmin`,
-              "--strip-width": `${strip.width}px`,
-              "--strip-w": strip.width, // unitless, for the keyframes' minimum on-screen width
-            }}
-          />
-        ))}
+        <canvas ref={stripsRef} />
       </div>
       <div ref={stageRef} className="world-transition-car" />
       {description && (
