@@ -2489,7 +2489,7 @@ let _officeSceneAnimationFrame = 0;
          * the duck's beak (duckMakor) and the star (the visible part of starPhysic).
          */
         selfGlow: {
-          duckMakor: { bright: 0.22, dark: 0.5 },
+          duckMakor: { bright: 0.12, dark: 0.32 }, // was 0.22 / 0.5: the beak read too light
           star: { bright: 0.04, dark: 0.17 }, // was 0.2 / 0.45, 0.08 / 0.28, then 0.04 / 0.2: the star looked too light
         },
         /** The star's own colour × this (its glow follows its colour), so it reads a little less bright in both modes. */
@@ -5862,7 +5862,7 @@ let _officeSceneAnimationFrame = 0;
         metalness: 0,
       });
       const duckMakorMaterial = new THREE.MeshStandardMaterial({
-        color: 0xff8c00,
+        color: 0xe0600f, // deeper, darker orange (was 0xff8c00)
         roughness: 0.95,
         metalness: 0,
       });
