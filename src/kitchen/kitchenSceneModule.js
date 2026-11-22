@@ -36,6 +36,7 @@ import { addBloomGroup, addThresholdBloom, keepBelowBloomThreshold, setBloomWeig
 import { createTouchDrive } from "../game/touch/touchDrive.js";
 import { createKitchenFood, trayFromMesh, addTrayShapes, KITCHEN_FOOD } from "./kitchenFood.js";
 import { createMilkCartons } from "./kitchenMilkCartons.js";
+import { createKitchenNapkins } from "./kitchenNapkins.js";
 import { createCameraDrag } from "../game/cameraDrag.js";
 import {
   CAR_MASS,
@@ -2502,6 +2503,7 @@ let _worldSwitched = false;
       const PHYS_GROUP_FOOD = 16384;
       let _kitchenFood = null;
       let _milkCartons = null; // kitchenMilkCartons.js
+      let _kitchenNapkins = null; // kitchenNapkins.js
 
       physicsWorld = new CANNON.World({
         gravity: new CANNON.Vec3(0, -480, 0),
@@ -9843,6 +9845,10 @@ let _worldSwitched = false;
           _milkCartons.dispose();
           _milkCartons = null;
         }
+        if (_kitchenNapkins) {
+          _kitchenNapkins.dispose();
+          _kitchenNapkins = null;
+        }
         stopMisterSpotLaser(_misterSpot);
         resetMisterSpotTrail();
         _misterSpot = null;
@@ -13000,6 +13006,18 @@ let _worldSwitched = false;
                 console.warn("Failed to set up the milk cartons:", e);
               }
             }
+            // Paper napkins flying out of the paper dispenser (see kitchenNapkins.js).
+            if (!_kitchenNapkins) {
+              try {
+                const dispenser = kmodel.getObjectByName("paperDispencer");
+                if (dispenser && dispenser.isMesh) {
+                  _kitchenNapkins = createKitchenNapkins({ THREE, scene, root: kmodel, dispenser });
+                  if (!_kitchenNapkins) console.warn("Napkins: no recess found in paperDispencer");
+                }
+              } catch (e) {
+                console.warn("Failed to set up the napkins:", e);
+              }
+            }
             setupKitchenRamp(kmodel, tablePlatePhysicsMaterial);
             _raceModel = kmodel;
 
@@ -14891,6 +14909,7 @@ let _worldSwitched = false;
           }
           updateTrashPlaneEffect(dt);
           updateRailSparks(dt);
+          if (_kitchenNapkins && _kitchenWorldActive) _kitchenNapkins.update(dt);
           updateIceCoffeeTank(dt);
           updateMisterSpot(dt);
           updateMisterSpotTrail(dt);
