@@ -3279,15 +3279,16 @@ let _officeSceneAnimationFrame = 0;
        * shot), lying in the drawer facing up, with its lines flowing the other way (flow −1: sucked into the ring
        * instead of flying out of it). Its sequence starts when the drawer is open (the Kitchen's times: the air
        * charges, gathers, the flash, the burst, the tunnel); while the drawer stays open it holds at `openHold`
-       * (open, after the burst); as the drawer closes, its collapse and closing flash play within the drawer's
-       * slide (`closeTime`), so they finish before the drawer is shut.
+       * (open, after the burst); its collapse and closing flash (`closeTime`) play just before the drawer slides
+       * back, so none of it goes into the drawer's housing.
        */
       const DRAWER_RING = {
         ...PORTAL_RING_DEFAULTS,
         flow: -1,
         /**
          * Inside the drawer: the whole effect scaled uniformly (never stretched) so its smoke ring's outer edge (its
-         * furthest reach, found by `drawerRingReach`) meets the inner walls (its shorter span decides: the ring is
+         * furthest reach, found by `drawerRingReach`) meets the inner walls of the part of the drawer out of its
+         * housing when open (its back stays in there; its shorter span decides: the ring is
          * round), against its inner front (the end it opens toward), its lowest part on the bottom. Its sparks,
          * drifting rim particles and arcs (reaching further) stop at that edge.
          * `padding`: world units kept clear of the walls, bottom and front (0: touching them).
@@ -7807,10 +7808,14 @@ let _officeSceneAnimationFrame = 0;
           const xr = cast(mid, new THREE.Vector3(1, 0, 0), (box.max.x - box.min.x) / 2);
           const zb = cast(mid, new THREE.Vector3(0, 0, -1), (box.max.z - box.min.z) / 2);
           const zf = cast(mid, new THREE.Vector3(0, 0, 1), (box.max.z - box.min.z) / 2);
-          // The drawer's inside (its inner walls, bottom and front; its walls' top), from the drawer's own mesh.
+          // The drawer's inside (its inner walls, bottom and front; its walls' top), from the drawer's own mesh: only
+          // the part out of its housing when open (its back stays in there, under the housing's top, which would cut it).
+          const cover = scene.getObjectByName("drawerCover");
+          const coverFront = cover ? new THREE.Box3().setFromObject(cover).max.z : -Infinity;
           const inside = {
             minX: mid.x - xl, maxX: mid.x + xr,
-            minZ: mid.z - zb, maxZ: mid.z + zf, // maxZ: its inner front (the end it opens toward)
+            minZ: Math.max(mid.z - zb, coverFront - DRAWER_SLIDE_DISTANCE), // the housing's front, the drawer open
+            maxZ: mid.z + zf, // its inner front (the end it opens toward)
             minY: floorY, maxY: box.max.y,
           };
           // Scaled to fill it: its reach across up to the walls (the shorter of the two spans), never larger than the Kitchen's.
@@ -7893,6 +7898,20 @@ let _officeSceneAnimationFrame = 0;
         }
       }
 
+      /**
+       * How long before the drawer slides back its ring starts closing (s): its collapse and closing flash
+       * (`closeTime`) and its last smoke wisps fading after that flash (the ring's own 1.6 × flashSec), at the same pace.
+       */
+      function drawerRingCloseLead() {
+        const R = DRAWER_RING;
+        return (R.closeTime * (R.closeTo - R.closeFrom + R.flashSec * 1.6)) / (R.closeTo - R.closeFrom + R.flashSec);
+      }
+
+      /** The effect's closing has started (after it was last started). */
+      function drawerRingClosing() {
+        return _drawerPortalFadeOutStartMs > _drawerPortalStartMs;
+      }
+
       function updateDrawerPortalEffect() {
         if (
           !_drawerEffectMesh ||
@@ -7903,14 +7922,14 @@ let _officeSceneAnimationFrame = 0;
         const portalTime = (performance.now() - _drawerPortalStartMs) / 1000;
         const fadeOutTime =
           (performance.now() - _drawerPortalFadeOutStartMs) / 1000;
-        const isFadingOut = _drawerState === "closing";
+        const isFadingOut = drawerRingClosing();
         // The ring: its sequence from when the drawer is open, held open at openHold while the drawer stays open;
-        // as it closes, its collapse and closing flash within the drawer's slide (closeTime).
+        // its collapse and closing flash (closeTime) just before the drawer slides back.
         if (_drawerRing) {
           const R = DRAWER_RING;
           const closeSpan = R.closeTo - R.closeFrom + R.flashSec;
           const phaseT = isFadingOut
-            ? R.closeFrom + Math.min(1, fadeOutTime / R.closeTime) * closeSpan
+            ? R.closeFrom + Math.min(drawerRingCloseLead() / R.closeTime, fadeOutTime / R.closeTime) * closeSpan
             : Math.min(portalTime, R.openHold);
           _drawerRing.tick(phaseT, portalTime);
         }
@@ -7973,9 +7992,11 @@ let _officeSceneAnimationFrame = 0;
             setDrawerPortalActive(true);
           }
         } else if (_drawerState === "open") {
+          // The ring collapses just before the drawer slides back (gone before any of it goes into the housing).
+          if (elapsed >= DRAWER_OPEN_HOLD - drawerRingCloseLead() * 1000 && !drawerRingClosing()) setDrawerPortalActive(false);
           updateDrawerPortalEffect();
           if (elapsed >= DRAWER_OPEN_HOLD) {
-            setDrawerPortalActive(false);
+            if (!drawerRingClosing()) setDrawerPortalActive(false);
             _drawerState = "closing";
             _drawerAnimStart = performance.now();
           }
