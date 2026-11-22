@@ -1,12 +1,16 @@
 /**
  * Milk cartons on the fridge shelves (fridgeBodyLeft / fridgeBodyRight).
  *
- * Look: plain, generic gable-top cartons: a light carton with one coloured
- * band round its shoulders, a simple milk-drop icon and the word "MILK" in a
- * plain font, a soft tinted panel at the bottom, plain print-like lines on the
- * side / back, a light grey gable and a screw cap in the band's colour. Three
- * variants (MILK_CARTON_VARIANTS: blue, red, green), each its own small canvas
- * texture; one shared geometry; one InstancedMesh per variant.
+ * Look: after the reference photo (a 1-litre gable-top carton): a white body
+ * with a blue gingham band round its shoulders, "חלב טרי" in dark blue, a
+ * round picture (sky, green hills, a white house with a red roof, a tree), a
+ * "3%" badge, a little speech bubble, "1 ליטר" with small print and a green
+ * stamp on the front; a green information panel on the sides; fine print and
+ * a barcode on the back; a light grey gable with a fin and a grey screw cap.
+ * The brand is invented, in the reference's style: a blue emblem (hills under
+ * a sun), the name "שדמות" in bold italic blue and a small red "since 1952"
+ * seal. Drawn once on a canvas (one texture atlas); one geometry; one
+ * InstancedMesh for every carton in both fridges.
  *
  * Size: real carton proportions (MILK_CARTONS.proportions), the total height
  * set from the shelves: heightShare × the smallest headroom of the shelves
@@ -18,11 +22,10 @@
  * the surface), the lowest / highest of the rest are the inside's floor /
  * ceiling. A shelf's headroom is the next face above it.
  *
- * Arrangement: per shelf, tidy front-facing rows from the front edge back
- * (up to maxRows), as many evenly spaced columns as fit; one milk type per
- * column (a few columns each). A little seeded randomness (× jitter): a few
- * degrees of turn and small offsets, now and then a carton turned or out of
- * line a bit more, and rarely a gap (one taken). A carton whose jitter would
+ * Arrangement: a small, tidy group in each shelf's inner left corner (at the
+ * back, on the left as seen through the door): rows of groupColumns, filled
+ * from the back row and the left, all facing the door, with a little seeded
+ * randomness (a couple of degrees, small offsets). A carton whose jitter would
  * leave the shelf or touch a neighbour is placed with less, or straight. Each
  * stands exactly on its shelf's top surface. Static (no physics), like the
  * other props behind the fridges' closed glass doors.
@@ -38,35 +41,22 @@ export const MILK_CARTONS = {
   /** Total height = heightShare × the smallest headroom of the shelves used, × scale (1 = that size). */
   heightShare: 0.92,
   scale: 1,
-  /** Rows per shelf (from the front edge back), and the spacing: between columns, between rows, from the shelf's edges. */
-  maxRows: 2,
-  colGap: 0.1,
-  rowGap: 0.14,
+  /** Cartons per shelf (lower shelf, upper shelf), per fridge; fewer if they don't fit. */
+  perShelf: [6, 5],
+  /** The group: cartons per row (left to right), and the spacing: between cartons, between rows, from the shelf's back / left edges. */
+  groupColumns: 3,
+  colGap: 0.06,
+  rowGap: 0.08,
   edgeMargin: 0.1,
-  /** Randomness (× jitter; 0 = perfectly straight rows): turn (radians, ±) and offset (±) of every carton; */
+  /** Randomness (× jitter; 0 = perfectly straight): turn (radians, ±) and offset (±) of each carton. */
   jitter: 1,
-  yawJitter: 0.05, // ~3°
-  offsetJitter: 0.03,
-  /** now and then one turned / out of line a bit more (share of cartons, turn, offset); */
-  oddShare: 0.08,
-  oddYaw: 0.17, // ~10°
-  oddOffset: 0.08,
-  /** and rarely a gap (share of slots left empty). */
-  missingShare: 0.06,
-  /** Columns of one milk type in a row (min..max). */
-  typeRun: [1, 3],
-  /** Placement seed (a different one per fridge). */
+  yawJitter: 0.035, // ~2°
+  offsetJitter: 0.025,
+  /** Placement seed (a different one per fridge / shelf). */
   seed: 2711,
   /** Material. */
   roughness: 0.55,
 };
-
-/** The milk types: band / cap colour, and how often each is stocked (relative). */
-export const MILK_CARTON_VARIANTS = [
-  { name: "blue", color: "#2f6fc0", share: 3 },
-  { name: "red", color: "#d2453c", share: 2 },
-  { name: "green", color: "#3f9a5a", share: 2 },
-];
 
 /** Two horizontal faces this close form one shelf slab. */
 const SHELF_MAX_THICKNESS = 0.15;
@@ -139,104 +129,260 @@ export function findFridgeShelves(THREE, mesh) {
   return shelves;
 }
 
-// ---- Textures (one 512 × 512 canvas per milk type) ----
-const ATLAS = 512;
-const R_FRONT = { x: 0, y: 0, w: 190, h: 500 };
-const R_SIDE = { x: 196, y: 0, w: 190, h: 500 };
-const R_BACK = { x: 392, y: 0, w: 118, h: 300 };
-const R_GABLE = { x: 392, y: 306, w: 118, h: 96 };
-const R_CAP = { x: 392, y: 408, w: 118, h: 100 };
-const FONT = "Arial, Helvetica, sans-serif";
-const PAPER = "#f6f7f9";
+// ---- The texture atlas (1024 × 1024) ----
+const ATLAS = 1024;
+const R_FRONT = { x: 0, y: 0, w: 400, h: 1016 };
+const R_SIDE = { x: 408, y: 0, w: 400, h: 1016 };
+const R_BACK = { x: 816, y: 0, w: 208, h: 600 };
+const R_GABLE = { x: 816, y: 608, w: 208, h: 200 };
+const R_CAP = { x: 816, y: 816, w: 208, h: 200 };
+const BLUE = "#1d4a9a";
+const NAVY = "#183a78";
+const HEB_FONT = '"Arial Hebrew", "Noto Sans Hebrew", Arial, sans-serif';
 
-function lines(ctx, x, y, w, rows, gap, color) {
+function drawGingham(ctx, x, y, w, h, cell) {
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(x, y, w, h);
+  ctx.clip();
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(x, y, w, h);
+  const cols = Math.ceil(w / cell) + 1, rows = Math.ceil(h / cell) + 1;
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const sr = r % 2 === 0, sc = c % 2 === 0;
+      if (!sr && !sc) continue;
+      ctx.fillStyle = sr && sc ? BLUE : "#8ea9db";
+      ctx.fillRect(x + c * cell, y + r * cell, cell, cell);
+    }
+  }
+  ctx.restore();
+}
+
+function textLines(ctx, x, y, w, rows, gap, color) {
   ctx.fillStyle = color;
   for (let i = 0; i < rows; i++) {
-    const len = w * (0.6 + 0.4 * (((i * 37) % 10) / 10));
-    ctx.fillRect(x, y + i * gap, len, 3);
+    const len = w * (0.55 + 0.45 * ((i * 37) % 10) / 10);
+    ctx.fillRect(x + w - len, y + i * gap, len, 4);
   }
 }
 
-/** The band round the shoulders: solid colour, a white line, a thin colour line. */
-function band(ctx, x, w, color, h) {
-  ctx.fillStyle = color;
-  ctx.fillRect(x, 0, w, h);
+function drawFront(ctx) {
+  const { x, y, w, h } = R_FRONT;
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.fillStyle = "#f3f5f6";
+  ctx.fillRect(0, 0, w, h);
+  // Shoulder band.
+  drawGingham(ctx, 0, 0, w, 150, 25);
+  ctx.fillStyle = "#e4e8eb";
+  ctx.fillRect(0, 150, w, 6);
+  ctx.direction = "rtl";
+  ctx.textAlign = "center";
+  // Invented brand in the reference's style: a blue emblem (hills under a sun), the name "שדמות" in bold
+  // italic blue, and a small red "since" seal (not a real brand or logo).
+  ctx.fillStyle = BLUE;
+  ctx.beginPath();
+  ctx.arc(330, 222, 26, 0, Math.PI * 2);
+  ctx.fill();
   ctx.fillStyle = "#ffffff";
-  ctx.fillRect(x, h, w, 5);
-  ctx.fillStyle = color;
-  ctx.fillRect(x, h + 5, w, 3);
+  ctx.beginPath();
+  ctx.arc(330, 214, 8, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(306, 236);
+  ctx.quadraticCurveTo(320, 222, 334, 232);
+  ctx.quadraticCurveTo(344, 224, 354, 234);
+  ctx.lineTo(354, 240);
+  ctx.lineTo(306, 240);
+  ctx.closePath();
+  ctx.fill();
+  ctx.fillStyle = BLUE;
+  ctx.font = `italic 900 48px ${HEB_FONT}`;
+  ctx.fillText("שדמות", 222, 240);
+  ctx.fillStyle = "#d0322b";
+  ctx.beginPath();
+  ctx.ellipse(92, 224, 40, 24, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#ffffff";
+  ctx.font = `800 15px ${HEB_FONT}`;
+  ctx.fillText("מאז", 92, 220);
+  ctx.direction = "ltr";
+  ctx.font = `800 17px ${HEB_FONT}`;
+  ctx.fillText("1952", 92, 238);
+  ctx.direction = "rtl";
+  ctx.fillStyle = "#d0322b";
+  ctx.fillRect(140, 254, 160, 4);
+  // "חלב טרי".
+  ctx.fillStyle = NAVY;
+  ctx.font = `900 120px ${HEB_FONT}`;
+  ctx.fillText("חלב", 205, 380);
+  ctx.font = `800 64px ${HEB_FONT}`;
+  ctx.fillText("טרי", 260, 450);
+  // The round picture.
+  const cx = 200, cy = 640, r = 165;
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  ctx.clip();
+  const sky = ctx.createLinearGradient(0, cy - r, 0, cy + r);
+  sky.addColorStop(0, "#2f78c9");
+  sky.addColorStop(0.55, "#a9d4f2");
+  sky.addColorStop(1, "#e8f4fb");
+  ctx.fillStyle = sky;
+  ctx.fillRect(cx - r, cy - r, r * 2, r * 2);
+  ctx.fillStyle = "#ffffff";
+  for (const [ex, ey, er] of [[120, 560, 26], [150, 552, 30], [180, 562, 22], [290, 600, 18], [312, 594, 22]]) {
+    ctx.beginPath();
+    ctx.arc(ex, ey, er, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.fillStyle = "#69b445";
+  ctx.beginPath();
+  ctx.ellipse(250, 820, 260, 120, -0.12, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#3f8f2e";
+  ctx.beginPath();
+  ctx.ellipse(80, 850, 240, 110, 0.15, 0, Math.PI * 2);
+  ctx.fill();
+  // Tree.
+  ctx.fillStyle = "#6b4a2b";
+  ctx.fillRect(282, 640, 12, 60);
+  ctx.fillStyle = "#3c8a2f";
+  ctx.beginPath();
+  ctx.arc(288, 620, 40, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#4fa23b";
+  ctx.beginPath();
+  ctx.arc(276, 606, 24, 0, Math.PI * 2);
+  ctx.fill();
+  // House.
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(120, 650, 130, 80);
+  ctx.fillStyle = "#c9d3dc";
+  ctx.fillRect(120, 650, 30, 80);
+  ctx.fillStyle = "#d8322a";
+  ctx.beginPath();
+  ctx.moveTo(106, 656);
+  ctx.lineTo(160, 600);
+  ctx.lineTo(262, 610);
+  ctx.lineTo(258, 656);
+  ctx.closePath();
+  ctx.fill();
+  ctx.fillStyle = NAVY;
+  for (let i = 0; i < 3; i++) ctx.fillRect(170 + i * 26, 672, 16, 8);
+  ctx.fillRect(175, 692, 60, 6);
+  ctx.restore();
+  // 3% badge.
+  ctx.fillStyle = NAVY;
+  ctx.beginPath();
+  ctx.arc(320, 490, 52, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#ffffff";
+  ctx.direction = "ltr";
+  ctx.font = `800 46px ${HEB_FONT}`;
+  ctx.fillText("3%", 320, 506);
+  ctx.direction = "rtl";
+  // Little speech bubble.
+  ctx.fillStyle = NAVY;
+  ctx.beginPath();
+  ctx.ellipse(300, 840, 70, 40, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#ffffff";
+  ctx.beginPath();
+  ctx.arc(282, 798, 18, 0, Math.PI * 2);
+  ctx.arc(302, 792, 20, 0, Math.PI * 2);
+  ctx.arc(322, 800, 16, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.font = `700 20px ${HEB_FONT}`;
+  ctx.fillText("מה אוכלים", 300, 846);
+  ctx.fillText("היום?", 300, 868);
+  // "1 ליטר" and small print.
+  ctx.fillStyle = "#1b1f2a";
+  ctx.font = `900 54px ${HEB_FONT}`;
+  ctx.fillText("1 ליטר", 255, 935);
+  ctx.font = `600 22px ${HEB_FONT}`;
+  ctx.fillText("חלב מפוסטר, הומוגני 3% שומן", 235, 970);
+  // Green stamp.
+  ctx.strokeStyle = "#6cb63e";
+  ctx.lineWidth = 6;
+  ctx.beginPath();
+  ctx.arc(70, 930, 44, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(70, 930, 24, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.restore();
 }
 
-function tint(color, a) {
-  const n = parseInt(color.slice(1), 16);
-  return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
+function drawSide(ctx) {
+  const { x, y, w, h } = R_SIDE;
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.fillStyle = "#58b08f";
+  ctx.fillRect(0, 0, w, h);
+  drawGingham(ctx, 0, 0, w, 150, 25);
+  ctx.fillStyle = "#e4e8eb";
+  ctx.fillRect(0, 150, w, 6);
+  // White panel with a title, icons and lines.
+  ctx.fillStyle = "#f6f8f7";
+  ctx.beginPath();
+  ctx.roundRect(40, 200, 320, 520, 26);
+  ctx.fill();
+  ctx.fillStyle = NAVY;
+  ctx.direction = "rtl";
+  ctx.textAlign = "center";
+  ctx.font = `800 30px ${HEB_FONT}`;
+  ctx.fillText("ארוחת בוקר טובה", 200, 255);
+  for (let i = 0; i < 6; i++) {
+    const cx = 110 + (i % 3) * 90, cy = 330 + Math.floor(i / 3) * 150;
+    ctx.fillStyle = ["#d9e6f5", "#f3e3c9", "#e2f0da"][i % 3];
+    ctx.beginPath();
+    ctx.arc(cx, cy, 34, 0, Math.PI * 2);
+    ctx.fill();
+    textLines(ctx, cx - 40, cy + 50, 80, 2, 12, "#7b8794");
+  }
+  // Nutrition box.
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(40, 760, 320, 200);
+  textLines(ctx, 60, 780, 280, 12, 15, "#5d6a77");
+  ctx.restore();
 }
 
-function makeVariantTexture(THREE, renderer, color) {
+function drawBack(ctx) {
+  const { x, y, w, h } = R_BACK;
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.fillStyle = "#f3f5f6";
+  ctx.fillRect(0, 0, w, h);
+  drawGingham(ctx, 0, 0, w, 88, 14);
+  textLines(ctx, 16, 120, w - 32, 22, 16, "#8a96a3");
+  // Barcode.
+  ctx.fillStyle = "#1b1f2a";
+  for (let i = 0; i < 34; i++) ctx.fillRect(40 + i * 4, 500, (i * 7) % 3 === 0 ? 3 : 1.5, 60);
+  ctx.restore();
+  // Gable: light grey board.
+  const G = R_GABLE;
+  const gg = ctx.createLinearGradient(0, G.y, 0, G.y + G.h);
+  gg.addColorStop(0, "#f1f3f5");
+  gg.addColorStop(1, "#dde2e6");
+  ctx.fillStyle = gg;
+  ctx.fillRect(G.x, G.y, G.w, G.h);
+  // Cap: grey plastic with ribs.
+  const C = R_CAP;
+  ctx.fillStyle = "#c9ced3";
+  ctx.fillRect(C.x, C.y, C.w, C.h);
+  ctx.fillStyle = "#b3b9bf";
+  for (let i = 0; i < 26; i++) ctx.fillRect(C.x + i * 8, C.y, 3, C.h);
+}
+
+function makeAtlas(THREE, renderer) {
   const canvas = document.createElement("canvas");
   canvas.width = canvas.height = ATLAS;
   const ctx = canvas.getContext("2d");
-  ctx.fillStyle = PAPER;
-  ctx.fillRect(0, 0, ATLAS, ATLAS);
-  // Front: band, "MILK", a drop, a tinted foot panel.
-  {
-    const { x, w, h } = R_FRONT;
-    band(ctx, x, w, color, 72);
-    ctx.fillStyle = color;
-    ctx.textAlign = "center";
-    ctx.textBaseline = "alphabetic";
-    ctx.font = `bold 50px ${FONT}`;
-    ctx.fillText("MILK", x + w / 2, 175);
-    // Drop: a circle with a point on top.
-    const cx = x + w / 2, cy = 300, r = 34;
-    ctx.beginPath();
-    ctx.moveTo(cx, cy - r * 2.1);
-    ctx.bezierCurveTo(cx + r * 0.35, cy - r * 1.3, cx + r, cy - r * 0.6, cx + r, cy);
-    ctx.arc(cx, cy, r, 0, Math.PI);
-    ctx.bezierCurveTo(cx - r, cy - r * 0.6, cx - r * 0.35, cy - r * 1.3, cx, cy - r * 2.1);
-    ctx.fill();
-    ctx.fillStyle = "rgba(255,255,255,0.55)";
-    ctx.beginPath();
-    ctx.ellipse(cx - r * 0.4, cy - r * 0.1, r * 0.16, r * 0.32, -0.35, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = tint(color, 0.16);
-    ctx.fillRect(x, h - 70, w, 70);
-  }
-  // Side: band, a light panel with print lines.
-  {
-    const { x, w, h } = R_SIDE;
-    band(ctx, x, w, color, 72);
-    ctx.fillStyle = "#ffffff";
-    ctx.fillRect(x + 18, 120, w - 36, 260);
-    lines(ctx, x + 30, 140, w - 60, 14, 17, "#a3acb6");
-    ctx.fillStyle = tint(color, 0.16);
-    ctx.fillRect(x, h - 70, w, 70);
-  }
-  // Back: band, print lines, a barcode.
-  {
-    const { x, w } = R_BACK;
-    band(ctx, x, w, color, 44);
-    lines(ctx, x + 12, 80, w - 24, 9, 15, "#a3acb6");
-    ctx.fillStyle = "#2a2f38";
-    for (let i = 0; i < 22; i++) ctx.fillRect(x + 22 + i * 3.4, 240, (i * 7) % 3 === 0 ? 2.2 : 1.1, 40);
-  }
-  // Gable: light grey board.
-  {
-    const G = R_GABLE;
-    const gg = ctx.createLinearGradient(0, G.y, 0, G.y + G.h);
-    gg.addColorStop(0, "#f2f4f6");
-    gg.addColorStop(1, "#dfe3e7");
-    ctx.fillStyle = gg;
-    ctx.fillRect(G.x, G.y, G.w, G.h);
-  }
-  // Cap: the band's colour, with ribs.
-  {
-    const C = R_CAP;
-    ctx.fillStyle = color;
-    ctx.fillRect(C.x, C.y, C.w, C.h);
-    ctx.fillStyle = "rgba(0,0,0,0.18)";
-    for (let i = 0; i < 16; i++) ctx.fillRect(C.x + i * 7.4, C.y, 2.5, C.h);
-  }
+  drawFront(ctx);
+  drawSide(ctx);
+  drawBack(ctx);
   const tex = new THREE.CanvasTexture(canvas);
   tex.colorSpace = THREE.SRGBColorSpace;
   tex.anisotropy = renderer ? Math.min(8, renderer.capabilities.getMaxAnisotropy()) : 1;
@@ -335,7 +481,7 @@ function footprintsOverlap(A, B, gap) {
 
 /**
  * Builds the cartons on the shelves of `fridgeMeshes` and adds them to `scene`.
- * @returns {{ meshes, placements: {x, y, z, yaw, shelf, variant}[], shelves, dims, check(): object, dispose(): void }}
+ * @returns {{ meshes, placements: {x, y, z, yaw, shelf}[], shelves, dims, check(): object, dispose(): void }}
  */
 export function createMilkCartons({ THREE, scene, renderer, fridgeMeshes }) {
   const C = MILK_CARTONS;
@@ -366,87 +512,54 @@ export function createMilkCartons({ THREE, scene, renderer, fridgeMeshes }) {
   const height = dims.body + dims.gable + dims.fin;
   const hw = dims.width / 2, hd = dims.depth / 2;
   const J = C.jitter;
-  const shareSum = MILK_CARTON_VARIANTS.reduce((a, v) => a + v.share, 0);
-  const pickVariant = (r) => {
-    let t = r * shareSum;
-    for (let i = 0; i < MILK_CARTON_VARIANTS.length; i++) {
-      t -= MILK_CARTON_VARIANTS[i].share;
-      if (t <= 0) return i;
-    }
-    return 0;
-  };
   const placements = [];
   perFridge.forEach((shelves) => {
-    shelves.forEach((sh) => {
+    shelves.forEach((sh, si) => {
       const shelfIndex = shelvesAll.indexOf(sh);
       if (sh.headroom < height + 0.02) return; // too low (only with scale > 1)
+      const want = C.perShelf[Math.min(si, C.perShelf.length - 1)];
       const rand = mulberry32(C.seed + sh.fi * 977 + shelfIndex * 131);
       const m = C.edgeMargin;
-      const usableW = sh.maxX - sh.minX - 2 * m;
-      const usableD = sh.maxZ - sh.minZ - 2 * m;
-      const cols = Math.max(0, Math.floor((usableW + C.colGap) / (dims.width + C.colGap)));
-      const rows = Math.min(C.maxRows, Math.max(0, Math.floor((usableD + C.rowGap) / (dims.depth + C.rowGap))));
-      if (!cols || !rows) return;
-      // Even spacing across the shelf (the spare width shared out between the columns).
-      const step = cols > 1 ? (usableW - dims.width) / (cols - 1) : 0;
-      const x0 = cols > 1 ? sh.minX + m + hw : (sh.minX + sh.maxX) / 2;
-      // A milk type per column, in runs of a few columns.
-      const colType = [];
-      while (colType.length < cols) {
-        const type = pickVariant(rand());
-        const run = C.typeRun[0] + Math.floor(rand() * (C.typeRun[1] - C.typeRun[0] + 1));
-        for (let i = 0; i < run && colType.length < cols; i++) colType.push(type);
-      }
       const placed = [];
-      for (let r = 0; r < rows; r++) {
-        const zRow = sh.maxZ - m - hd - r * (dims.depth + C.rowGap); // front row first
-        for (let c = 0; c < cols; c++) {
-          if (rand() < C.missingShare * J) continue; // one taken
-          const odd = rand() < C.oddShare * J;
-          const yawAmp = (odd ? C.oddYaw : C.yawJitter) * J;
-          const offAmp = (odd ? C.oddOffset : C.offsetJitter) * J;
-          const jy = (rand() * 2 - 1) * yawAmp, jx = (rand() * 2 - 1) * offAmp, jz = (rand() * 2 - 1) * offAmp;
-          const bx = x0 + c * step, bz = zRow;
-          // Full jitter, then less, then straight: the first that stays on the shelf and clear of its neighbours.
-          for (const f of [1, 0.5, 0]) {
-            const x = bx + jx * f, z = bz + jz * f, yaw = jy * f;
-            const fp = footprint(x, z, yaw, hw, hd);
-            const inside = fp.every(([px, pz]) => px >= sh.minX + m * 0.5 && px <= sh.maxX - m * 0.5 && pz >= sh.minZ + m * 0.5 && pz <= sh.maxZ - m * 0.5);
-            if (!inside) continue;
-            if (placed.some((o) => footprintsOverlap(o.fp, fp, 0.02))) continue;
-            placed.push({ x, z, yaw, fp, variant: colType[c] });
-            break;
-          }
+      for (let k = 0; k < want; k++) {
+        // Back row first, left to right (the inner left corner: min z is the back, min x the left seen from the door).
+        const r = Math.floor(k / C.groupColumns), c = k % C.groupColumns;
+        const bx = sh.minX + m + hw + c * (dims.width + C.colGap);
+        const bz = sh.minZ + m + hd + r * (dims.depth + C.rowGap);
+        const jy = (rand() * 2 - 1) * C.yawJitter * J;
+        const jx = (rand() * 2 - 1) * C.offsetJitter * J;
+        const jz = (rand() * 2 - 1) * C.offsetJitter * J;
+        // Full jitter, then less, then straight: the first that stays on the shelf and clear of its neighbours.
+        for (const f of [1, 0.5, 0]) {
+          const x = bx + jx * f, z = bz + jz * f, yaw = jy * f;
+          const fp = footprint(x, z, yaw, hw, hd);
+          const inside = fp.every(([px, pz]) => px >= sh.minX + m * 0.5 && px <= sh.maxX - m * 0.5 && pz >= sh.minZ + m * 0.5 && pz <= sh.maxZ - m * 0.5);
+          if (!inside) continue;
+          if (placed.some((o) => footprintsOverlap(o.fp, fp, 0.02))) continue;
+          placed.push({ x, z, yaw, fp });
+          break;
         }
       }
-      for (const p of placed) placements.push({ x: p.x, y: sh.y, z: p.z, yaw: p.yaw, shelf: shelfIndex, variant: p.variant, fp: p.fp });
+      for (const p of placed) placements.push({ x: p.x, y: sh.y, z: p.z, yaw: p.yaw, shelf: shelfIndex, fp: p.fp });
     });
   });
-  // One geometry, a texture / material and an InstancedMesh per milk type.
+  // One geometry, one texture / material, one InstancedMesh.
   const geo = buildCartonGeometry(THREE, dims);
-  const meshes = MILK_CARTON_VARIANTS.map((v) => {
-    const mat = new THREE.MeshStandardMaterial({ map: makeVariantTexture(THREE, renderer, v.color), roughness: C.roughness, metalness: 0 });
-    const n = placements.filter((p) => p.variant === MILK_CARTON_VARIANTS.indexOf(v)).length;
-    const mesh = new THREE.InstancedMesh(geo, mat, Math.max(1, n));
-    mesh.name = "milkCartons_" + v.name;
-    mesh.count = 0;
-    mesh.castShadow = false;
-    mesh.receiveShadow = false;
-    return mesh;
-  });
+  const mat = new THREE.MeshStandardMaterial({ map: makeAtlas(THREE, renderer), roughness: C.roughness, metalness: 0 });
+  const mesh = new THREE.InstancedMesh(geo, mat, Math.max(1, placements.length));
+  mesh.name = "milkCartons";
+  mesh.count = placements.length;
+  mesh.castShadow = false;
+  mesh.receiveShadow = false;
+  const meshes = [mesh];
   const mtx = new THREE.Matrix4(), q = new THREE.Quaternion(), one = new THREE.Vector3(1, 1, 1), up = new THREE.Vector3(0, 1, 0);
   const matrixOf = (p, out) => out.compose(new THREE.Vector3(p.x, p.y, p.z), q.setFromAxisAngle(up, p.yaw), one);
-  for (const p of placements) {
-    const mesh = meshes[p.variant];
-    mesh.setMatrixAt(mesh.count++, matrixOf(p, mtx));
-  }
-  for (const mesh of meshes) {
-    mesh.instanceMatrix.needsUpdate = true;
-    mesh.computeBoundingBox();
-    mesh.computeBoundingSphere();
-    mesh.visible = mesh.count > 0;
-    scene.add(mesh);
-  }
+  placements.forEach((p, i) => mesh.setMatrixAt(i, matrixOf(p, mtx)));
+  mesh.instanceMatrix.needsUpdate = true;
+  mesh.computeBoundingBox();
+  mesh.computeBoundingSphere();
+  mesh.visible = placements.length > 0;
+  scene.add(mesh);
 
   /** Re-tests every carton: each other, its shelf (exactly on it, inside it, headroom), and the fridge bodies' triangles. */
   function check() {
