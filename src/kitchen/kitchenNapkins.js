@@ -9,7 +9,7 @@
  * the highest of them is the recess's ceiling, and the napkins start at that
  * face's area-weighted centre, just under it.
  *
- * Release: a batch of 1..3 napkins every 4..5 s (random), each napkin of a
+ * Release: a batch of 1..2 napkins every 4..5 s (random), each napkin of a
  * batch a little later than the one before (a random stagger).
  *
  * Motion: (1) an exit arc, a cubic Bézier from the slot, first down and out,
@@ -51,7 +51,7 @@
 export const KITCHEN_NAPKINS = {
   /** Napkins per batch (random, inclusive) and the time between batches (random within). */
   batchMin: 1,
-  batchMax: 3,
+  batchMax: 2,
   intervalMin: 4,
   intervalMax: 5,
   /** Delay between napkins of one batch (random up to this, cumulative). */
@@ -102,12 +102,12 @@ export const KITCHEN_NAPKINS = {
   drapeSlope: 0.9,
   restLift: 0.012,
   /** Lifecycle: most napkins resting at once (the oldest fades beyond it), the longest a napkin flies before fading, fade-in / fade-out. */
-  maxResting: 14,
+  maxResting: 8,
   maxFlight: 60,
   fadeIn: 0.25,
   fadeOut: 1.6,
   /** Most napkins in the scene at once (flying + resting; the pool). */
-  maxActive: 32,
+  maxActive: 16,
   /** Room: kept this far inside its walls / ceiling (soft steering within `wallSoft` of them); the top at most this far above the slot. */
   wallMargin: 1.2,
   wallSoft: 3,
