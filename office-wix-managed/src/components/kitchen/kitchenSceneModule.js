@@ -3989,56 +3989,56 @@ let _worldSwitched = false;
       // light for strong hits.
       const RAIL_SPARKS = {
         /** Pool size: the most sparks alive at once (the oldest is reused beyond it). */
-        max: 260,
+        max: 420,
         /** Hit: speed into the wall (units/s) below which nothing sparks, and the speed that gives the full burst. */
         impactThreshold: 1.5,
         impactFull: 12,
         /** Burst size: sparks at the threshold / at full. */
-        burstMin: 4,
-        burstMax: 32,
+        burstMin: 6,
+        burstMax: 50,
         /** Scrape: speed along the wall (units/s) below which nothing sparks, the speed for the full rate, and that rate (sparks/s). */
         scrapeThreshold: 2,
         scrapeFull: 14,
-        scrapeRate: 110,
+        scrapeRate: 170,
         /** Spark speed (units/s): soft / full contact (× a random 0.55–1). */
-        speedMin: 1.6,
-        speedMax: 6.5,
+        speedMin: 2.2,
+        speedMax: 8.5,
         /** Direction mix: off the wall, back against the car's travel, upward; plus a random spread. */
         dirWall: 0.7,
         dirBack: 0.9,
         dirUp: 0.55,
-        spread: 0.55,
+        spread: 0.75,
         /** Life (s): random within this range. */
-        life: [0.18, 0.42],
+        life: [0.25, 0.6],
         /** Far sparks: this share of them is launched faster (speed × farSpeed, random within) and lives longer
          *  (life × farLife), so they arc much farther; the rest stay close to the contact. */
-        farShare: 0.2,
+        farShare: 0.3,
         farSpeed: [1.5, 2.4],
         farLife: [1.8, 2.8],
         /** Upward sparks: this share flies up instead, tilted from straight up by upAngle (degrees, random within),
          *  leaning off the wall and back against the travel, at speed × upSpeed (random within). */
-        upShare: 0.25,
+        upShare: 0.35,
         upAngle: [8, 40],
         upSpeed: [0.9, 1.4],
         /** Gravity (units/s²), and the bounce on the table (share of vertical speed kept; sideways × 0.6). */
         gravity: 16,
         bounce: 0.3,
         /** Head size (world units at 1 unit away, perspective) and the streak's length (× velocity, seconds). */
-        size: 0.125,
-        streak: 0.03,
-        /** Colours (start → end of life) and brightness (HDR × colour; the streak at a share of it). */
+        size: 0.16,
+        streak: 0.05,
+        /** Colours (start → end of life) and brightness (HDR × colour; above the kitchen bloom's threshold, 12, the young sparks glow; the streak at a share of it). */
         colorHot: 0xfff6d8,
         colorMid: 0xffc24a,
         colorEnd: 0xff6a1a,
-        brightness: 3.8,
-        streakBrightness: 0.52,
+        brightness: 14,
+        streakBrightness: 0.45,
         /** Contact height: this far below the rails' top (where a bumper meets them). */
         below: 0.2,
         /** Flash on strong hits: hit strength (0–1) it starts from, peak intensity, range (units), fade time (s), colour. */
         flashFrom: 0.45,
-        flashIntensity: 18,
-        flashRange: 4,
-        flashTime: 0.09,
+        flashIntensity: 40,
+        flashRange: 7,
+        flashTime: 0.12,
         flashColor: 0xffb35a,
       };
       const _rsN = RAIL_SPARKS.max;
