@@ -5230,7 +5230,7 @@ let _worldSwitched = false;
        * at the start of this one). The arrival is one continuous move.
        */
       const KITCHEN_INTRO_SHOTS = [
-        { name: "portal", sec: 4.6, blendIn: 0 }, // the portal opens, the car drives out of it, it closes
+        { name: "portal", sec: 5.6, blendIn: 0 }, // a build-up, the portal opens, the car drives out of it, it closes (was 4.6)
         { name: "overview", sec: 3.6, blendIn: 0, fade: true },
         { name: "carBeauty", sec: 3.6, blendIn: 0, fade: true },
         { name: "misterSpot", sec: 3.6, blendIn: 0, fade: true }, // Mister Spot firing its lasers
@@ -5731,16 +5731,17 @@ let _worldSwitched = false;
       // (gather into a point, a flash, a burst into the ring, the tunnel forms)
       // and collapses back into a small flash. No physics; removed after.
       const KITCHEN_INTRO_PORTAL = {
-        /** Seconds into the shot (its length is the shot's `sec`, 4.6). */
-        gatherEnd: 0.6, // the streaks have gathered into a point
+        /** Seconds into the shot (its length is the shot's `sec`, 5.6): a build-up, then the opening (as before, 1 s later). */
+        buildUp: 1.0, // the air charges: a glow on the table, smoke / sparks swirling round a point, arcs crackling
+        gatherEnd: 1.6, // the smoke has gathered into a point (the flash: it bursts open)
         flashSec: 0.28, // the opening / closing flash fades over this
-        burstEnd: 1.0, // the ring has burst open
-        tunnelIn: [0.75, 1.35], // the tunnel forms (its depth grows)
-        carFrom: 1.2, // the car starts deep in the tunnel…
-        carTo: 3.45, // …and stops on its grid spot
+        burstEnd: 2.0, // the ring has burst open
+        tunnelIn: [1.75, 2.35], // the tunnel forms (its depth grows)
+        carFrom: 2.2, // the car starts deep in the tunnel…
+        carTo: 4.45, // …and stops on its grid spot
         carEase: 1.6, // ease-out power of its drive (higher: faster out of the tunnel)
-        closeFrom: 3.6, // the ring collapses…
-        closeTo: 4.2, // …into the closing flash
+        closeFrom: 4.6, // the ring collapses…
+        closeTo: 5.2, // …into the closing flash
         /**
          * Size and place (world units): ring radius; the portal stands on the table from its bounds: the
          * bottom of its smoke ring sits `heightOffset` above the table's top (measured there at runtime).
@@ -5777,8 +5778,21 @@ let _worldSwitched = false;
         tunnelColors: { near: 0x020310, deep: 0x3a30c8, core: 0xd7dcff },
         /** How the walls' glow grows with depth (higher: dark for longer, bright only deep in). */
         tunnelGlowCurve: 2.4,
-        /** Light on the table and the car (no shadows): colour, intensity at full open / at a flash, reach. */
-        light: { color: 0x7d74ff, intensity: 6, flash: 10, distance: 10 },
+        /** Light on the table and the car (no shadows): colour, intensity at full open / at the opening flash (lights up the table and around) / closing flash, reach. */
+        light: { color: 0x7d74ff, intensity: 6, flash: 26, closeFlash: 10, distance: 12 },
+        /** Build-up: the glow on the table at the portal's spot (opacity, × radius), how much the room dims meanwhile (share). */
+        tableGlow: { opacity: 0.55, size: 1.3 },
+        dim: 0.18,
+        /**
+         * Electric arcs: jagged glowing bolts (white-hot core, the palette's colours), redrawn every `regen` s,
+         * each living `life` s, `segments` long, `width` wide. Per second: from `buildRate[0]` to `[1]` over the
+         * build-up (longer and brighter as the opening nears), `burst` at once on the opening (shooting out),
+         * `openRate` while open (occasional), `closeRate` while closing (pulled into the centre). A share of the
+         * build-up's arcs jump down to the table (ending exactly on it). A small light flashes at their ends.
+         */
+        arcs: { max: 18, segments: 12, regen: 0.045, life: [0.07, 0.2], width: [0.025, 0.05], buildRate: [3, 22], burst: 12, openRate: 1.6, closeRate: 16, tableShare: 0.2, jag: 0.22, glow: 2.6, light: 3.5 },
+        /** A short, subtle camera shake at the opening (world units, s, Hz). */
+        shake: { amount: 0.06, duration: 0.4, freq: [47, 61] },
         /**
          * Lines breaking out into the kitchen: a tunnel line that escapes carries on through the opening
          * (the same line, unmasked past the opening's plane) for `distance` world units, straight on in a
@@ -5802,7 +5816,13 @@ let _worldSwitched = false;
         /** Sparks drifting out of the opening: count, life (s), speed out / sideways (units/s), size. */
         sparks: { count: 70, life: [0.7, 1.4], speedOut: [1.2, 2.8], speedSide: [0.2, 1.0], size: [3, 7] },
         /** Camera: in front of the ring toward the table's front, low; a slow push-in following the car out. */
-        cam: { distFrom: 5.2, distTo: 4.3, side: 3.0, heightFrom: 2.1, heightTo: 1.8, lookHeight: 1.7, follow: 0.35, fovFrom: 54, fovTo: 48 },
+        /**
+         * Camera: aimed at the portal's centre the whole shot (centred in the frame), at its height, a slow
+         * push-in (distance, fov) that keeps the whole smoke ring in view with margin; its angle round the
+         * portal (from straight in front) is the first of `azDeg` (either side) with nothing in the way (no
+         * wall, no car) and the kitchen behind (the jump camera's background check).
+         */
+        cam: { distFrom: 8.4, distTo: 7.4, azDeg: [22, 30, 38, 46, 54, 15], heightOffset: -0.1, fovFrom: 46, fovTo: 42, carClear: 2.0 },
       };
       const KITCHEN_PORTAL_STENCIL = 2; // stencil bit of the opening
       const _kPortal = {
@@ -6027,6 +6047,9 @@ let _worldSwitched = false;
         _kPortal.carLift = Math.max(0, _kPortal.centre.y - P.radius + 0.06 - _kPortal.top);
         _kPortal.start.copy(_kPortal.centre).addScaledVector(_kPortal.fwd, -P.carStartDepth);
         _kPortal.start.y = car.position.y;
+        // The camera's angle: in front, either side, nothing in the way and the kitchen behind
+        // (before any of the portal is in the scene: the background check's boxes are the kitchen's alone).
+        _kPortalChooseCamera();
         // The opening's plane: the real car is kept only in front of it while it crosses it.
         _kPortal.clip.setFromNormalAndCoplanarPoint(_kPortal.fwd, _kPortal.centre);
         _kPortal.uniforms = {
@@ -6442,6 +6465,24 @@ let _worldSwitched = false;
         _kPortal.light = new THREE.PointLight(P.light.color, 0, P.light.distance, 1.6);
         _kPortal.light.position.copy(_kPortal.centre).addScaledVector(_kPortal.fwd, 0.8);
         scene.add(_kPortal.light);
+        // The glow on the table at its spot (the build-up).
+        const tableGlow = new THREE.Mesh(
+          new THREE.CircleGeometry(P.radius * P.tableGlow.size, 48).rotateX(-Math.PI / 2),
+          new THREE.MeshBasicMaterial({ map: _kPortalGlowTexture(), color: new THREE.Color(P.light.color), transparent: true, opacity: 0, depthWrite: false, blending: THREE.AdditiveBlending, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -4, toneMapped: false }),
+        );
+        tableGlow.position.set(_kPortal.centre.x, _kPortal.top + 0.01, _kPortal.centre.z);
+        tableGlow.renderOrder = 6;
+        tableGlow.userData.skipBloomDarken = true;
+        scene.add(tableGlow);
+        _kPortal.tableGlow = tableGlow;
+        // The electric arcs and their light.
+        _kPortal.arcs = _kPortalArcsBuild();
+        scene.add(_kPortal.arcs.mesh);
+        _kPortal.arcs.light = new THREE.PointLight(0xc9d2ff, 0, 6, 1.8);
+        scene.add(_kPortal.arcs.light);
+        // The room dims a little while the air charges: its ambient lights, restored after.
+        _kPortal.lightBase = [ambient.intensity, hemisphere.intensity];
+
         // The car inside the tunnel: a copy drawn only through the opening, at the tunnel's depth.
         car.updateMatrixWorld(true);
         const box = new THREE.Box3().setFromObject(car);
@@ -6540,7 +6581,8 @@ let _worldSwitched = false;
         }
         _kPortal.uniforms.uTime.value = t;
         // Phases.
-        const gather = _kPortalSmooth(0, P.gatherEnd, t);
+        const build = _kPortalSmooth(0, P.buildUp, t); // the air charging
+        const gather = _kPortalSmooth(P.buildUp, P.gatherEnd, t);
         const bu = Math.min(1, Math.max(0, (t - P.gatherEnd) / (P.burstEnd - P.gatherEnd)));
         const burst = bu <= 0 ? 0 : 1 + 2.2 * Math.pow(bu - 1, 3) + 1.2 * Math.pow(bu - 1, 2); // ease-out-back
         const close = _kPortalSmooth(P.closeFrom, P.closeTo, t);
@@ -6548,16 +6590,20 @@ let _worldSwitched = false;
         const depth = _kPortalSmooth(P.tunnelIn[0], P.tunnelIn[1], t) * (1 - _kPortalSmooth(P.closeFrom, P.closeTo, t));
         const flashOpen = t >= P.gatherEnd ? Math.max(0, 1 - (t - P.gatherEnd) / P.flashSec) : 0;
         const flashClose = t >= P.closeTo ? Math.max(0, 1 - (t - P.closeTo) / P.flashSec) : 0;
-        // The rim: gathering in from far round, then the ring (spinning faster as it collapses).
-        const rimR = t < P.gatherEnd ? P.radius * P.gatherFrom * (1 - gather * gather) : P.radius * ring;
+        // The rim: wisps swirling round a point while the air charges, gathering in, then the ring (spinning faster as it collapses).
+        const swirlR = P.radius * 0.45; // the build-up's swirl
+        const rimR =
+          t < P.buildUp ? P.radius * (1.1 - 0.65 * build) :
+          t < P.gatherEnd ? swirlR * (1 - gather * gather) :
+          P.radius * ring;
         _kPortal.uniforms.uRing.value = Math.max(0.001, rimR);
-        _kPortal.uniforms.uSpin.value = P.rimSpin * (1 + 3 * close);
-        _kPortal.uniforms.uThick.value = P.smoke.thickness * (t < P.gatherEnd ? 1 + 2 * (1 - gather) : Math.max(0.2, ring));
-        // Smoke: gathering in, bursting into the ring, its last wisps fading after the closing flash.
-        const smokeIn = t < P.gatherEnd ? Math.min(1, gather * 1.6) : Math.min(1, 0.35 + ring);
+        _kPortal.uniforms.uSpin.value = P.rimSpin * (1 + 3 * close + (t < P.gatherEnd ? 2.5 * build : 0));
+        _kPortal.uniforms.uThick.value = P.smoke.thickness * (t < P.gatherEnd ? 0.6 + 1.2 * (1 - gather) : Math.max(0.2, ring));
+        // Smoke: faint wisps in the build-up, gathering in, bursting into the ring, its last wisps fading after the closing flash.
+        const smokeIn = t < P.buildUp ? 0.12 + 0.3 * build : t < P.gatherEnd ? Math.min(1, 0.42 + gather * 0.8) : Math.min(1, 0.35 + ring);
         const wisps = t >= P.closeTo ? Math.max(0, 1 - (t - P.closeTo) / (P.flashSec * 1.6)) : 1;
         _kPortal.smoke.material.uniforms.uAlpha.value = P.smoke.alpha * smokeIn * wisps;
-        _kPortal.smoke.material.uniforms.uSizeK.value = t < P.gatherEnd ? 0.6 + 0.4 * gather : Math.max(0.35, Math.min(1.1, ring));
+        _kPortal.smoke.material.uniforms.uSizeK.value = t < P.gatherEnd ? 0.45 + 0.3 * build + 0.25 * gather : Math.max(0.35, Math.min(1.1, ring));
         _kPortal.rimParticles.material.uniforms.uAlpha.value = smokeIn * wisps;
         // The tunnel: its opening grows with the ring, its depth forms after the burst (and collapses when closing).
         const open = ring > 0.01 && depth > 0.001;
@@ -6579,14 +6625,217 @@ let _worldSwitched = false;
         const escNow = Math.max(P.escape.steady * (t > P.burstEnd && t < P.closeFrom ? 1 : 0), P.escape.burst * Math.exp(-Math.pow((t - P.burstEnd) / P.escape.burstWidth, 2)), t > P.carFrom + 0.5 && t < P.carTo - 0.4 ? P.escape.car : 0);
         _kPortal.sparks.material.uniforms.uLevel.value = Math.min(1, escNow * 1.5 + close * 0.5) * Math.min(1, ring * 1.2);
         // Flash / gathering point and the haze.
-        const point = Math.max(t < P.gatherEnd ? gather * 0.7 : 0, flashOpen, flashClose * 0.8);
+        const point = Math.max(t < P.gatherEnd ? 0.15 * build + gather * 0.7 : 0, flashOpen, flashClose * 0.8);
         _kPortal.flash.visible = point > 0.003;
         _kPortal.flash.material.opacity = point;
         _kPortal.flash.scale.setScalar(P.radius * (0.35 + 1.4 * Math.max(flashOpen, flashClose * 0.6)));
         _kPortal.haze.scale.setScalar(Math.max(0.001, P.radius * 1.25 * ring));
         _kPortal.haze.material.opacity = 0.55 * ring;
-        _kPortal.light.intensity = P.light.intensity * ring * (0.85 + 0.15 * Math.sin(t * 9)) + P.light.flash * Math.max(flashOpen, flashClose * 0.6);
+        _kPortal.light.intensity =
+          P.light.intensity * Math.max(ring, 0.25 * build * (1 - gather)) * (0.85 + 0.15 * Math.sin(t * 9)) +
+          P.light.flash * flashOpen + P.light.closeFlash * flashClose;
+        // The glow on the table at its spot: rises while the air charges, settles while open, gone with it.
+        _kPortal.tableGlow.material.opacity = P.tableGlow.opacity * Math.max(build * (1 - 0.4 * ring), 0.6 * ring) * (1 - close) * (0.9 + 0.1 * Math.sin(t * 23));
+        // The room dims a little while the air charges (back as it opens).
+        const dimK = 1 - P.dim * build * (1 - _kPortalSmooth(P.gatherEnd, P.burstEnd + 0.4, t));
+        if (_kPortal.lightBase) {
+          ambient.intensity = _kPortal.lightBase[0] * dimK;
+          hemisphere.intensity = _kPortal.lightBase[1] * dimK;
+        }
+        // Electric arcs.
+        _kPortalArcsTick(t, { build, gather, ring, close, flashOpen });
         _kPortalPlaceCar(t);
+      }
+
+      // ── The portal's electric arcs: jagged glowing bolts (one ribbon each, camera-facing), redrawn every few frames.
+      const _kArcV = new THREE.Vector3();
+      const _kArcV2 = new THREE.Vector3();
+      const _kArcSide = new THREE.Vector3();
+      function _kPortalArcsBuild() {
+        const A = KITCHEN_INTRO_PORTAL.arcs;
+        const n = A.max, pts = A.segments + 1;
+        const g = new THREE.BufferGeometry();
+        const pos = new Float32Array(n * pts * 2 * 3);
+        const edge = new Float32Array(n * pts * 2);
+        const alpha = new Float32Array(n * pts * 2);
+        const color = new Float32Array(n * pts * 2 * 3);
+        const index = [];
+        for (let a = 0; a < n; a++) {
+          for (let i = 0; i < pts; i++) {
+            const v = (a * pts + i) * 2;
+            edge[v] = -1;
+            edge[v + 1] = 1;
+            if (i < pts - 1) index.push(v, v + 1, v + 2, v + 1, v + 3, v + 2);
+          }
+        }
+        g.setAttribute("position", new THREE.BufferAttribute(pos, 3).setUsage(THREE.DynamicDrawUsage));
+        g.setAttribute("aEdge", new THREE.BufferAttribute(edge, 1));
+        g.setAttribute("aAlpha", new THREE.BufferAttribute(alpha, 1).setUsage(THREE.DynamicDrawUsage));
+        g.setAttribute("aColor", new THREE.BufferAttribute(color, 3).setUsage(THREE.DynamicDrawUsage));
+        g.setIndex(index);
+        const mesh = new THREE.Mesh(
+          g,
+          new THREE.ShaderMaterial({
+            uniforms: { uGlow: { value: A.glow } },
+            vertexShader: `
+              attribute float aEdge; attribute float aAlpha; attribute vec3 aColor;
+              varying float vEdge; varying float vAlpha; varying vec3 vColor;
+              void main() { vEdge = aEdge; vAlpha = aAlpha; vColor = aColor; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+            fragmentShader: `
+              uniform float uGlow;
+              varying float vEdge; varying float vAlpha; varying vec3 vColor;
+              void main() {
+                float core = exp(-vEdge * vEdge * 14.0); // white-hot core
+                float halo = exp(-vEdge * vEdge * 2.5);
+                vec3 c = mix(vColor, vec3(1.0), core * 0.85) * uGlow;
+                float a = (core + halo * 0.45) * vAlpha;
+                gl_FragColor = vec4(c * a, a);
+              }`,
+            transparent: true,
+            depthWrite: false,
+            blending: THREE.AdditiveBlending,
+            side: THREE.DoubleSide,
+            toneMapped: false,
+          }),
+        );
+        mesh.frustumCulled = false;
+        mesh.renderOrder = 108;
+        mesh.layers.enable(CAR_LIGHTS_BLOOM_LAYER);
+        mesh.userData.skipBloomDarken = true;
+        const pool = Array.from({ length: n }, () => ({
+          alive: false, age: 0, life: 0, regen: 0, a: new THREE.Vector3(), b: new THREE.Vector3(), width: 0.03, bright: 1,
+          color: new THREE.Color(), pts: Array.from({ length: pts }, () => new THREE.Vector3()),
+        }));
+        return { mesh, pool, spawnAcc: 0, burstDone: false, light: null };
+      }
+      /** A point on the ring (radius r, depth jitter) round the portal's centre. */
+      function _kArcRingPoint(r, theta, out) {
+        const c = _kPortal.centre, f = _kPortal.fwd;
+        _kArcSide.set(f.z, 0, -f.x);
+        out.copy(c).addScaledVector(_kArcSide, Math.cos(theta) * r);
+        out.y += Math.sin(theta) * r;
+        out.addScaledVector(f, (Math.random() - 0.5) * 0.25);
+        return out;
+      }
+      /** Starts an arc: `kind` "build" (round the forming ring, some down to the table), "burst" (shooting out), "rim", "close" (into the centre). */
+      function _kPortalSpawnArc(kind, strength, ringR) {
+        const P = KITCHEN_INTRO_PORTAL, A = P.arcs, X = _kPortal.arcs;
+        const arc = X.pool.find((x) => !x.alive);
+        if (!arc) return;
+        const th = Math.random() * Math.PI * 2;
+        const r = Math.max(0.15, ringR);
+        if (kind === "burst") {
+          _kArcRingPoint(r * 0.2, th, arc.a);
+          _kArcRingPoint(r * (1.5 + Math.random() * 0.6), th + (Math.random() - 0.5) * 0.6, arc.b);
+        } else if (kind === "close") {
+          _kArcRingPoint(r, th, arc.a);
+          arc.b.copy(_kPortal.centre);
+        } else {
+          _kArcRingPoint(r * (0.85 + Math.random() * 0.3), th, arc.a);
+          if (kind === "build" && Math.random() < A.tableShare) {
+            // Down to the table: ending exactly on its surface.
+            arc.b.set(arc.a.x + (Math.random() - 0.5) * 1.2, _kPortal.top, arc.a.z + (Math.random() - 0.5) * 1.2);
+          } else {
+            const span = (kind === "rim" ? 0.5 : 0.35 + 1.1 * strength) * (0.6 + Math.random() * 0.8);
+            _kArcRingPoint(r * (0.85 + Math.random() * 0.3), th + span * (Math.random() < 0.5 ? -1 : 1), arc.b);
+          }
+        }
+        arc.alive = true;
+        arc.age = 0;
+        arc.life = A.life[0] + Math.random() * (A.life[1] - A.life[0]) * (0.6 + 0.4 * strength);
+        arc.regen = 0;
+        arc.width = (A.width[0] + Math.random() * (A.width[1] - A.width[0])) * (0.6 + 0.5 * strength);
+        arc.bright = 0.5 + 0.5 * strength;
+        arc.color.set(TRANSITION_STRIP_COLORS[Math.floor(Math.random() * TRANSITION_STRIP_COLORS.length)]);
+        _kPortalJag(arc);
+        // A brief flash of light where it lands.
+        X.light.position.copy(arc.b);
+        X.lightK = Math.max(X.lightK || 0, arc.bright);
+      }
+      /** A fresh jagged path between its ends (random midpoints), never below the table. */
+      function _kPortalJag(arc) {
+        const A = KITCHEN_INTRO_PORTAL.arcs;
+        const n = arc.pts.length - 1;
+        const len = arc.a.distanceTo(arc.b);
+        for (let i = 0; i <= n; i++) {
+          const u = i / n;
+          const p = arc.pts[i].lerpVectors(arc.a, arc.b, u);
+          if (i > 0 && i < n) {
+            const amp = A.jag * len * Math.sin(Math.PI * u);
+            p.x += (Math.random() - 0.5) * 2 * amp;
+            p.y += (Math.random() - 0.5) * 2 * amp;
+            p.z += (Math.random() - 0.5) * 2 * amp;
+          }
+          if (p.y < _kPortal.top) p.y = _kPortal.top;
+        }
+      }
+      function _kPortalArcsTick(t, ph) {
+        const P = KITCHEN_INTRO_PORTAL, A = P.arcs, X = _kPortal.arcs;
+        const dt = Math.max(0, Math.min(0.1, t - (X.lastT ?? t)));
+        X.lastT = t;
+        // Spawning by phase.
+        let rate = 0, kind = "rim", strength = 0.5;
+        const ringR = _kPortal.uniforms.uRing.value;
+        if (t < P.gatherEnd) {
+          strength = ph.build * 0.7 + ph.gather * 0.3;
+          rate = A.buildRate[0] + (A.buildRate[1] - A.buildRate[0]) * strength * strength;
+          kind = "build";
+        } else if (t >= P.closeFrom && t < P.closeTo) {
+          rate = A.closeRate;
+          kind = "close";
+          strength = 0.8;
+        } else if (t >= P.burstEnd && t < P.closeFrom) {
+          rate = A.openRate;
+          kind = "rim";
+          strength = 0.6;
+        }
+        if (!X.burstDone && t >= P.gatherEnd) {
+          X.burstDone = true;
+          for (let i = 0; i < A.burst; i++) _kPortalSpawnArc("burst", 1, P.radius);
+        }
+        X.spawnAcc += rate * dt;
+        while (X.spawnAcc >= 1) {
+          X.spawnAcc -= 1;
+          _kPortalSpawnArc(kind, strength, kind === "close" ? ringR : t < P.gatherEnd ? Math.max(ringR, P.radius * 0.5) : P.radius);
+        }
+        // Age, redraw every few frames, write the ribbons (facing the camera).
+        const geo = X.mesh.geometry;
+        const pos = geo.attributes.position.array, al = geo.attributes.aAlpha.array, col = geo.attributes.aColor.array;
+        const cam = camera.position;
+        const pts = A.segments + 1;
+        X.pool.forEach((arc, ai) => {
+          const base = ai * pts * 2;
+          if (arc.alive) {
+            arc.age += dt;
+            arc.regen += dt;
+            if (arc.age >= arc.life) arc.alive = false;
+            else if (arc.regen >= A.regen) {
+              arc.regen = 0;
+              _kPortalJag(arc);
+            }
+          }
+          const k = arc.alive ? arc.bright * Math.sin(Math.PI * Math.min(1, arc.age / arc.life)) ** 0.5 * (0.7 + 0.3 * Math.random()) : 0;
+          for (let i = 0; i < pts; i++) {
+            const p = arc.pts[i];
+            const q = arc.pts[Math.min(pts - 1, i + 1)], o = arc.pts[Math.max(0, i - 1)];
+            _kArcV.subVectors(q, o);
+            _kArcV2.subVectors(cam, p);
+            _kArcSide.crossVectors(_kArcV, _kArcV2).normalize().multiplyScalar(arc.width);
+            const v = (base + i * 2) * 3;
+            pos[v] = p.x - _kArcSide.x; pos[v + 1] = Math.max(_kPortal.top, p.y - _kArcSide.y); pos[v + 2] = p.z - _kArcSide.z;
+            pos[v + 3] = p.x + _kArcSide.x; pos[v + 4] = Math.max(_kPortal.top, p.y + _kArcSide.y); pos[v + 5] = p.z + _kArcSide.z;
+            al[base + i * 2] = al[base + i * 2 + 1] = k;
+            col[v] = col[v + 3] = arc.color.r;
+            col[v + 1] = col[v + 4] = arc.color.g;
+            col[v + 2] = col[v + 5] = arc.color.b;
+          }
+        });
+        geo.attributes.position.needsUpdate = true;
+        geo.attributes.aAlpha.needsUpdate = true;
+        geo.attributes.aColor.needsUpdate = true;
+        // Their light flash, fading quickly.
+        X.lightK = Math.max(0, (X.lightK || 0) - dt * 9);
+        X.light.intensity = A.light * X.lightK * (0.6 + 0.4 * Math.random());
       }
 
       /** The portal removed completely, and the car exactly on its grid spot (also if the intro ends early). */
@@ -6622,6 +6871,23 @@ let _worldSwitched = false;
           scene.remove(_kPortal.light);
           _kPortal.light.dispose();
         }
+        if (_kPortal.tableGlow) {
+          scene.remove(_kPortal.tableGlow);
+          disposeTree(_kPortal.tableGlow);
+          _kPortal.tableGlow = null;
+        }
+        if (_kPortal.arcs) {
+          scene.remove(_kPortal.arcs.mesh);
+          disposeTree(_kPortal.arcs.mesh);
+          scene.remove(_kPortal.arcs.light);
+          _kPortal.arcs.light.dispose();
+          _kPortal.arcs = null;
+        }
+        if (_kPortal.lightBase) {
+          ambient.intensity = _kPortal.lightBase[0];
+          hemisphere.intensity = _kPortal.lightBase[1];
+          _kPortal.lightBase = null;
+        }
         _kPortal.group = _kPortal.masked = _kPortal.smoke = _kPortal.rimParticles = _kPortal.flash = _kPortal.haze = _kPortal.tunnel = _kPortal.unit = null;
         _kPortal.tunnelOut = _kPortal.wave = _kPortal.sparks = null;
         _kPortal.carCopy = _kPortal.light = null;
@@ -6637,28 +6903,97 @@ let _worldSwitched = false;
         }
       }
 
-      /** The portal shot's camera: low, in front of the ring toward the table's front, pushing in, following the car out. */
+      /** Camera position for the portal shot at push-in e (0 → 1), angle az (degrees) on side `sign`. */
+      function _kPortalCamPos(e, az, sign, out) {
+        const C = KITCHEN_INTRO_PORTAL.cam;
+        const f = _kPortal.fwd;
+        _kArcSide.set(f.z, 0, -f.x);
+        const d = _kIntroLerp(C.distFrom, C.distTo, e);
+        const a = az * _kIntroDeg;
+        out.copy(_kPortal.centre).addScaledVector(f, Math.cos(a) * d).addScaledVector(_kArcSide, Math.sin(a) * d * sign);
+        out.y = _kPortal.centre.y + C.heightOffset;
+        return out;
+      }
+      /** Picks the shot's angle: nothing between the camera and the portal (no wall, no car), the kitchen behind it. */
+      function _kPortalChooseCamera() {
+        const P = KITCHEN_INTRO_PORTAL, C = P.cam;
+        const c = _kPortal.centre;
+        const cam = new THREE.Vector3(), seg = new THREE.Vector3(), toCar = new THREE.Vector3();
+        const others = _raceCars.filter((rc) => !rc.isPlayer).map((rc) => rc.pos);
+        const ringPts = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()];
+        const clearAt = (p) => {
+          for (const b of _jfxBackgroundBoxes()) if (b.containsPoint(p)) return false;
+          // The whole ring in view: lines to its bottom and both sides too (nothing in front of it, e.g. a bowl).
+          _kArcSide.set(_kPortal.fwd.z, 0, -_kPortal.fwd.x);
+          ringPts[0].copy(c).setY(c.y - P.radius * 0.95);
+          ringPts[1].copy(c).addScaledVector(_kArcSide, P.radius * 0.95);
+          ringPts[2].copy(c).addScaledVector(_kArcSide, -P.radius * 0.95);
+          for (const q of ringPts) {
+            const dq = p.distanceTo(q);
+            _jfxBgRay.set(q, seg.subVectors(p, q).normalize());
+            if (_jfxNearestBoxHit(0.05, q) < dq) return false;
+          }
+          const d = p.distanceTo(c);
+          _jfxBgRay.set(c, seg.subVectors(p, c).normalize());
+          if (_jfxNearestBoxHit(0.05, c) < d) return false;
+          // The AI cars on the grid: not between it and the portal, nor right in front of it.
+          for (const q of others) {
+            toCar.set(q.x, q.y + 0.8, q.z).sub(c);
+            const along = Math.max(0, Math.min(d, toCar.dot(seg)));
+            const dist = toCar.addScaledVector(seg, -along).length();
+            if (dist < C.carClear) return false;
+          }
+          return true;
+        };
+        const cover = (p) => {
+          let hits = 0, n = 0;
+          const fw = seg.subVectors(c, p).normalize();
+          _jfxRight.crossVectors(fw, _flatUp).normalize();
+          for (const [r, u] of [[0, 0], [1, 0], [-1, 0], [0, 0.7], [0, -0.5]]) {
+            _jfxAim.copy(c).addScaledVector(_jfxRight, r * P.radius * 1.4);
+            _jfxAim.y += u * P.radius * 1.4;
+            const d = _jfxAim.distanceTo(p);
+            _jfxBgRay.set(p, _jfxDir.subVectors(_jfxAim, p).normalize());
+            if (_jfxNearestBoxHit(d) < d + JUMP_CAM_BG_DIST) hits++;
+            n++;
+          }
+          return hits / n;
+        };
+        let best = null;
+        for (const az of C.azDeg) {
+          for (const sign of [1, -1]) {
+            const ok = clearAt(_kPortalCamPos(0, az, sign, cam)) && clearAt(_kPortalCamPos(1, az, sign, cam));
+            const cv = Math.min(cover(_kPortalCamPos(0, az, sign, cam)), cover(_kPortalCamPos(1, az, sign, cam)));
+            const cand = { az, sign, ok, cv };
+            if (ok && cv >= JUMP_CAM_BG_MIN) {
+              _kPortal.cam = cand;
+              return;
+            }
+            if (!best || (cand.ok && !best.ok) || (cand.ok === best.ok && cand.cv > best.cv)) best = cand;
+          }
+        }
+        _kPortal.cam = best;
+      }
+
+      /** The portal shot's camera: aimed at the portal's centre the whole shot (centred), pushing in; a short shake at the opening. */
       function _kIntroPortalCamPose(u, o) {
         const P = KITCHEN_INTRO_PORTAL;
         const C = P.cam;
-        const R = _kIntro.rig;
         if (!_kPortal.active && !_kPortal.done) _kIntroPortalBegin();
         const sec = KITCHEN_INTRO_SHOTS.find((sh) => sh.name === "portal").sec;
         const e = _kIntroEaseSine(u);
-        const fwd = _kPortal.fwd;
-        o.pos.copy(_kPortal.centre)
-          .addScaledVector(fwd, _kIntroLerp(C.distFrom, C.distTo, e))
-          .addScaledVector(R.out, C.side);
-        o.pos.y = _kPortal.top + _kIntroLerp(C.heightFrom, C.heightTo, e);
-        // Look: at the ring, turning toward the car while it comes out, back to the ring for the closing.
-        const carP = _kPortalCarProgress(u * sec);
-        _kPortalV.copy(_kPortal.start).lerp(_kPortal.grid, carP);
-        const ahead = _kPortalV.clone().sub(_kPortal.centre).dot(fwd);
-        const follow = ahead > 0 ? C.follow * Math.sin(Math.PI * Math.min(1, ahead / P.behindGrid * 2)) : 0;
+        const K = _kPortal.cam || { az: C.azDeg[0], sign: 1 };
+        _kPortalCamPos(e, K.az, K.sign, o.pos);
         o.look.copy(_kPortal.centre);
-        o.look.y = _kPortal.top + C.lookHeight;
-        o.look.x += (_kPortalV.x - o.look.x) * follow;
-        o.look.z += (_kPortalV.z - o.look.z) * follow;
+        // Opening: a short, subtle shake (the position only: the portal stays centred).
+        const t = u * sec;
+        const sk = t >= P.gatherEnd ? Math.max(0, 1 - (t - P.gatherEnd) / P.shake.duration) : 0;
+        if (sk > 0) {
+          const a = P.shake.amount * sk * sk;
+          o.pos.x += Math.sin(t * P.shake.freq[0]) * a;
+          o.pos.y += Math.sin(t * P.shake.freq[1] + 1.3) * a;
+          o.pos.z += Math.sin(t * (P.shake.freq[0] + P.shake.freq[1]) * 0.5 + 2.1) * a;
+        }
         o.fov = _kIntroLerp(C.fovFrom, C.fovTo, e);
         o.roll = 0;
         return o;
