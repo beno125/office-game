@@ -8147,12 +8147,23 @@ let _worldSwitched = false;
         _carLightRight.set(_carLightFwd.z, 0, -_carLightFwd.x);
       }
 
-      // ── Fire on trashPlane1 (the hole's dark floor): flame particles rising
-      // from its surface and a warm glow on it. Idle: low, flickering flames and
-      // a few embers. Every race car over it: the flames around it flare up tall
-      // and bright (more at speed) and fade back once it's gone. Visual only (no
-      // physics). The particles are placed and animated in the vertex shader.
+      // ── Fire in the three trash holes (trashPlane1/2/3, the holes' dark floors):
+      // flame particles rising from each floor, a glow on it and a light that
+      // lights the hole's surroundings and the cars. One effect (createTrashFx),
+      // three colours (TRASH_FX_COLORS). Idle: low, flickering flames and a few
+      // embers. Every race car over a hole: the flames around it flare up tall
+      // and bright (more at speed) and fade back once it's gone; the flames and
+      // embers also lean after nearby cars (a gentle, lagging pull). Visual only
+      // (no physics). The particles are placed and animated in the vertex shader.
       const TRASH_FX_ENABLED = true;
+      /** The planes that get the fire (model names). */
+      const TRASH_FX_PLANE_NAMES = ["trashPlane1", "trashPlane2", "trashPlane3"];
+      /** Each hole's fire colours (hot base → body → cooling tip; the glow and the light use `mid`). */
+      const TRASH_FX_COLORS = {
+        trashPlane1: { core: 0xfff0b8, mid: 0xff8a1e, tip: 0xd8300c }, // orange fire
+        trashPlane2: { core: 0xe6fbff, mid: 0x2fc4ff, tip: 0x1546e0 }, // blue fire
+        trashPlane3: { core: 0xffe6fb, mid: 0xe040ff, tip: 0x7a18d8 }, // violet fire
+      };
       /** Padding around the plane's footprint that still counts as "over it" (world units). */
       const TRASH_FX_EDGE_PAD = 0.6;
       // Drops the black hole floor (the plane itself) below the opening's lip.
@@ -8160,20 +8171,24 @@ let _worldSwitched = false;
       /** The glow sits this far above the plane's top surface (+ polygonOffset), so it never z-fights. */
       const TRASH_FX_SURFACE_LIFT = 0.004;
       const TRASH_FX = {
-        /** Flame colours, from the hot base to the cooling tip. */
-        colors: { core: 0xfff0b8, mid: 0xff8a1e, tip: 0xd8300c },
         /** Particles: flames + embers (a share of them), spread over this part of the floor (× the smaller half size). */
         count: 520,
         emberShare: 0.18,
         spread: 0.92,
+        /** Where the flames start, relative to the floor's surface (world units; negative = lower). */
+        originOffset: -0.15,
         /** Flame size (px at 1 unit away) and how long a flame lives (s). */
         flameSize: 1500,
         flameLife: 0.9,
         emberLife: 1.6,
-        /** Flame height (world units): idle, and at full flare over a car. Embers rise × emberRise of that. */
-        idleHeight: 0.45,
-        flareHeight: 1.6,
-        emberRise: 1.8,
+        /** Random size per particle (× flameSize): flames and embers. Skewed so big ones are rarer. */
+        flameSizeRange: [0.4, 1.5],
+        emberSizeRange: [0.1, 0.34],
+        /** Flame height above the origin (world units): idle, and at full flare over a car. Embers rise × emberRise of that.
+         *  (The floor is ~1 below the table top: idle flames stay in the hole, a flare shoots well out of it.) */
+        idleHeight: 0.9,
+        flareHeight: 3.8,
+        emberRise: 1.5,
         /** Idle heat (0 → 1): how lively the fire is with no car over it. */
         idleHeat: 0.22,
         /** The flare around each car: radius (world units, grows with speed). */
@@ -8182,29 +8197,44 @@ let _worldSwitched = false;
         /** Fade in / out of a car's flare (s). */
         fadeIn: 0.1,
         fadeOut: 0.7,
+        /** Particle glow: colour × this (over 1 = blooms), plus a white-hot centre of this strength. */
+        glowStrength: 1.7,
+        hotCore: 0.6,
+        /** Chase: how far the particles lean toward a nearby car (share of the gap; older particles lean the most),
+         *  at most this far (world units), for cars within this range (soft falloff), following the car with this lag (s). */
+        chaseStrength: 0.35,
+        chaseMax: 1.1,
+        chaseRange: 3.5,
+        chaseLag: 0.35,
         /** The warm glow on the floor: idle strength, and under a car. */
         glowIdle: 0.12,
         glowCar: 0.35,
-        /** The fire's light on its surroundings: idle and at full flare (flickers). */
-        lightIdle: 0.6,
-        lightFlare: 4,
+        /** The fire's light: idle and at full flare (flickers more as the fire flares), its range (world units) and height above the
+         *  hole's floor (above the table top, ~1 up, so it lights the track and the cars from above). */
+        lightIdle: 45,
+        lightFlare: 220,
+        lightRange: 11,
+        lightDecay: 1.5,
+        lightHeight: 2.6,
+        /** The light leans toward a chased car by this share of the particles' lean. */
+        lightChase: 0.5,
         /** Bright mode: the whole effect × this (dark mode: 1). */
         brightModeScale: 0.8,
       };
       const TRASH_FX_MAX_CARS = 6;
-      const _trashFxPlanes = [];
       const _trashFxBox = new THREE.Box3();
       let _trashFxTime = 0;
-      const _trashFxCarState = new Map(); // race car → { strength }
-      const _trashFxCars = Array.from({ length: TRASH_FX_MAX_CARS }, () => new THREE.Vector4()); // x, z, strength, radius
+      /** One entry per hole (createTrashFx). */
+      const _trashFxList = [];
+      // Shared by every hole: the clock and the bright-mode scale.
       const _trashFxShared = {
         uTime: { value: 0 },
         uScale: { value: 1 },
-        uCars: { value: _trashFxCars },
         uIdleHeat: { value: TRASH_FX.idleHeat },
       };
 
-      // Flames / embers: each particle has a fixed spot on the floor and a phase; its rise is computed per frame on the GPU.
+      // Flames / embers: each particle has a fixed spot on a unit disc and a phase; its rise is computed per frame on the GPU.
+      // One geometry for every hole (each hole's material places it).
       const _trashFxGeo = new THREE.BufferGeometry();
       {
         const n = TRASH_FX.count;
@@ -8214,17 +8244,19 @@ let _worldSwitched = false;
           const ember = Math.random() < TRASH_FX.emberShare;
           const a = Math.random() * Math.PI * 2;
           const r = Math.sqrt(Math.random());
+          const [sMin, sMax] = ember ? TRASH_FX.emberSizeRange : TRASH_FX.flameSizeRange;
           base[i * 3] = Math.cos(a) * r;
           base[i * 3 + 1] = Math.sin(a) * r;
           base[i * 3 + 2] = Math.random();
           props[i * 3] = ember ? 1 : 0;
-          props[i * 3 + 1] = ember ? 0.12 + Math.random() * 0.12 : 0.55 + Math.random() * 0.6;
+          props[i * 3 + 1] = sMin + (sMax - sMin) * Math.pow(Math.random(), 1.6);
           props[i * 3 + 2] = Math.random() * 6.2831853;
         }
         _trashFxGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(n * 3), 3));
         _trashFxGeo.setAttribute("aBase", new THREE.BufferAttribute(base, 3));
         _trashFxGeo.setAttribute("aProps", new THREE.BufferAttribute(props, 3));
       }
+      const _trashFxGlowGeo = new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2);
       const _trashFxCarsGlsl = `
         #define MAX_CARS ${TRASH_FX_MAX_CARS}
         uniform vec4 uCars[MAX_CARS];
@@ -8240,24 +8272,7 @@ let _worldSwitched = false;
           return h;
         }
       `;
-      const _trashFxMat = new THREE.ShaderMaterial({
-        transparent: true,
-        depthWrite: false,
-        depthTest: true,
-        blending: THREE.AdditiveBlending,
-        toneMapped: false,
-        uniforms: {
-          ..._trashFxShared,
-          uCenter: { value: new THREE.Vector3() }, // x, topY, z
-          uRadius: { value: 1 },
-          uSize: { value: TRASH_FX.flameSize },
-          uLife: { value: new THREE.Vector2(TRASH_FX.flameLife, TRASH_FX.emberLife) },
-          uHeight: { value: new THREE.Vector3(TRASH_FX.idleHeight, TRASH_FX.flareHeight, TRASH_FX.emberRise) },
-          uCore: { value: new THREE.Color(TRASH_FX.colors.core) },
-          uMid: { value: new THREE.Color(TRASH_FX.colors.mid) },
-          uTip: { value: new THREE.Color(TRASH_FX.colors.tip) },
-        },
-        vertexShader: `
+      const _trashFxVertex = `
         attribute vec3 aBase;
         attribute vec3 aProps;
         uniform float uTime;
@@ -8267,9 +8282,24 @@ let _worldSwitched = false;
         uniform vec2 uLife;
         uniform vec3 uHeight;
         ${_trashFxCarsGlsl}
+        uniform vec3 uChaseCars[MAX_CARS]; // lagged x, z, weight
+        uniform vec3 uChase; // strength, max distance, range
         varying float vLife;
         varying float vHeat;
         varying float vEmber;
+        // The pull toward nearby cars (clamped, soft falloff with distance).
+        vec2 chasePull(vec2 spot) {
+          vec2 off = vec2(0.0);
+          for (int i = 0; i < MAX_CARS; i++) {
+            vec3 c = uChaseCars[i];
+            if (c.z <= 0.001) continue;
+            vec2 d = c.xy - spot;
+            float dist = length(d);
+            float fall = exp(-(dist * dist) / (uChase.z * uChase.z));
+            off += d * min(1.0, uChase.y / max(dist, 0.001)) * c.z * fall;
+          }
+          return off * uChase.x;
+        }
         void main() {
           float ember = aProps.x;
           vec2 spot = uCenter.xz + aBase.xy * uRadius;
@@ -8283,6 +8313,8 @@ let _worldSwitched = false;
           float sway = sin(uTime * (3.0 + aProps.z) + aProps.z * 5.0) * (0.04 + 0.18 * ember) * life;
           p.x += sway;
           p.z += cos(uTime * (2.3 + aProps.z) + aProps.z * 3.0) * (0.03 + 0.14 * ember) * life;
+          // Lean after nearby cars: the older (higher) a particle, the further it has followed.
+          p.xz += chasePull(spot) * life * life * mix(1.0, 1.4, ember);
           // Flames draw in toward their own axis as they rise (a pointed tongue).
           vec4 mv = modelViewMatrix * vec4(p, 1.0);
           gl_Position = projectionMatrix * mv;
@@ -8292,12 +8324,13 @@ let _worldSwitched = false;
           vHeat = heat;
           vEmber = ember;
         }
-      `,
-        fragmentShader: `
+      `;
+      const _trashFxFragment = `
         uniform float uScale;
         uniform vec3 uCore;
         uniform vec3 uMid;
         uniform vec3 uTip;
+        uniform vec2 uGlowFx; // colour gain, white-hot centre
         varying float vLife;
         varying float vHeat;
         varying float vEmber;
@@ -8307,50 +8340,27 @@ let _worldSwitched = false;
           c.x *= mix(1.0 + (0.5 - gl_PointCoord.y) * 0.8, 1.0, vEmber);
           float d = length(c) * 2.0;
           float a = exp(-d * d * mix(2.2, 6.0, vEmber));
-          // Hot white-yellow at the base → orange → red at the tip, fading out.
+          // Hot base → body colour → tip colour, fading out.
           vec3 col = mix(uCore, uMid, smoothstep(0.0, 0.45, vLife));
           col = mix(col, uTip, smoothstep(0.45, 0.9, vLife));
           col = mix(col, uMid * 1.2, vEmber * 0.6);
+          // Glow: brighter than 1 (it blooms) with a white-hot centre.
+          float core = exp(-d * d * 14.0) * uGlowFx.y * (1.0 - vLife);
+          col = col * uGlowFx.x + vec3(core);
           float fade = smoothstep(0.0, 0.08, vLife) * (1.0 - smoothstep(0.55, 1.0, vLife));
           a *= fade * (0.3 + 0.7 * vHeat) * mix(0.32, 1.0, vEmber);
           gl_FragColor = vec4(col * a * uScale, a);
         }
-      `,
-      });
-      const _trashFxPoints = new THREE.Points(_trashFxGeo, _trashFxMat);
-      _trashFxPoints.name = "trashFxFire";
-      _trashFxPoints.visible = false;
-      _trashFxPoints.frustumCulled = false; // placed in the shader
-      _trashFxPoints.renderOrder = 6;
-      _trashFxPoints.layers.enable(CAR_LIGHTS_BLOOM_LAYER);
-      scene.add(_trashFxPoints);
-
-      // The warm glow on the floor (under the flames, soft edges).
-      const _trashFxGlowMat = new THREE.ShaderMaterial({
-        transparent: true,
-        depthWrite: false,
-        depthTest: true,
-        blending: THREE.AdditiveBlending,
-        polygonOffset: true,
-        polygonOffsetFactor: -1,
-        polygonOffsetUnits: -4,
-        toneMapped: false,
-        uniforms: {
-          ..._trashFxShared,
-          uCenter: { value: new THREE.Vector2() },
-          uRadius: { value: 1 },
-          uGlow: { value: new THREE.Vector2(TRASH_FX.glowIdle, TRASH_FX.glowCar) },
-          uColor: { value: new THREE.Color(TRASH_FX.colors.mid) },
-        },
-        vertexShader: `
+      `;
+      const _trashFxGlowVertex = `
         varying vec2 vXZ;
         void main() {
           vec4 w = modelMatrix * vec4(position, 1.0);
           vXZ = w.xz;
           gl_Position = projectionMatrix * viewMatrix * w;
         }
-      `,
-        fragmentShader: `
+      `;
+      const _trashFxGlowFragment = `
         uniform float uTime;
         uniform float uScale;
         uniform vec2 uCenter;
@@ -8366,18 +8376,88 @@ let _worldSwitched = false;
           float g = (uGlow.x * flicker + uGlow.y * carHeat(vXZ)) * mask;
           gl_FragColor = vec4(uColor * g * uScale, 1.0);
         }
-      `,
-      });
-      const _trashFxGlow = new THREE.Mesh(new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2), _trashFxGlowMat);
-      _trashFxGlow.name = "trashFxGlow";
-      _trashFxGlow.visible = false;
-      _trashFxGlow.renderOrder = 5;
-      _trashFxGlow.layers.enable(CAR_LIGHTS_BLOOM_LAYER);
-      scene.add(_trashFxGlow);
-      const _trashFxLight = new THREE.PointLight(0xff8a3a, 0, 22, 1.5);
-      scene.add(_trashFxLight);
+      `;
+
+      /** One hole's fire (particles, floor glow, light) in the given colours ({ core, mid, tip }). Hidden until placed. */
+      function createTrashFx(colors) {
+        const cars = Array.from({ length: TRASH_FX_MAX_CARS }, () => new THREE.Vector4()); // x, z, strength, radius
+        const chaseCars = Array.from({ length: TRASH_FX_MAX_CARS }, () => new THREE.Vector3()); // lagged x, z, weight
+        const uCars = { value: cars };
+        const mat = new THREE.ShaderMaterial({
+          transparent: true,
+          depthWrite: false,
+          depthTest: true,
+          blending: THREE.AdditiveBlending,
+          toneMapped: false,
+          uniforms: {
+            uTime: _trashFxShared.uTime,
+            uScale: _trashFxShared.uScale,
+            uIdleHeat: _trashFxShared.uIdleHeat,
+            uCars,
+            uChaseCars: { value: chaseCars },
+            uChase: { value: new THREE.Vector3(TRASH_FX.chaseStrength, TRASH_FX.chaseMax, TRASH_FX.chaseRange) },
+            uCenter: { value: new THREE.Vector3() }, // x, emit y, z
+            uRadius: { value: 1 },
+            uSize: { value: TRASH_FX.flameSize },
+            uLife: { value: new THREE.Vector2(TRASH_FX.flameLife, TRASH_FX.emberLife) },
+            uHeight: { value: new THREE.Vector3(TRASH_FX.idleHeight, TRASH_FX.flareHeight, TRASH_FX.emberRise) },
+            uCore: { value: new THREE.Color(colors.core) },
+            uMid: { value: new THREE.Color(colors.mid) },
+            uTip: { value: new THREE.Color(colors.tip) },
+            uGlowFx: { value: new THREE.Vector2(TRASH_FX.glowStrength, TRASH_FX.hotCore) },
+          },
+          vertexShader: _trashFxVertex,
+          fragmentShader: _trashFxFragment,
+        });
+        const points = new THREE.Points(_trashFxGeo, mat);
+        points.name = "trashFxFire";
+        points.visible = false;
+        points.frustumCulled = false; // placed in the shader
+        points.renderOrder = 6;
+        points.layers.enable(CAR_LIGHTS_BLOOM_LAYER);
+        scene.add(points);
+
+        // The glow on the floor (under the flames, soft edges).
+        const glowMat = new THREE.ShaderMaterial({
+          transparent: true,
+          depthWrite: false,
+          depthTest: true,
+          blending: THREE.AdditiveBlending,
+          polygonOffset: true,
+          polygonOffsetFactor: -1,
+          polygonOffsetUnits: -4,
+          toneMapped: false,
+          uniforms: {
+            uTime: _trashFxShared.uTime,
+            uScale: _trashFxShared.uScale,
+            uIdleHeat: _trashFxShared.uIdleHeat,
+            uCars,
+            uCenter: { value: new THREE.Vector2() },
+            uRadius: { value: 1 },
+            uGlow: { value: new THREE.Vector2(TRASH_FX.glowIdle, TRASH_FX.glowCar) },
+            uColor: { value: new THREE.Color(colors.mid) },
+          },
+          vertexShader: _trashFxGlowVertex,
+          fragmentShader: _trashFxGlowFragment,
+        });
+        const glow = new THREE.Mesh(_trashFxGlowGeo, glowMat);
+        glow.name = "trashFxGlow";
+        glow.visible = false;
+        glow.renderOrder = 5;
+        glow.layers.enable(CAR_LIGHTS_BLOOM_LAYER);
+        scene.add(glow);
+        // Always in the scene (intensity 0 when off), so the light count never changes (no shader recompiles).
+        const light = new THREE.PointLight(colors.mid, 0, TRASH_FX.lightRange, TRASH_FX.lightDecay);
+        scene.add(light);
+        const fx = { points, glow, light, mat, glowMat, cars, chaseCars, carState: new Map(), plane: null, lightBase: new THREE.Vector3() };
+        _trashFxList.push(fx);
+        return fx;
+      }
+      for (const name of TRASH_FX_PLANE_NAMES) createTrashFx(TRASH_FX_COLORS[name]);
 
       function registerTrashPlane(mesh) {
+        const fx = _trashFxList[TRASH_FX_PLANE_NAMES.indexOf(mesh.name)];
+        if (!fx) return;
         mesh.updateMatrixWorld(true);
         const _planeMats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
         const _clonedMats = [];
@@ -8411,22 +8491,36 @@ let _worldSwitched = false;
           centerZ: (_trashFxBox.min.z + _trashFxBox.max.z) * 0.5,
           topY: _trashFxBox.max.y,
         };
-        _trashFxPlanes.push(plane);
+        fx.plane = plane;
+        fx.carState.clear();
         const radius = Math.min(halfX, halfZ);
-        _trashFxMat.uniforms.uCenter.value.set(plane.centerX, plane.topY + TRASH_FX_SURFACE_LIFT, plane.centerZ);
-        _trashFxMat.uniforms.uRadius.value = radius * TRASH_FX.spread;
-        _trashFxGlow.position.set(plane.centerX, plane.topY + TRASH_FX_SURFACE_LIFT, plane.centerZ);
-        _trashFxGlow.scale.set(radius * 2, 1, radius * 2);
-        _trashFxGlow.updateMatrixWorld(true);
-        _trashFxGlowMat.uniforms.uCenter.value.set(plane.centerX, plane.centerZ);
-        _trashFxGlowMat.uniforms.uRadius.value = radius;
-        _trashFxLight.position.set(plane.centerX, plane.topY + 0.4, plane.centerZ);
+        fx.mat.uniforms.uCenter.value.set(plane.centerX, plane.topY + TRASH_FX.originOffset, plane.centerZ);
+        fx.mat.uniforms.uRadius.value = radius * TRASH_FX.spread;
+        fx.glow.position.set(plane.centerX, plane.topY + TRASH_FX_SURFACE_LIFT, plane.centerZ);
+        fx.glow.scale.set(radius * 2, 1, radius * 2);
+        fx.glow.updateMatrixWorld(true);
+        fx.glowMat.uniforms.uCenter.value.set(plane.centerX, plane.centerZ);
+        fx.glowMat.uniforms.uRadius.value = radius;
+        fx.lightBase.set(plane.centerX, plane.topY + TRASH_FX.lightHeight, plane.centerZ);
+        fx.light.position.copy(fx.lightBase);
       }
 
       function setTrashFxVisible(on) {
-        _trashFxPoints.visible = on;
-        _trashFxGlow.visible = on;
-        if (!on) _trashFxLight.intensity = 0;
+        for (const fx of _trashFxList) {
+          const show = on && !!fx.plane;
+          fx.points.visible = show;
+          fx.glow.visible = show;
+          if (!show) fx.light.intensity = 0;
+        }
+      }
+
+      /** Forget the placed holes (the level is being torn down). */
+      function resetTrashFx() {
+        for (const fx of _trashFxList) {
+          fx.plane = null;
+          fx.carState.clear();
+        }
+        setTrashFxVisible(false);
       }
 
       // ── The coffee machine's screen (coffeeScreen): a lit drinks menu ────────────
@@ -8644,9 +8738,9 @@ let _worldSwitched = false;
         if (_iceCoffeeSurfaceMat) _iceCoffeeSurfaceMat.uniforms.uTime.value += dt;
       }
       function updateTrashPlaneEffect(dt) {
-        const plane = _trashFxPlanes[0];
-        if (!TRASH_FX_ENABLED || !plane || !_kitchenWorldActive) {
-          if (_trashFxPoints.visible) setTrashFxVisible(false);
+        const anyPlaced = _trashFxList.some((fx) => fx.plane);
+        if (!TRASH_FX_ENABLED || !anyPlaced || !_kitchenWorldActive) {
+          setTrashFxVisible(false);
           return;
         }
         setTrashFxVisible(true);
@@ -8655,32 +8749,61 @@ let _worldSwitched = false;
         _trashFxShared.uScale.value = THREE.MathUtils.lerp(1, TRASH_FX.brightModeScale, THREE.MathUtils.clamp(lightBlend, 0, 1));
         // Every race car (the player alone before the race is set up).
         const cars = _raceCars.length ? _raceCars : car ? [{ pos: car.position, state: carState }] : [];
-        let peak = 0;
-        let slot = 0;
-        for (let i = 0; i < cars.length && slot < TRASH_FX_MAX_CARS; i++) {
-          const rc = cars[i];
-          const p = rc.pos;
-          if (!p) continue;
-          let cs = _trashFxCarState.get(rc);
-          if (!cs) {
-            cs = { strength: 0 };
-            _trashFxCarState.set(rc, cs);
+        const lagK = 1 - Math.exp(-dt / TRASH_FX.chaseLag);
+        const chaseReach = TRASH_FX.chaseRange * 2.5; // beyond this a car's pull is ~0: skip it
+        for (let f = 0; f < _trashFxList.length; f++) {
+          const fx = _trashFxList[f];
+          const plane = fx.plane;
+          if (!plane) continue;
+          let peak = 0;
+          let slot = 0;
+          let chaseSlot = 0;
+          let leanX = 0;
+          let leanZ = 0;
+          for (let i = 0; i < cars.length; i++) {
+            const rc = cars[i];
+            const p = rc.pos;
+            if (!p) continue;
+            let cs = fx.carState.get(rc);
+            if (!cs) {
+              cs = { strength: 0, lagX: p.x, lagZ: p.z };
+              fx.carState.set(rc, cs);
+            }
+            // The flare (the existing reaction to a car driving over the hole).
+            const over = p.x >= plane.minX && p.x <= plane.maxX && p.z >= plane.minZ && p.z <= plane.maxZ;
+            const maxSpeed = (rc.state && rc.state.maxSpeed) || carState.maxSpeed || 1;
+            const speed01 = THREE.MathUtils.clamp(Math.abs((rc.state && rc.state.speed) || 0) / maxSpeed, 0, 1);
+            // Its flare fades in quickly and out smoothly (delta-time based).
+            const tau = over ? TRASH_FX.fadeIn : TRASH_FX.fadeOut;
+            cs.strength += ((over ? 0.55 + 0.45 * speed01 : 0) - cs.strength) * (1 - Math.exp(-dt / tau));
+            if (cs.strength > 0.002 && slot < TRASH_FX_MAX_CARS) {
+              const radius = THREE.MathUtils.lerp(TRASH_FX.flareRadius, TRASH_FX.flareRadiusAtSpeed, speed01);
+              fx.cars[slot++].set(p.x, p.z, cs.strength, radius);
+              peak = Math.max(peak, cs.strength);
+            }
+            // The chase: particles follow a lagging copy of the car's position.
+            cs.lagX += (p.x - cs.lagX) * lagK;
+            cs.lagZ += (p.z - cs.lagZ) * lagK;
+            const dx = cs.lagX - plane.centerX;
+            const dz = cs.lagZ - plane.centerZ;
+            const dist = Math.hypot(dx, dz);
+            if (dist < chaseReach && chaseSlot < TRASH_FX_MAX_CARS) {
+              fx.chaseCars[chaseSlot++].set(cs.lagX, cs.lagZ, 1);
+              // The light leans the same way (the same clamp and falloff as the particles, at the hole's centre).
+              const pull = Math.min(1, TRASH_FX.chaseMax / Math.max(dist, 0.001)) * Math.exp(-(dist * dist) / (TRASH_FX.chaseRange * TRASH_FX.chaseRange));
+              leanX += dx * pull;
+              leanZ += dz * pull;
+            }
           }
-          const over = p.x >= plane.minX && p.x <= plane.maxX && p.z >= plane.minZ && p.z <= plane.maxZ;
-          const maxSpeed = (rc.state && rc.state.maxSpeed) || carState.maxSpeed || 1;
-          const speed01 = THREE.MathUtils.clamp(Math.abs((rc.state && rc.state.speed) || 0) / maxSpeed, 0, 1);
-          // Its flare fades in quickly and out smoothly (delta-time based).
-          const tau = over ? TRASH_FX.fadeIn : TRASH_FX.fadeOut;
-          cs.strength += ((over ? 0.55 + 0.45 * speed01 : 0) - cs.strength) * (1 - Math.exp(-dt / tau));
-          if (cs.strength > 0.002) {
-            const radius = THREE.MathUtils.lerp(TRASH_FX.flareRadius, TRASH_FX.flareRadiusAtSpeed, speed01);
-            _trashFxCars[slot++].set(p.x, p.z, cs.strength, radius);
-            peak = Math.max(peak, cs.strength);
-          }
+          for (; slot < TRASH_FX_MAX_CARS; slot++) fx.cars[slot].z = 0;
+          for (; chaseSlot < TRASH_FX_MAX_CARS; chaseSlot++) fx.chaseCars[chaseSlot].z = 0;
+          const lean = TRASH_FX.chaseStrength * TRASH_FX.lightChase;
+          fx.light.position.set(fx.lightBase.x + leanX * lean, fx.lightBase.y, fx.lightBase.z + leanZ * lean);
+          // Flicker deeper as the fire flares (each hole on its own beat).
+          const t = _trashFxTime + f * 1.7;
+          const flicker = 1 - (0.12 + 0.18 * peak) * (0.5 + 0.5 * Math.sin(t * 17) * Math.sin(t * 9.1 + 2));
+          fx.light.intensity = THREE.MathUtils.lerp(TRASH_FX.lightIdle, TRASH_FX.lightFlare, peak) * flicker * _trashFxShared.uScale.value;
         }
-        for (; slot < TRASH_FX_MAX_CARS; slot++) _trashFxCars[slot].z = 0;
-        const flicker = 0.85 + 0.15 * Math.sin(_trashFxTime * 17) * Math.sin(_trashFxTime * 9.1 + 2);
-        _trashFxLight.intensity = THREE.MathUtils.lerp(TRASH_FX.lightIdle, TRASH_FX.lightFlare, peak) * flicker * _trashFxShared.uScale.value;
       }
 
       const FLAME_EFFECT_PARTICLE_COUNT = 60;
@@ -9019,9 +9142,7 @@ let _worldSwitched = false;
         _safeRemoveBody(tablePlateBody); tablePlateBody = null;
         _safeRemoveBody(floorPhysBody); floorPhysBody = null;
         if (_peselLightMeshes.length) _peselLightMeshes.length = 0;
-        if (_trashFxPlanes.length) _trashFxPlanes.length = 0;
-        _trashFxCarState.clear();
-        setTrashFxVisible(false);
+        resetTrashFx();
         stopMisterSpotLaser(_misterSpot);
         resetMisterSpotTrail();
         _misterSpot = null;
@@ -11667,7 +11788,7 @@ let _worldSwitched = false;
                 return;
               }
               if (/^trashPlane\d+$/.test(n.name)) {
-                if (n.name === "trashPlane1") registerTrashPlane(n);
+                if (TRASH_FX_PLANE_NAMES.includes(n.name)) registerTrashPlane(n);
                 return;
               }
               if (n.name === "mainTableBase") {
