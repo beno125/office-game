@@ -3285,18 +3285,56 @@ let _officeSceneAnimationFrame = 0;
       const DRAWER_RING = {
         ...PORTAL_RING_DEFAULTS,
         flow: -1,
-        /** Its radius: fitted inside the drawer's inner walls (beyond the smoke's outer edge, keeping `margin`). */
-        margin: 0.12,
         /**
-         * Where it sits: centred on the drawer's front edge (the front panel's top front edge, in the direction it
-         * opens), `aboveEdge` over it and `edgeOffset` past it (world units). Out there nothing of the drawer stands
-         * round it (inside the drawer its walls and front panel cut the smoke and hid the ring from low angles).
+         * Inside the drawer: the whole effect (every part's furthest reach, found by `drawerRingReach`) scaled down
+         * uniformly to fit between the drawer's inner walls, bottom and front (world units kept clear of each: `margin`),
+         * against its inner front (the end it opens toward). Its body (smoke, rim) stays under the walls' top too.
          */
-        aboveEdge: 0.3,
-        edgeOffset: 0,
+        margin: 0.06,
         openHold: 2.6,
         closeTime: 0.5,
       };
+      /** The ring's settings × s: every length, size and speed (its times unchanged, so its sequence is the same). */
+      function scaleDrawerRing(P, s) {
+        const mul = (v) => (Array.isArray(v) ? v.map((x) => x * s) : v * s);
+        return {
+          ...P,
+          radius: P.radius * s,
+          tunnelDepth: P.tunnelDepth * s,
+          tunnelLen: mul(P.tunnelLen),
+          tunnelWidth: mul(P.tunnelWidth),
+          tunnelSpeed: mul(P.tunnelSpeed),
+          smoke: { ...P.smoke, size: mul(P.smoke.size), thickness: P.smoke.thickness * s, depth: P.smoke.depth * s, billow: P.smoke.billow * s },
+          rimParticles: { ...P.rimParticles, size: mul(P.rimParticles.size), driftOut: P.rimParticles.driftOut * s, driftForward: P.rimParticles.driftForward * s },
+          arcs: { ...P.arcs, width: mul(P.arcs.width) },
+          escape: { ...P.escape, distance: P.escape.distance * s, floorFade: P.escape.floorFade * s },
+          wave: { ...P.wave, speed: mul(P.wave.speed) },
+          sparks: { ...P.sparks, speedOut: mul(P.sparks.speedOut), speedSide: mul(P.sparks.speedSide), size: mul(P.sparks.size) },
+        };
+      }
+      /**
+       * How far the ring's parts reach from its centre (it lies flat, facing up): `side` across (the furthest of the
+       * smoke, rim particles, sparks, lines, burst arcs, haze and flash), `body` above and below its plane (the smoke
+       * and rim particles; the arcs never go below its floor). From the ring's shaders and arc code.
+       */
+      function drawerRingReach(P) {
+        const R = P.radius;
+        const Rmax = 1.1 * R; // its largest size: the build-up's swirl at the start / the burst's overshoot
+        const S = P.smoke, Q = P.rimParticles, X = P.sparks, E = P.escape, A = P.arcs;
+        const smokeHalf = 0.5 * S.size[1] * 1.1 * 1.15; // a smoke sprite's visible half (size × its largest scale × billow)
+        const thick = 1.8 * S.thickness; // the smoke band's widest (in the build-up)
+        const side = Math.max(
+          Rmax + thick + S.billow + smokeHalf, // smoke
+          Rmax + thick * 0.9 + Q.driftOut + 0.05, // rim particles drifting off (+ a point's glow)
+          0.9 * Rmax + X.speedSide[1] * X.life[1] + 0.05, // sparks
+          1.1 * (P.tunnelRadius[1] * R + E.distance * Math.tan((E.spreadDeg[1] * Math.PI) / 180)), // lines out there
+          2.1 * R + A.width[1] * 1.1, // burst arcs (their far end; their jag reaches less)
+          1.25 * Rmax, // haze
+          0.5 * 1.75 * R, // flash
+        );
+        const body = 0.5 * S.depth + Math.max(smokeHalf, Q.driftForward);
+        return { side, body };
+      }
       let _drawerRing = null;
       let _drawerPortalPointLight = null;
       let _drawerPortalArrow = null;
@@ -7741,28 +7779,40 @@ let _officeSceneAnimationFrame = 0;
           const xr = cast(mid, new THREE.Vector3(1, 0, 0), (box.max.x - box.min.x) / 2);
           const zb = cast(mid, new THREE.Vector3(0, 0, -1), (box.max.z - box.min.z) / 2);
           const zf = cast(mid, new THREE.Vector3(0, 0, 1), (box.max.z - box.min.z) / 2);
-          // Its radius: the smoke's outer edge (ring + thickness + billow + half a sprite) inside the inner walls.
-          const S = R.smoke;
-          const radius = Math.max(0.6, Math.min((xl + xr) / 2, (zb + zf) / 2) - (S.thickness + S.billow + S.size[1] * 0.5) - R.margin);
-          // On the drawer's front edge (it moves with the drawer: a child of its effect plane).
-          const panel = drawerGroup && drawerGroup.getObjectByName("drawerPannel");
-          const edge = new THREE.Box3().setFromObject(panel || drawer || _drawerEffectMesh);
-          const centre = new THREE.Vector3(c.x + (xr - xl) / 2, edge.max.y + R.aboveEdge, edge.max.z + R.edgeOffset);
-          // Its "floor" (as the table under the Kitchen's ring): the front panel's top edge (the room's floor is far below).
-          const groundY = edge.max.y;
+          // The drawer's inside (its inner walls, bottom and front; its walls' top), from the drawer's own mesh.
+          const inside = {
+            minX: mid.x - xl, maxX: mid.x + xr,
+            minZ: mid.z - zb, maxZ: mid.z + zf, // maxZ: its inner front (the end it opens toward)
+            minY: floorY, maxY: box.max.y,
+          };
+          // Scaled to fit: across within the walls (both ways), its body between the bottom and the walls' top.
+          const m = R.margin;
+          const r1 = drawerRingReach(R);
+          const s = Math.min(
+            1,
+            (inside.maxX - inside.minX - 2 * m) / (2 * r1.side),
+            (inside.maxZ - inside.minZ - 2 * m) / (2 * r1.side),
+            (inside.maxY - inside.minY - 2 * m) / (2 * r1.body),
+          );
+          const P = scaleDrawerRing(R, s);
+          const reach = drawerRingReach(P);
+          // Against the inner front, centred between the walls, just over the bottom (it moves with the drawer: a child of its effect plane).
+          const centre = new THREE.Vector3((inside.minX + inside.maxX) / 2, inside.minY + reach.body + m, inside.maxZ - reach.side - m);
           _drawerEffectMesh.updateMatrixWorld(true);
           const local = _drawerEffectMesh.worldToLocal(centre.clone());
           const ringGroupWorld = new THREE.Vector3();
           const ringQuat = new THREE.Quaternion();
           _drawerRing = createPortalRing(THREE, {
-            P: { ...R, radius },
+            P,
             scene,
             parent: _drawerEffectMesh, // it moves with the drawer
             localCentre: local,
             localFwd: new THREE.Vector3(0, 1, 0), // facing up
             centre,
             fwd: new THREE.Vector3(0, 1, 0),
-            floorY: groundY,
+            floorY: inside.minY, // the drawer's bottom: nothing goes under it
+            arcScale: s,
+            flashMax: 2 * reach.body, // its flash (a camera-facing glow) no taller than its body: between the bottom and the walls' top
             stencilBit: 2,
             flow: R.flow,
             getCamera: () => camera,

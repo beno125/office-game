@@ -334,11 +334,16 @@ const smoothRange = (a, b, x) => {
  * The ring, built at o.centre facing o.fwd.
  * @param {object} o { P (settings: PORTAL_RING_DEFAULTS' shape), scene (arcs / lights / the ring itself unless `parent`),
  *   parent? (the ring's group and light go here instead, positioned with `localCentre`), centre (Vector3, world), fwd (unit),
- *   floorY (nothing below it), stencilBit, flow (1 out, -1 in), getCamera (for the arcs), bloomLayer? (layer to enable) }
+ *   floorY (nothing below it), stencilBit, flow (1 out, -1 in), getCamera (for the arcs), bloomLayer? (layer to enable),
+ *   arcScale? (the arcs' fixed distances × this, for a ring scaled down; 1 by default), flashMax? (the flash's largest size) }
  */
 export function createPortalRing(THREE, o) {
   const P = o.P;
   const flow = o.flow ?? 1;
+  /** The arcs' fixed distances (depth jitter, how far a floor arc lands) × this (a ring scaled down; 1 in the Kitchen). */
+  const arcScale = o.arcScale ?? 1;
+  /** The flash sprite's largest size (world units; a ring in a tight space; none in the Kitchen). */
+  const flashMax = o.flashMax ?? Infinity;
   const K = { centre: o.centre, fwd: o.fwd, top: o.floorY };
   K.uniforms = {
     uTime: { value: 0 },
@@ -740,7 +745,7 @@ export function createPortalRing(THREE, o) {
     out.copy(_c).addScaledVector(_u, Math.cos(theta) * r);
     if (o.getFrame) out.addScaledVector(_v, Math.sin(theta) * r);
     else out.y += Math.sin(theta) * r;
-    out.addScaledVector(_f, (Math.random() - 0.5) * 0.25);
+    out.addScaledVector(_f, (Math.random() - 0.5) * 0.25 * arcScale);
     return out;
   }
   function jag(arc) {
@@ -776,7 +781,7 @@ export function createPortalRing(THREE, o) {
       arcRingPoint(r * (0.85 + Math.random() * 0.3), th, arc.a);
       if (kind === "build" && Math.random() < A.tableShare) {
         // Down to the floor: ending exactly on its surface.
-        arc.b.set(arc.a.x + (Math.random() - 0.5) * 1.2, K.top, arc.a.z + (Math.random() - 0.5) * 1.2);
+        arc.b.set(arc.a.x + (Math.random() - 0.5) * 1.2 * arcScale, K.top, arc.a.z + (Math.random() - 0.5) * 1.2 * arcScale);
       } else {
         const span = (kind === "rim" ? 0.5 : 0.35 + 1.1 * strength) * (0.6 + Math.random() * 0.8);
         arcRingPoint(r * (0.85 + Math.random() * 0.3), th + span * (Math.random() < 0.5 ? -1 : 1), arc.b);
@@ -919,7 +924,7 @@ export function createPortalRing(THREE, o) {
     const point = Math.max(t < P.gatherEnd ? 0.15 * build + gather * 0.7 : 0, flashOpen, flashClose * 0.8);
     K.flash.visible = point > 0.003;
     K.flash.material.opacity = point;
-    K.flash.scale.setScalar(P.radius * (0.35 + 1.4 * Math.max(flashOpen, flashClose * 0.6)));
+    K.flash.scale.setScalar(Math.min(flashMax, P.radius * (0.35 + 1.4 * Math.max(flashOpen, flashClose * 0.6))));
     K.haze.scale.setScalar(Math.max(0.001, P.radius * 1.25 * ring));
     K.haze.material.opacity = 0.55 * ring;
     K.light.intensity =
