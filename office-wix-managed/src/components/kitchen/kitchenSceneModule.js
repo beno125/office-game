@@ -30,6 +30,7 @@ import {
 } from "./kitchenRace.js";
 import { SCENE_ROUTES, nextLevelPath } from "../game/sceneRoutes.js";
 import { createCinematicIntro, introEase, introEaseSine, introLerp } from "../game/cinematicIntro.js";
+import { startTransitionStrips, TRANSITION_STRIPS, TRANSITION_STRIP_COLORS } from "../game/transitionStrips.js";
 import { createCarLighting } from "../game/carLighting.js";
 import { addThresholdBloom, keepBelowBloomThreshold } from "../game/thresholdBloom.js";
 import { createTouchDrive } from "../game/touch/touchDrive.js";
@@ -5222,7 +5223,8 @@ let _worldSwitched = false;
        * at the start of this one). The arrival is one continuous move.
        */
       const KITCHEN_INTRO_SHOTS = [
-        { name: "overview", sec: 3.6, blendIn: 0 },
+        { name: "portal", sec: 4.6, blendIn: 0 }, // the portal opens, the car drives out of it, it closes
+        { name: "overview", sec: 3.6, blendIn: 0, fade: true },
         { name: "carBeauty", sec: 3.6, blendIn: 0, fade: true },
         { name: "misterSpot", sec: 3.6, blendIn: 0, fade: true }, // Mister Spot firing its lasers
         { name: "trackRun", sec: 3.4, blendIn: 0, fade: true },
@@ -5301,7 +5303,14 @@ let _worldSwitched = false;
       };
       const KITCHEN_INTRO_TOTAL_SEC = KITCHEN_INTRO_SHOTS.reduce((t, s) => t + s.sec, 0);
       /** Arrow wave before the ramp during the overview (the ramp is in its view). */
-      const KITCHEN_INTRO_RAMP_WAVE_AT_SEC = KITCHEN_INTRO_SHOTS[0].sec * 0.45;
+      const KITCHEN_INTRO_RAMP_WAVE_AT_SEC = (() => {
+        let start = 0;
+        for (const sh of KITCHEN_INTRO_SHOTS) {
+          if (sh.name === "overview") return start + sh.sec * 0.45;
+          start += sh.sec;
+        }
+        return 0;
+      })();
       /** Arrow wave on the run's turn: starts this long before the camera reaches the turn. */
       const KITCHEN_INTRO_RUN_WAVE_LEAD = 0.3;
       /** One arrow wave along both turns as the camera arrives on the gameplay view. */
@@ -5408,7 +5417,9 @@ let _worldSwitched = false;
       function _kIntroShotPose(i, u, o) {
         const R = _kIntro.rig;
         const name = KITCHEN_INTRO_SHOTS[i].name;
-        if (name === "overview") {
+        if (name === "portal") {
+          _kIntroPortalCamPose(u, o);
+        } else if (name === "overview") {
           const V = KITCHEN_INTRO_OVERVIEW;
           const e = _kIntroEaseSine(u);
           o.pos.copy(R.centre)
@@ -5655,6 +5666,307 @@ let _worldSwitched = false;
         }
       }
 
+      // ── Intro shot 1: the portal ─────────────────────────────────────────────
+      // A vertical ring standing on the table behind the grid, facing the way
+      // the race starts: the end of the transition's tunnel. Its inside is the
+      // transition's own flying lines (transitionStrips.js, drawn off-screen into
+      // a texture); its rim is streaks of the same colours swirling round. It
+      // opens like the transition's vacuum (the lines gather into a point, a
+      // flash, a burst into the ring, the tunnel forms), the player's car drives
+      // out of it onto its grid spot, and it collapses back into a small flash.
+      // No physics; removed completely once it has closed.
+      const KITCHEN_INTRO_PORTAL = {
+        /** Seconds into the shot (its length is the shot's `sec`, 4.6). */
+        gatherEnd: 0.6, // the lines have gathered into a point
+        flashSec: 0.25, // the opening / closing flash fades over this
+        burstEnd: 1.0, // the ring has burst open
+        tunnelIn: [0.8, 1.35], // the tunnel inside fades in
+        carFrom: 1.35, // the car drives out…
+        carTo: 3.35, // …and stops on its grid spot
+        carEase: 1.8, // ease-out power of its way out (higher: faster out of the tunnel)
+        closeFrom: 3.6, // the ring collapses…
+        closeTo: 4.2, // …into the closing flash
+        /** Size and place (world units): ring radius, its centre above the table, how far behind the player's grid spot. */
+        radius: 1.75,
+        centreHeight: 1.45,
+        behindGrid: 10,
+        /** The car starts this far behind the ring (inside the tunnel, hidden by it). */
+        carStartBehind: 1.4,
+        /** Texture: px, the ring's share of it (the rest is the glow), the tunnel's darkness. */
+        texSize: 512,
+        ringShare: 0.78,
+        interiorAlpha: 0.9,
+        /** Rim: streaks round the ring, their spin (rad/s; faster while closing), arc length (rad). */
+        rimStreaks: 44,
+        rimSpin: 1.6,
+        rimArc: [0.18, 0.55],
+        /** Gather: streaks flying into the centre. */
+        gatherStreaks: 40,
+        /** Brightness: colour × this (bloom; it's bright mode at the start of the intro too). */
+        glow: 1.7,
+        /** Its light on the table and around (no shadows): colour, intensity at full open / at a flash, reach. */
+        light: { color: 0x7d74ff, intensity: 5, flash: 9, distance: 9 },
+        /** Camera: in front of the ring, toward the table's front side, low; a slow push-in following the car. */
+        cam: { distFrom: 4.6, distTo: 3.7, side: 2.8, heightFrom: 1.5, heightTo: 1.25, lookHeight: 1.0, follow: 0.35, fovFrom: 52, fovTo: 46 },
+      };
+      const _kPortal = {
+        active: false,
+        done: false,
+        mesh: null,
+        tex: null,
+        canvas: null,
+        ctx: null,
+        stripsCanvas: null,
+        stopStrips: null,
+        light: null,
+        centre: new THREE.Vector3(),
+        fwd: new THREE.Vector3(),
+        grid: new THREE.Vector3(),
+        gridAngle: 0,
+        start: new THREE.Vector3(),
+        rim: [],
+        gather: [],
+      };
+      const _kPortalV = new THREE.Vector3();
+
+      function _kPortalSmooth(a, b, x) {
+        const t = Math.min(1, Math.max(0, (x - a) / (b - a)));
+        return t * t * (3 - 2 * t);
+      }
+      /** Car progress along its way out (0 → 1), fast out of the tunnel, easing to a stop on its spot. */
+      function _kPortalCarProgress(t) {
+        const P = KITCHEN_INTRO_PORTAL;
+        const u = Math.min(1, Math.max(0, (t - P.carFrom) / (P.carTo - P.carFrom)));
+        return 1 - Math.pow(1 - u, KITCHEN_INTRO_PORTAL.carEase);
+      }
+
+      /** Builds the portal (once, when its shot starts), from the player's grid spot. */
+      function _kIntroPortalBegin() {
+        const P = KITCHEN_INTRO_PORTAL;
+        const R = _kIntro.rig;
+        if (!R || !car) return;
+        _kPortal.grid.copy(car.position);
+        _kPortal.gridAngle = carState.angle;
+        _kPortal.fwd.set(Math.sin(carState.angle), 0, Math.cos(carState.angle));
+        _kPortal.centre.copy(_kPortal.grid).addScaledVector(_kPortal.fwd, -P.behindGrid);
+        _kPortal.centre.y = R.surf + P.centreHeight;
+        _kPortal.start.copy(_kPortal.centre).addScaledVector(_kPortal.fwd, -P.carStartBehind);
+        _kPortal.start.y = car.position.y;
+        // The tunnel: the transition's lines, off-screen, in normal flight (their opening sequence long over).
+        _kPortal.stripsCanvas = document.createElement("canvas");
+        _kPortal.stopStrips = startTransitionStrips(_kPortal.stripsCanvas, TRANSITION_STRIPS, performance.now() - 20000, { size: P.texSize });
+        _kPortal.canvas = document.createElement("canvas");
+        _kPortal.canvas.width = _kPortal.canvas.height = P.texSize;
+        _kPortal.ctx = _kPortal.canvas.getContext("2d");
+        _kPortal.tex = new THREE.CanvasTexture(_kPortal.canvas);
+        _kPortal.tex.colorSpace = THREE.SRGBColorSpace;
+        const size = (2 * P.radius) / P.ringShare;
+        _kPortal.mesh = new THREE.Mesh(
+          new THREE.PlaneGeometry(size, size),
+          new THREE.MeshBasicMaterial({
+            map: _kPortal.tex,
+            transparent: true,
+            depthWrite: false,
+            side: THREE.DoubleSide,
+            toneMapped: false,
+            color: new THREE.Color(P.glow, P.glow, P.glow),
+          }),
+        );
+        _kPortal.mesh.name = "introPortal";
+        _kPortal.mesh.position.copy(_kPortal.centre);
+        _kPortal.mesh.rotation.y = Math.atan2(_kPortal.fwd.x, _kPortal.fwd.z);
+        _kPortal.mesh.renderOrder = 7;
+        _kPortal.mesh.layers.enable(CAR_LIGHTS_BLOOM_LAYER);
+        scene.add(_kPortal.mesh);
+        _kPortal.light = new THREE.PointLight(P.light.color, 0, P.light.distance, 1.6);
+        _kPortal.light.position.copy(_kPortal.centre).addScaledVector(_kPortal.fwd, 0.6);
+        scene.add(_kPortal.light);
+        // Streaks (fixed per portal): rim arcs and the gathering lines, in the transition's colours.
+        _kPortal.rim = Array.from({ length: P.rimStreaks }, (_, i) => ({
+          a: (i / P.rimStreaks) * Math.PI * 2 + Math.random() * 0.3,
+          arc: P.rimArc[0] + Math.random() * (P.rimArc[1] - P.rimArc[0]),
+          r: 0.94 + Math.random() * 0.12,
+          w: 2 + Math.random() * 2.5,
+          speed: 0.7 + Math.random() * 0.6,
+          color: TRANSITION_STRIP_COLORS[i % TRANSITION_STRIP_COLORS.length],
+        }));
+        _kPortal.gather = Array.from({ length: P.gatherStreaks }, (_, i) => ({
+          a: Math.random() * Math.PI * 2,
+          from: 1.1 + Math.random() * 0.5,
+          len: 0.15 + Math.random() * 0.25,
+          w: 2 + Math.random() * 2,
+          color: TRANSITION_STRIP_COLORS[i % TRANSITION_STRIP_COLORS.length],
+        }));
+        car.visible = false; // inside the tunnel until it drives out
+        _kPortal.active = true;
+      }
+
+      /** A glowing stroke in the transition's style (soft bands, then the core). */
+      function _kPortalStroke(ctx, color, width, alpha, path) {
+        ctx.strokeStyle = color;
+        ctx.lineCap = "round";
+        for (const [w, a] of [[width * 6, 0.07], [width * 3, 0.18], [width, 0.95]]) {
+          ctx.globalAlpha = a * alpha;
+          ctx.lineWidth = w;
+          path();
+          ctx.stroke();
+        }
+      }
+
+      /** Draws the portal for shot time t into its texture. */
+      function _kPortalDraw(t) {
+        const P = KITCHEN_INTRO_PORTAL;
+        const ctx = _kPortal.ctx;
+        const S = P.texSize;
+        const c = S / 2;
+        const ringPx = c * P.ringShare;
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.globalAlpha = 1;
+        ctx.clearRect(0, 0, S, S);
+        // Phases.
+        const gather = _kPortalSmooth(0, P.gatherEnd, t);
+        const burstU = Math.min(1, Math.max(0, (t - P.gatherEnd) / (P.burstEnd - P.gatherEnd)));
+        const burst = burstU <= 0 ? 0 : 1 + 2.2 * Math.pow(burstU - 1, 3) + 1.2 * Math.pow(burstU - 1, 2); // ease-out-back
+        const close = _kPortalSmooth(P.closeFrom, P.closeTo, t);
+        const ring = burst * (1 - close * close);
+        const tunnel = _kPortalSmooth(P.tunnelIn[0], P.tunnelIn[1], t) * (1 - _kPortalSmooth(P.closeFrom, P.closeFrom + (P.closeTo - P.closeFrom) * 0.7, t));
+        const flashOpen = t >= P.gatherEnd ? Math.max(0, 1 - (t - P.gatherEnd) / P.flashSec) : 0;
+        const flashClose = t >= P.closeTo ? Math.max(0, 1 - (t - P.closeTo) / P.flashSec) : 0;
+        ctx.translate(c, c);
+        // The tunnel: a dark window with the transition's lines flying out of it toward us.
+        if (tunnel > 0.001 && ring > 0.02) {
+          const r = ringPx * ring * 0.97;
+          ctx.save();
+          ctx.beginPath();
+          ctx.arc(0, 0, r, 0, Math.PI * 2);
+          ctx.clip();
+          ctx.globalAlpha = P.interiorAlpha * tunnel;
+          ctx.fillStyle = "#04061a";
+          ctx.fillRect(-r, -r, 2 * r, 2 * r);
+          ctx.globalAlpha = tunnel;
+          ctx.drawImage(_kPortal.stripsCanvas, -r * 1.25, -r * 1.25, r * 2.5, r * 2.5);
+          ctx.restore();
+        }
+        // The rim: the same streaks swirling round the ring.
+        if (ring > 0.01) {
+          const spin = P.rimSpin * (1 + 3 * close);
+          for (const s of _kPortal.rim) {
+            const a0 = s.a + t * spin * s.speed;
+            const rr = ringPx * ring * s.r;
+            _kPortalStroke(ctx, s.color, s.w * (0.6 + 0.4 * ring), Math.min(1, ring * 1.4), () => {
+              ctx.beginPath();
+              ctx.arc(0, 0, rr, a0, a0 + s.arc * (0.5 + 0.5 * ring));
+            });
+          }
+        }
+        // Gathering: streaks flying into the centre, before the burst.
+        if (t < P.gatherEnd + 0.05) {
+          const e = gather * gather;
+          for (const s of _kPortal.gather) {
+            const head = ringPx * s.from * (1 - e);
+            const tail = head + ringPx * s.len * (1 - e * 0.5);
+            const dx = Math.cos(s.a), dy = Math.sin(s.a);
+            _kPortalStroke(ctx, s.color, s.w, Math.min(1, gather * 2.5), () => {
+              ctx.beginPath();
+              ctx.moveTo(dx * head, dy * head);
+              ctx.lineTo(dx * tail, dy * tail);
+            });
+          }
+        }
+        // The bright point / flashes.
+        const point = Math.max(gather * (t < P.gatherEnd ? 1 : 0) * 0.8, flashOpen, flashClose * 0.8);
+        if (point > 0.003) {
+          const rp = ringPx * (0.12 + 0.55 * Math.max(flashOpen, flashClose * 0.7));
+          const g = ctx.createRadialGradient(0, 0, 0, 0, 0, rp);
+          g.addColorStop(0, `rgba(255,255,255,${point})`);
+          g.addColorStop(0.35, `rgba(150,170,255,${point * 0.6})`);
+          g.addColorStop(1, "rgba(100,80,255,0)");
+          ctx.globalAlpha = 1;
+          ctx.fillStyle = g;
+          ctx.fillRect(-rp, -rp, 2 * rp, 2 * rp);
+        }
+        _kPortal.tex.needsUpdate = true;
+        // Its light: with the ring, plus the flashes.
+        _kPortal.light.intensity = P.light.intensity * ring * (0.85 + 0.15 * Math.sin(t * 9)) + P.light.flash * Math.max(flashOpen, flashClose * 0.6);
+        return flashClose;
+      }
+
+      /** Per frame of the intro: the portal and the car's way out of it. */
+      function _kIntroPortalTick(t) {
+        const P = KITCHEN_INTRO_PORTAL;
+        const sec = KITCHEN_INTRO_SHOTS.find((sh) => sh.name === "portal").sec;
+        if (_kPortal.done) return;
+        if (!_kPortal.active) _kIntroPortalBegin();
+        if (!_kPortal.active) return;
+        if (t >= sec) {
+          _kIntroPortalEnd();
+          return;
+        }
+        _kPortalDraw(t);
+        // The car: hidden in the tunnel until it drives out, then along its heading onto its grid spot.
+        if (t >= P.carFrom) car.visible = true;
+        const p = _kPortalCarProgress(t);
+        const dist = _kPortal.start.distanceTo(_kPortalV.copy(_kPortal.grid).setY(_kPortal.start.y));
+        car.position.x = _kPortal.start.x + (_kPortal.grid.x - _kPortal.start.x) * p;
+        car.position.z = _kPortal.start.z + (_kPortal.grid.z - _kPortal.start.z) * p;
+        carState.angle = _kPortal.gridAngle;
+        const dt = 1 / 60;
+        carState.speed = t > P.carFrom && t < P.carTo ? (dist * (_kPortalCarProgress(t + dt) - p)) / dt : 0; // wheels turn with it
+      }
+
+      /** The portal removed completely, and the car exactly on its grid spot (also if the intro ends early). */
+      function _kIntroPortalEnd() {
+        if (_kPortal.done) return;
+        _kPortal.done = true;
+        if (!_kPortal.active) return;
+        _kPortal.active = false;
+        if (_kPortal.stopStrips) _kPortal.stopStrips();
+        if (_kPortal.mesh) {
+          scene.remove(_kPortal.mesh);
+          _kPortal.mesh.geometry.dispose();
+          _kPortal.mesh.material.dispose();
+        }
+        if (_kPortal.tex) _kPortal.tex.dispose();
+        if (_kPortal.light) {
+          scene.remove(_kPortal.light);
+          _kPortal.light.dispose();
+        }
+        _kPortal.mesh = _kPortal.tex = _kPortal.light = _kPortal.canvas = _kPortal.ctx = _kPortal.stripsCanvas = _kPortal.stopStrips = null;
+        if (car) {
+          car.position.x = _kPortal.grid.x;
+          car.position.z = _kPortal.grid.z;
+          car.visible = true;
+          carState.angle = _kPortal.gridAngle;
+          carState.speed = 0;
+        }
+      }
+
+      /** The portal shot's camera: low, in front of the ring toward the table's front, pushing in, following the car out. */
+      function _kIntroPortalCamPose(u, o) {
+        const P = KITCHEN_INTRO_PORTAL;
+        const C = P.cam;
+        const R = _kIntro.rig;
+        if (!_kPortal.active && !_kPortal.done) _kIntroPortalBegin();
+        const sec = KITCHEN_INTRO_SHOTS.find((sh) => sh.name === "portal").sec;
+        const e = _kIntroEaseSine(u);
+        const fwd = _kPortal.fwd;
+        o.pos.copy(_kPortal.centre)
+          .addScaledVector(fwd, _kIntroLerp(C.distFrom, C.distTo, e))
+          .addScaledVector(R.out, C.side);
+        o.pos.y = R.surf + _kIntroLerp(C.heightFrom, C.heightTo, e);
+        // Look: at the ring, turning toward the car while it drives past, back to the ring for the closing.
+        const carP = _kPortalCarProgress(u * sec);
+        const follow = C.follow * Math.sin(Math.PI * Math.min(1, carP * 2)); // most while it comes out, none once it's past the camera
+        _kPortalV.copy(_kPortal.start).lerp(_kPortal.grid, carP);
+        o.look.copy(_kPortal.centre);
+        o.look.y = R.surf + C.lookHeight;
+        o.look.x += (_kPortalV.x - o.look.x) * follow;
+        o.look.z += (_kPortalV.z - o.look.z) * follow;
+        o.fov = _kIntroLerp(C.fovFrom, C.fovTo, e);
+        o.roll = 0;
+        return o;
+      }
+
       /** Called when the loader starts fading out: the intro begins. */
       function startKitchenIntroPlayback() {
         if (_kIntro.state !== "pending") return;
@@ -5674,6 +5986,7 @@ let _worldSwitched = false;
         if (_kIntro.state === "done") return;
         const wasPlaying = _kIntro.state === "playing";
         _kIntro.state = "done";
+        _kIntroPortalEnd(); // the portal gone, the car on its grid spot
         // Mister Spot back to its normal path if the intro ends mid-shot.
         if (_kIntro.spotStarted && !_kIntro.spotEnded) {
           _kIntro.spotEnded = true;
@@ -5741,6 +6054,7 @@ let _worldSwitched = false;
         }
         if (_kIntro.state === "playing") {
           _kIntro.t += dt;
+          _kIntroPortalTick(_kIntro.t);
           _kIntroWaves(_kIntro.t);
           _kIntroSpotTick(_kIntro.t);
           if (_kIntro.t >= KITCHEN_INTRO_TOTAL_SEC) {

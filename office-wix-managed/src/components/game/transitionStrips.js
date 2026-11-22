@@ -14,6 +14,28 @@
  * sent back to the start once its projected position has fully left the screen.
  */
 
+/** The lines' colours (the kitchen transition, and the kitchen intro's portal). */
+export const TRANSITION_STRIP_COLORS = [
+  "#0c6efc", // Wix Blue
+  "#2a82ff", // lighter blue
+  "#674fe6", // purple
+  "#ff7055", // peach
+  "#faad4d", // amber
+];
+/** The 120 lines (angle, colour, timing, size), shared by the transition and the portal. */
+export const TRANSITION_STRIPS = Array.from({ length: 120 }, (_, index) => {
+  const seed = (index * 47) % 131;
+  return {
+    angle: (index * 137.508) % 360,
+    color: TRANSITION_STRIP_COLORS[index % TRANSITION_STRIP_COLORS.length],
+    delay: -((index * 0.113) % 3.6),
+    duration: 1.25 + (seed % 19) * 0.045,
+    length: 12 + (seed % 25),
+    start: 1 + (seed % 12),
+    width: 2 + (seed % 3),
+  };
+});
+
 /** Same values as the old CSS (index.css .world-transition-strips span + keyframes). */
 export const STRIP_FLIGHT = {
   perspective: 800, // px (the container's CSS perspective)
@@ -179,7 +201,9 @@ function cubicBezier(x1, y1, x2, y2) {
  * @param {HTMLCanvasElement} canvas  fills the strips container
  * @param {{angle:number,color:string,delay:number,duration:number,length:number,start:number,width:number}[]} strips
  * @param {number} [startTime]  performance.now() of the scene's start (shared with the car)
- * @param {{ glowAt?: (t: number) => number }} [extra]  an extra glow multiplier at scene time t (the car's pass)
+ * @param {{ glowAt?: (t: number) => number, size?: number }} [extra]  glowAt: an extra glow multiplier at scene
+ *   time t (the car's pass); size: a fixed square canvas of this many px, off the page (the portal's texture),
+ *   instead of the canvas's on-screen size and the window's vmin / vmax.
  * @returns {() => void} stop
  */
 export function startTransitionStrips(canvas, strips, startTime = performance.now(), extra = {}) {
@@ -212,14 +236,14 @@ export function startTransitionStrips(canvas, strips, startTime = performance.no
 
   let W = 0, H = 0, dpr = 1, frame = 0;
   const resize = () => {
-    W = Math.max(1, canvas.clientWidth);
-    H = Math.max(1, canvas.clientHeight);
-    dpr = Math.min(window.devicePixelRatio || 1, F.maxPixelRatio);
+    W = extra.size || Math.max(1, canvas.clientWidth);
+    H = extra.size || Math.max(1, canvas.clientHeight);
+    dpr = extra.size ? 1 : Math.min(window.devicePixelRatio || 1, F.maxPixelRatio);
     canvas.width = Math.round(W * dpr);
     canvas.height = Math.round(H * dpr);
   };
-  const ro = new ResizeObserver(resize);
-  ro.observe(canvas);
+  const ro = extra.size ? null : new ResizeObserver(resize);
+  if (ro) ro.observe(canvas);
   resize();
 
   /** Where line `l` is at flight progress p (CSS px, relative to the centre). */
@@ -272,8 +296,8 @@ export function startTransitionStrips(canvas, strips, startTime = performance.no
       flightClock += stripSequenceAt(clockAt + h / 2).speed * h;
       clockAt += h;
     }
-    const vmin = Math.min(window.innerWidth, window.innerHeight) / 100;
-    const vmax = Math.max(window.innerWidth, window.innerHeight) / 100;
+    const vmin = (extra.size || Math.min(window.innerWidth, window.innerHeight)) / 100;
+    const vmax = (extra.size || Math.max(window.innerWidth, window.innerHeight)) / 100;
     if (!released && t >= SEQ.releaseAt) {
       // The release: each line carries on along its own flight from where it is in the cluster (same inner end), no jump.
       released = true;
@@ -360,6 +384,6 @@ export function startTransitionStrips(canvas, strips, startTime = performance.no
 
   return () => {
     cancelAnimationFrame(frame);
-    ro.disconnect();
+    if (ro) ro.disconnect();
   };
 }

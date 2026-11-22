@@ -2,28 +2,9 @@ import { useEffect, useRef } from "react";
 import { Label, Panel, Snap } from "./ui/ui.jsx";
 import "./ui/loaders.css";
 import { createCameraDrag } from "./cameraDrag.js";
-import { startTransitionStrips, stripSequenceAt, STRIP_SEQUENCE } from "./transitionStrips.js";
+import { startTransitionStrips, stripSequenceAt, STRIP_SEQUENCE, TRANSITION_STRIPS } from "./transitionStrips.js";
 
 const TRANSITION_DURATION = 8600;
-const TRANSITION_STRIP_COLORS = [
-  "#0c6efc", // Wix Blue
-  "#2a82ff", // lighter blue
-  "#674fe6", // purple
-  "#ff7055", // peach
-  "#faad4d", // amber
-];
-const TRANSITION_STRIPS = Array.from({ length: 120 }, (_, index) => {
-  const seed = (index * 47) % 131;
-  return {
-    angle: (index * 137.508) % 360,
-    color: TRANSITION_STRIP_COLORS[index % TRANSITION_STRIP_COLORS.length],
-    delay: -((index * 0.113) % 3.6),
-    duration: 1.25 + (seed % 19) * 0.045,
-    length: 12 + (seed % 25),
-    start: 1 + (seed % 12),
-    width: 2 + (seed % 3),
-  };
-});
 
 /** Caption eyebrow (the kitchen is the game's second level / "page"). */
 const CAPTION_EYEBROW = "Page 02 · Kitchen";
