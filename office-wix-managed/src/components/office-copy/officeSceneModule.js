@@ -3285,9 +3285,15 @@ let _officeSceneAnimationFrame = 0;
       const DRAWER_RING = {
         ...PORTAL_RING_DEFAULTS,
         flow: -1,
-        /** Kept from the drawer's inner walls (beyond the smoke's outer edge), and the opening's height above its floor. */
+        /** Its radius: fitted inside the drawer's inner walls (beyond the smoke's outer edge, keeping `margin`). */
         margin: 0.12,
-        lift: 0.6,
+        /**
+         * Where it sits: centred on the drawer's front edge (the front panel's top front edge, in the direction it
+         * opens), `aboveEdge` over it and `edgeOffset` past it (world units). Out there nothing of the drawer stands
+         * round it (inside the drawer its walls and front panel cut the smoke and hid the ring from low angles).
+         */
+        aboveEdge: 0.3,
+        edgeOffset: 0,
         openHold: 2.6,
         closeTime: 0.5,
       };
@@ -7738,7 +7744,12 @@ let _officeSceneAnimationFrame = 0;
           // Its radius: the smoke's outer edge (ring + thickness + billow + half a sprite) inside the inner walls.
           const S = R.smoke;
           const radius = Math.max(0.6, Math.min((xl + xr) / 2, (zb + zf) / 2) - (S.thickness + S.billow + S.size[1] * 0.5) - R.margin);
-          const centre = new THREE.Vector3(c.x + (xr - xl) / 2, floorY + R.lift, c.z + (zf - zb) / 2);
+          // On the drawer's front edge (it moves with the drawer: a child of its effect plane).
+          const panel = drawerGroup && drawerGroup.getObjectByName("drawerPannel");
+          const edge = new THREE.Box3().setFromObject(panel || drawer || _drawerEffectMesh);
+          const centre = new THREE.Vector3(c.x + (xr - xl) / 2, edge.max.y + R.aboveEdge, edge.max.z + R.edgeOffset);
+          // Its "floor" (as the table under the Kitchen's ring): the front panel's top edge (the room's floor is far below).
+          const groundY = edge.max.y;
           _drawerEffectMesh.updateMatrixWorld(true);
           const local = _drawerEffectMesh.worldToLocal(centre.clone());
           const ringGroupWorld = new THREE.Vector3();
@@ -7751,7 +7762,7 @@ let _officeSceneAnimationFrame = 0;
             localFwd: new THREE.Vector3(0, 1, 0), // facing up
             centre,
             fwd: new THREE.Vector3(0, 1, 0),
-            floorY,
+            floorY: groundY,
             stencilBit: 2,
             flow: R.flow,
             getCamera: () => camera,
