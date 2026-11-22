@@ -3607,6 +3607,30 @@ let _worldSwitched = false;
       let _railBottomY = Infinity;
       // Car footprint in the car's own frame (right / forward), from the bumper box.
       const _carRailFoot = { ok: false, lr: 0, lf: 0, hr: 0, hf: 0 };
+      /**
+       * The rails for everything the physics engine moves (props, cups, fruit plates, food, a falling car):
+       * raceBoundariesPhysic has no thickness (one wall face per rail piece), so each piece gets a static
+       * box whose inner face lies on the rail line and which is thickened outward (away from the track),
+       * from just under the rail's bottom to its top. Collides with every physics group except the
+       * drive-controlled cars' own proxies (they use collideCarWithRails).
+       */
+      const RAIL_COLLIDER = {
+        /** Box thickness, added outward from the rail line (world units). */
+        thickness: 0.45,
+        /** How far the boxes reach below the rail's bottom (into the table top: no gap under them). */
+        sink: 0.05,
+        /** Extra length at each end of a piece (closes the hairline gaps between a piece's triangles). */
+        endOverlap: 0.02,
+      };
+      /**
+       * Crossing guard (every physics step, for every moving body): a body whose centre crossed a rail
+       * piece's line since the last step (too fast for the solver, or moved by a push-out) is put back on
+       * its side, `backOff` inside (at most its radius), and its speed into the wall is bounced back by
+       * `restitution` (0 = stops against it).
+       */
+      const RAIL_GUARD = { backOff: 0.3, restitution: 0.1 };
+      let _railBody = null;
+      let _railGuardOn = false;
 
       function buildKitchenRaceBoundaries(model) {
         _railSegs.length = 0;
@@ -3643,6 +3667,137 @@ let _worldSwitched = false;
           seen.add(key);
           _railSegs.push(v[ia].x, v[ia].z, v[ib].x, v[ib].z);
         }
+        buildKitchenRailCollider();
+      }
+
+      /** One static body: a box per rail piece (RAIL_COLLIDER), plus the crossing guard (RAIL_GUARD). */
+      function buildKitchenRailCollider() {
+        if (_railBody) {
+          _safeRemoveBody(_railBody);
+          _railBody = null;
+        }
+        if (!physicsWorld || _railSegs.length === 0) return;
+        // The track's middle: the rails' own centre (the outward side of a piece faces away from it).
+        let mnx = Infinity, mxx = -Infinity, mnz = Infinity, mxz = -Infinity;
+        for (let i = 0; i < _railSegs.length; i += 2) {
+          mnx = Math.min(mnx, _railSegs[i]);
+          mxx = Math.max(mxx, _railSegs[i]);
+          mnz = Math.min(mnz, _railSegs[i + 1]);
+          mxz = Math.max(mxz, _railSegs[i + 1]);
+        }
+        const midX = (mnx + mxx) / 2;
+        const midZ = (mnz + mxz) / 2;
+        const RC = RAIL_COLLIDER;
+        const bottom = _railBottomY - RC.sink;
+        const height = _railTopY - bottom;
+        const body = new CANNON.Body({
+          mass: 0,
+          type: CANNON.Body.STATIC,
+          material: tablePlatePhysicsMaterial, // the same contact as the table (props, cups, food, falling car)
+          collisionFilterGroup: PHYS_GROUP_DEFAULT,
+          collisionFilterMask: ~(PHYS_GROUP_CAR | PHYS_GROUP_PROP_BUMPER),
+        });
+        const yAxis = new CANNON.Vec3(0, 1, 0);
+        for (let i = 0; i < _railSegs.length; i += 4) {
+          const ax = _railSegs[i], az = _railSegs[i + 1], bx = _railSegs[i + 2], bz = _railSegs[i + 3];
+          const len = Math.hypot(bx - ax, bz - az);
+          if (len < 1e-4) continue;
+          const tx = (bx - ax) / len, tz = (bz - az) / len;
+          // Outward normal: away from the track's middle.
+          let nx = -tz, nz = tx;
+          const cx = (ax + bx) / 2, cz = (az + bz) / 2;
+          if ((cx - midX) * nx + (cz - midZ) * nz < 0) {
+            nx = -nx;
+            nz = -nz;
+          }
+          const q = new CANNON.Quaternion();
+          q.setFromAxisAngle(yAxis, Math.atan2(-tz, tx)); // the box's x axis along the piece
+          body.addShape(
+            new CANNON.Box(new CANNON.Vec3(len / 2 + RC.endOverlap, height / 2, RC.thickness / 2)),
+            new CANNON.Vec3(cx + nx * RC.thickness / 2, bottom + height / 2, cz + nz * RC.thickness / 2),
+            q,
+          );
+        }
+        physicsWorld.addBody(body);
+        _railBody = body;
+        if (!_railGuardOn) {
+          physicsWorld.addEventListener("postStep", guardBodiesAtRails);
+          _railGuardOn = true;
+        }
+      }
+
+      /** Did the centre path p → c (xz) cross a rail piece (between its ends)? Returns the piece's index, or -1. */
+      function railCrossing(px, pz, qx, qz, out) {
+        let hit = -1;
+        let bestT = Infinity;
+        const dx = qx - px, dz = qz - pz;
+        for (let i = 0; i < _railSegs.length; i += 4) {
+          const ax = _railSegs[i], az = _railSegs[i + 1];
+          const sx = _railSegs[i + 2] - ax, sz = _railSegs[i + 3] - az;
+          const den = dx * sz - dz * sx;
+          if (Math.abs(den) < 1e-12) continue;
+          const t = ((ax - px) * sz - (az - pz) * sx) / den; // along the path
+          const u = ((ax - px) * dz - (az - pz) * dx) / den; // along the piece
+          if (t < 0 || t > 1 || u < 0 || u > 1) continue;
+          if (t < bestT) {
+            bestT = t;
+            hit = i;
+          }
+        }
+        if (hit >= 0 && out) out.t = bestT;
+        return hit;
+      }
+
+      const _railHit = { t: 0 };
+      /**
+       * After every physics step: no moving body's centre may have crossed a rail piece since the last
+       * step (its last position is kept on the body). Crossed: back on its own side, speed into the wall
+       * bounced back softly.
+       */
+      function guardBodiesAtRails() {
+        if (!physicsWorld || _railSegs.length === 0) return;
+        const bodies = physicsWorld.bodies;
+        for (let k = 0; k < bodies.length; k++) {
+          const b = bodies[k];
+          if (b.type !== CANNON.Body.DYNAMIC) continue;
+          // The drive-controlled cars' proxies (and a falling car) are not physics-driven across the table.
+          if (b.collisionFilterGroup & (PHYS_GROUP_CAR | PHYS_GROUP_CAR_FALL | PHYS_GROUP_PROP_BUMPER)) continue;
+          const p = b.position;
+          const last = b._railLast;
+          if (last) {
+            const r = Math.min(b.boundingRadius || 0.3, 1);
+            const y = Math.min(p.y, last.y);
+            if (y - r < _railTopY && Math.max(p.y, last.y) + r > _railBottomY) {
+              const i = railCrossing(last.x, last.z, p.x, p.z, _railHit);
+              if (i >= 0) {
+                const ax = _railSegs[i], az = _railSegs[i + 1];
+                const sx = _railSegs[i + 2] - ax, sz = _railSegs[i + 3] - az;
+                const sl = Math.hypot(sx, sz) || 1;
+                // Normal toward the side it came from.
+                let nx = -sz / sl, nz = sx / sl;
+                if ((last.x - ax) * nx + (last.z - az) * nz < 0) {
+                  nx = -nx;
+                  nz = -nz;
+                }
+                // Back to where it met the line, then inside by backOff (at most its radius).
+                const hx = last.x + (p.x - last.x) * _railHit.t;
+                const hz = last.z + (p.z - last.z) * _railHit.t;
+                const back = Math.min(RAIL_GUARD.backOff, r);
+                p.x = hx + nx * back;
+                p.z = hz + nz * back;
+                const vn = b.velocity.x * nx + b.velocity.z * nz;
+                if (vn < 0) {
+                  b.velocity.x -= (1 + RAIL_GUARD.restitution) * vn * nx;
+                  b.velocity.z -= (1 + RAIL_GUARD.restitution) * vn * nz;
+                }
+                b.aabbNeedsUpdate = true;
+              }
+            }
+          } else {
+            b._railLast = new CANNON.Vec3();
+          }
+          b._railLast.copy(p);
+        }
       }
 
       function captureCarRailFootprint(bodyPos, ex, ez) {
@@ -3671,11 +3826,33 @@ let _worldSwitched = false;
        * depends on the impact angle, the heading turns toward the wall's
        * direction, and a slide along the wall starts right away.
        */
+      /** The car footprint's centre (xz) for a drive state at `pos`. */
+      function carRailCentre(pos, angle, out) {
+        const F = _carRailFoot;
+        const fx = Math.sin(angle), fz = Math.cos(angle);
+        const rx = Math.cos(angle), rz = -Math.sin(angle);
+        out.x = pos.x + rx * F.lr + fx * F.lf;
+        out.z = pos.z + rz * F.lr + fz * F.lf;
+        return out;
+      }
+      /** A centre jump longer than this between car steps is a teleport (reset / respawn), not a move. */
+      const RAIL_CAR_TELEPORT = 3;
+      const _railCentre = { x: 0, z: 0 };
+
       function collideCarWithRails(pos, state, dt = 1 / 60) {
         if (!_carRailFoot.ok || _railSegs.length === 0) return;
         const carBottom = pos.y - carBottomOffsetY;
-        if (carBottom > _railTopY || pos.y < _railBottomY - 1) return;
+        if (carBottom > _railTopY || pos.y < _railBottomY - 1) {
+          state._railPrev = null; // above / below the rails: no side to keep
+          return;
+        }
         const F = _carRailFoot;
+        // The side of each rail the car was on at its last step: a car whose centre was carried across a
+        // thin rail line (a hard shove, a big bump) is pushed back to that side, never out the far one.
+        const prev = state._railPrev;
+        carRailCentre(pos, state.angle, _railCentre);
+        const prevOk = !!prev && Math.hypot(_railCentre.x - prev.x, _railCentre.z - prev.z) < RAIL_CAR_TELEPORT;
+        const crossed = prevOk ? railCrossing(prev.x, prev.z, _railCentre.x, _railCentre.z, null) : -1;
         let slideNx = 0, slideNz = 0, slideHit = false;
         for (let iter = 0; iter < 3; iter++) {
           let any = false;
@@ -3691,10 +3868,10 @@ let _worldSwitched = false;
             const sl = Math.hypot(sx, sz);
             if (sl < 1e-6) continue;
             const tx = sx / sl, tz = sz / sl;
-            // Overlap (SAT on car right / forward / segment normal).
+            // Overlap (SAT on car right / forward / segment normal); a piece the centre crossed always counts.
             const axes = [rx, rz, fx, fz, -tz, tx];
             let separated = false;
-            for (let k = 0; k < 6; k += 2) {
+            for (let k = 0; k < 6 && i !== crossed; k += 2) {
               const ux = axes[k], uz = axes[k + 1];
               const rad = F.hr * Math.abs(ux * rx + uz * rz) + F.hf * Math.abs(ux * fx + uz * fz);
               const c = cx * ux + cz * uz;
@@ -3712,7 +3889,10 @@ let _worldSwitched = false;
             if (along >= 0 && along <= sl) {
               nx = -tz;
               nz = tx;
-              if ((cx - ax) * nx + (cz - az) * nz < 0) {
+              // Toward the side the car came from (its last step's centre), else its centre's side.
+              const sideX = prevOk ? prev.x : cx;
+              const sideZ = prevOk ? prev.z : cz;
+              if ((sideX - ax) * nx + (sideZ - az) * nz < 0) {
                 nx = -nx;
                 nz = -nz;
               }
@@ -3747,6 +3927,11 @@ let _worldSwitched = false;
           }
           if (!any) break;
         }
+        // This step's (pushed-out) centre: the side to keep next step.
+        carRailCentre(pos, state.angle, _railCentre);
+        if (!state._railPrev) state._railPrev = { x: 0, z: 0 };
+        state._railPrev.x = _railCentre.x;
+        state._railPrev.z = _railCentre.z;
         if (!slideHit) {
           state._railFree = (state._railFree ?? 1) + dt;
           return;
@@ -3759,6 +3944,7 @@ let _worldSwitched = false;
         const nl = Math.hypot(slideNx, slideNz);
         if (nl < 1e-6) return;
         const nx = slideNx / nl, nz = slideNz / nl;
+        railSparksAtContact(pos, state, nx, nz, firstStep, dt); // visual only (RAIL_SPARKS)
         const a = state.angle;
         const fx = Math.sin(a), fz = Math.cos(a);
         const sgn = state.speed >= 0 ? 1 : -1;
@@ -3786,6 +3972,259 @@ let _worldSwitched = false;
         let dA = target - a;
         dA = Math.atan2(Math.sin(dA), Math.cos(dA));
         state.angle += dA * Math.min(1, RAIL_ALIGN_RATE * impact * dt);
+      }
+
+      // ── Sparks where a car hits or scrapes the rails (raceBoundariesPhysic) ──
+      // Visual only, fed by collideCarWithRails (each car on its own): a burst at
+      // the contact point on a hit (more and faster sparks the harder it is), a
+      // steady stream while it slides along the wall (rate and speed with the
+      // slide speed), none for soft touches. Sparks fly off the wall and back
+      // against the car's travel, fall, bounce once on the table and fade (white
+      // / yellow core → orange) with a short streak behind them. One pooled set
+      // of points + streak lines for every car (capped), and one shared flash
+      // light for strong hits.
+      const RAIL_SPARKS = {
+        /** Pool size: the most sparks alive at once (the oldest is reused beyond it). */
+        max: 180,
+        /** Hit: speed into the wall (units/s) below which nothing sparks, and the speed that gives the full burst. */
+        impactThreshold: 1.5,
+        impactFull: 12,
+        /** Burst size: sparks at the threshold / at full. */
+        burstMin: 3,
+        burstMax: 26,
+        /** Scrape: speed along the wall (units/s) below which nothing sparks, the speed for the full rate, and that rate (sparks/s). */
+        scrapeThreshold: 2,
+        scrapeFull: 14,
+        scrapeRate: 90,
+        /** Spark speed (units/s): soft / full contact (× a random 0.55–1). */
+        speedMin: 1.6,
+        speedMax: 6.5,
+        /** Direction mix: off the wall, back against the car's travel, upward; plus a random spread. */
+        dirWall: 0.7,
+        dirBack: 0.9,
+        dirUp: 0.55,
+        spread: 0.55,
+        /** Life (s): random within this range. */
+        life: [0.18, 0.42],
+        /** Gravity (units/s²), and the bounce on the table (share of vertical speed kept; sideways × 0.6). */
+        gravity: 16,
+        bounce: 0.3,
+        /** Head size (world units at 1 unit away, perspective) and the streak's length (× velocity, seconds). */
+        size: 0.11,
+        streak: 0.03,
+        /** Colours (start → end of life) and brightness (HDR × colour; the streak at a share of it). */
+        colorHot: 0xfff6d8,
+        colorMid: 0xffc24a,
+        colorEnd: 0xff6a1a,
+        brightness: 3.2,
+        streakBrightness: 0.45,
+        /** Contact height: this far below the rails' top (where a bumper meets them). */
+        below: 0.2,
+        /** Flash on strong hits: hit strength (0–1) it starts from, peak intensity, range (units), fade time (s), colour. */
+        flashFrom: 0.45,
+        flashIntensity: 18,
+        flashRange: 4,
+        flashTime: 0.09,
+        flashColor: 0xffb35a,
+      };
+      const _rsN = RAIL_SPARKS.max;
+      const _rsPos = new Float32Array(_rsN * 3);
+      const _rsVel = new Float32Array(_rsN * 3);
+      const _rsAge = new Float32Array(_rsN).fill(1);
+      const _rsLife = new Float32Array(_rsN).fill(1);
+      let _rsNext = 0; // next pool slot (round robin: the oldest goes first)
+      let _rsAlive = 0;
+      let _railStepId = 0; // car step counter: one scrape emission per car per step
+      const _rsHeadGeo = new THREE.BufferGeometry();
+      const _rsHeadPos = new Float32Array(_rsN * 3);
+      const _rsHeadCol = new Float32Array(_rsN * 3);
+      _rsHeadGeo.setAttribute("position", new THREE.BufferAttribute(_rsHeadPos, 3).setUsage(THREE.DynamicDrawUsage));
+      _rsHeadGeo.setAttribute("color", new THREE.BufferAttribute(_rsHeadCol, 3).setUsage(THREE.DynamicDrawUsage));
+      const _rsLineGeo = new THREE.BufferGeometry();
+      const _rsLinePos = new Float32Array(_rsN * 6);
+      const _rsLineCol = new Float32Array(_rsN * 6);
+      _rsLineGeo.setAttribute("position", new THREE.BufferAttribute(_rsLinePos, 3).setUsage(THREE.DynamicDrawUsage));
+      _rsLineGeo.setAttribute("color", new THREE.BufferAttribute(_rsLineCol, 3).setUsage(THREE.DynamicDrawUsage));
+      let _rsHeads = null;
+      let _rsLines = null;
+      let _rsFlash = null;
+      const _rsColHot = new THREE.Color(RAIL_SPARKS.colorHot);
+      const _rsColMid = new THREE.Color(RAIL_SPARKS.colorMid);
+      const _rsColEnd = new THREE.Color(RAIL_SPARKS.colorEnd);
+      const _rsCol = new THREE.Color();
+
+      /** Made on first use (the glow texture is ready by then). */
+      function ensureRailSparks() {
+        if (_rsHeads) return;
+        _rsHeads = new THREE.Points(
+          _rsHeadGeo,
+          new THREE.PointsMaterial({
+            size: RAIL_SPARKS.size,
+            sizeAttenuation: true,
+            map: getTableLightGlowTexture(), // round, soft sparks
+            vertexColors: true,
+            transparent: true,
+            depthWrite: false,
+            blending: THREE.AdditiveBlending,
+            toneMapped: false,
+          }),
+        );
+        _rsLines = new THREE.LineSegments(
+          _rsLineGeo,
+          new THREE.LineBasicMaterial({
+            vertexColors: true,
+            transparent: true,
+            depthWrite: false,
+            blending: THREE.AdditiveBlending,
+            toneMapped: false,
+          }),
+        );
+        for (const o of [_rsHeads, _rsLines]) {
+          o.frustumCulled = false; // the pool spans the whole table
+          o.renderOrder = 7;
+          o.visible = false;
+          scene.add(o);
+        }
+        // Always in the scene (intensity 0 when idle): the light count never changes.
+        _rsFlash = new THREE.PointLight(RAIL_SPARKS.flashColor, 0, RAIL_SPARKS.flashRange, 2);
+        scene.add(_rsFlash);
+      }
+
+      /** `count` sparks at (x, y, z): off the wall (nx, nz), back against the travel (bx, bz), at strength 0–1. */
+      function emitRailSparks(x, y, z, nx, nz, bx, bz, count, strength) {
+        ensureRailSparks();
+        const S = RAIL_SPARKS;
+        const speed = S.speedMin + (S.speedMax - S.speedMin) * strength;
+        for (let k = 0; k < count; k++) {
+          const i = _rsNext;
+          _rsNext = (_rsNext + 1) % _rsN;
+          let dx = nx * S.dirWall + bx * S.dirBack + (Math.random() * 2 - 1) * S.spread;
+          let dy = S.dirUp + (Math.random() * 2 - 1) * S.spread * 0.8;
+          let dz = nz * S.dirWall + bz * S.dirBack + (Math.random() * 2 - 1) * S.spread;
+          const l = Math.hypot(dx, dy, dz) || 1;
+          const v = speed * (0.55 + 0.45 * Math.random()) / l;
+          _rsPos[i * 3] = x;
+          _rsPos[i * 3 + 1] = y;
+          _rsPos[i * 3 + 2] = z;
+          _rsVel[i * 3] = dx * v;
+          _rsVel[i * 3 + 1] = dy * v;
+          _rsVel[i * 3 + 2] = dz * v;
+          _rsAge[i] = 0;
+          _rsLife[i] = S.life[0] + (S.life[1] - S.life[0]) * Math.random();
+        }
+      }
+
+      /**
+       * From collideCarWithRails while a car touches a rail (combined wall normal nx, nz toward the car):
+       * a burst on the first step of a contact, a stream while it slides.
+       */
+      function railSparksAtContact(pos, state, nx, nz, firstStep, dt) {
+        const S = RAIL_SPARKS;
+        const a = state.angle;
+        const fx = Math.sin(a), fz = Math.cos(a);
+        const rx = Math.cos(a), rz = -Math.sin(a);
+        // The car's velocity (drive + any push it's carrying).
+        const vx = fx * state.speed + (state.bumpVX || 0);
+        const vz = fz * state.speed + (state.bumpVZ || 0);
+        const vInto = -(vx * nx + vz * nz);
+        const tx = -nz, tz = nx;
+        const vAlong = vx * tx + vz * tz;
+        // Contact point: the footprint's extreme point toward the wall (on the wall line after the push-out).
+        const F = _carRailFoot;
+        carRailCentre(pos, a, _railCentre);
+        const rad = F.hr * Math.abs(nx * rx + nz * rz) + F.hf * Math.abs(nx * fx + nz * fz);
+        const cx = _railCentre.x - nx * rad;
+        const cz = _railCentre.z - nz * rad;
+        const cy = _railTopY - S.below;
+        // Back against the car's travel along the wall.
+        const sb = vAlong >= 0 ? -1 : 1;
+        const bx = tx * sb, bz = tz * sb;
+        if (firstStep && vInto > S.impactThreshold) {
+          const strength = Math.min(1, (vInto - S.impactThreshold) / Math.max(0.01, S.impactFull - S.impactThreshold));
+          const count = Math.round(S.burstMin + (S.burstMax - S.burstMin) * strength);
+          emitRailSparks(cx, cy, cz, nx, nz, bx, bz, count, strength);
+          if (strength >= S.flashFrom && _rsFlash) {
+            _rsFlash.position.set(cx + nx * 0.3, cy + 0.2, cz + nz * 0.3);
+            _rsFlash.intensity = Math.max(_rsFlash.intensity, S.flashIntensity * strength);
+          }
+        }
+        // Scrape: once per car per car step (the rails are checked twice for the AI cars).
+        if (state._sparkStep === _railStepId) return;
+        state._sparkStep = _railStepId;
+        const slide = Math.abs(vAlong);
+        if (slide <= S.scrapeThreshold) {
+          state._sparkAcc = 0;
+          return;
+        }
+        const strength = Math.min(1, (slide - S.scrapeThreshold) / Math.max(0.01, S.scrapeFull - S.scrapeThreshold));
+        state._sparkAcc = (state._sparkAcc || 0) + S.scrapeRate * strength * dt;
+        const n = Math.floor(state._sparkAcc);
+        if (n > 0) {
+          state._sparkAcc -= n;
+          emitRailSparks(cx, cy, cz, nx, nz, bx, bz, n, strength);
+        }
+      }
+
+      /** Every frame: move, fade and draw the sparks; the flash fades. */
+      function updateRailSparks(dt) {
+        if (!_rsHeads) return;
+        const S = RAIL_SPARKS;
+        if (_rsFlash.intensity > 0.01) _rsFlash.intensity *= Math.exp(-dt / S.flashTime);
+        else _rsFlash.intensity = 0;
+        const floorY = _railBottomY; // the table top under the rails
+        _rsAlive = 0;
+        for (let i = 0; i < _rsN; i++) {
+          const k = i * 3;
+          const k6 = i * 6;
+          if (_rsAge[i] >= _rsLife[i]) {
+            _rsHeadCol[k] = _rsHeadCol[k + 1] = _rsHeadCol[k + 2] = 0;
+            for (let j = 0; j < 6; j++) _rsLineCol[k6 + j] = 0;
+            continue;
+          }
+          _rsAge[i] += dt;
+          _rsVel[k + 1] -= S.gravity * dt;
+          _rsPos[k] += _rsVel[k] * dt;
+          _rsPos[k + 1] += _rsVel[k + 1] * dt;
+          _rsPos[k + 2] += _rsVel[k + 2] * dt;
+          if (_rsPos[k + 1] < floorY && _rsVel[k + 1] < 0) {
+            _rsPos[k + 1] = floorY;
+            _rsVel[k + 1] *= -S.bounce;
+            _rsVel[k] *= 0.6;
+            _rsVel[k + 2] *= 0.6;
+          }
+          const t = Math.min(1, _rsAge[i] / _rsLife[i]);
+          // White / yellow core → orange, fading fast at the end.
+          if (t < 0.35) _rsCol.copy(_rsColHot).lerp(_rsColMid, t / 0.35);
+          else _rsCol.copy(_rsColMid).lerp(_rsColEnd, (t - 0.35) / 0.65);
+          const fade = (1 - t) * (1 - t) * S.brightness;
+          _rsHeadPos[k] = _rsPos[k];
+          _rsHeadPos[k + 1] = _rsPos[k + 1];
+          _rsHeadPos[k + 2] = _rsPos[k + 2];
+          _rsHeadCol[k] = _rsCol.r * fade;
+          _rsHeadCol[k + 1] = _rsCol.g * fade;
+          _rsHeadCol[k + 2] = _rsCol.b * fade;
+          // Streak: from the head back along the velocity.
+          _rsLinePos[k6] = _rsPos[k];
+          _rsLinePos[k6 + 1] = _rsPos[k + 1];
+          _rsLinePos[k6 + 2] = _rsPos[k + 2];
+          _rsLinePos[k6 + 3] = _rsPos[k] - _rsVel[k] * S.streak;
+          _rsLinePos[k6 + 4] = _rsPos[k + 1] - _rsVel[k + 1] * S.streak;
+          _rsLinePos[k6 + 5] = _rsPos[k + 2] - _rsVel[k + 2] * S.streak;
+          const sf = fade * S.streakBrightness;
+          _rsLineCol[k6] = _rsCol.r * sf;
+          _rsLineCol[k6 + 1] = _rsCol.g * sf;
+          _rsLineCol[k6 + 2] = _rsCol.b * sf;
+          _rsLineCol[k6 + 3] = _rsLineCol[k6 + 4] = _rsLineCol[k6 + 5] = 0; // its tail fades out
+          _rsAlive++;
+        }
+        const on = _rsAlive > 0;
+        _rsHeads.visible = _rsLines.visible = on;
+        if (on) {
+          _rsHeadGeo.attributes.position.needsUpdate = true;
+          _rsHeadGeo.attributes.color.needsUpdate = true;
+          _rsLineGeo.attributes.position.needsUpdate = true;
+          _rsLineGeo.attributes.color.needsUpdate = true;
+        }
       }
 
       // ── Kitchen race ─────────────────────────────────────────────────────
@@ -13790,6 +14229,7 @@ let _worldSwitched = false;
       }
 
       function updateCar(dt) {
+        _railStepId++; // a new car step (rail sparks: one scrape emission per car per step)
         const input = getPlayerDriveInput();
         stepCarDrive(carState, input, car.position, carFalling, dt);
         if (!carFalling) integrateRaceCarBump(car.position, carState, dt);
@@ -14429,6 +14869,7 @@ let _worldSwitched = false;
             carBloomMixPass.material.uniforms.bloomIntensity.value = 0;
           }
           updateTrashPlaneEffect(dt);
+          updateRailSparks(dt);
           updateIceCoffeeTank(dt);
           updateMisterSpot(dt);
           updateMisterSpotTrail(dt);
