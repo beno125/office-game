@@ -1697,6 +1697,57 @@ export function isKitchenSceneReady() {
         selfLight: { dark: 0.32, bright: 0.22 },
       };
       const _kitchenPastelMats = [];
+      /**
+       * coffeeGrill (the coffee machine's drip-tray grill, a flat plate): shiny metal (the machine's chrome:
+       * coffeeStrok / coffeeHandle / coffeeLegs) perforated with small round holes in a staggered (hex) grid, drawn
+       * dark (with a little depth from a bump), mapped by the plate's own size so they stay round, inside a solid
+       * border (`edgeMargin`: only whole holes, the pattern centred on the plate).
+       */
+      const KITCHEN_COFFEE_GRILL = {
+        pitch: 0.24, // distance between neighbouring holes (the grill's units; it's 5.64 × 4.01)
+        holeRadius: 0.075, // a hole's radius (same units)
+        edgeMargin: 0.35, // solid metal between the outermost holes and the plate's edges (same units)
+        holeColor: 0x080808, // inside a hole (dark: the tray under it)
+        metalness: 1.0,
+        roughness: 0.22, // shiny, its reflection a little soft
+        envMapIntensity: 1.0, // its own reflection (the kitchen's neutral grey gradient; the scene has none to reflect)
+        bumpScale: 0.8, // the holes' depth (bump strength)
+        pxPerUnit: 360, // texture pixels per unit of the plate
+      };
+      /** The grill's perforation over the whole plate (w × d units): white metal, dark round holes inside the border. */
+      function makeCoffeeGrillTexture(w, d) {
+        const G = KITCHEN_COFFEE_GRILL;
+        const cw = Math.min(4096, Math.round(w * G.pxPerUnit));
+        const k = cw / w; // pixels per unit
+        const ch = Math.round(d * k);
+        const c = document.createElement("canvas");
+        c.width = cw;
+        c.height = ch;
+        const x = c.getContext("2d");
+        x.fillStyle = "#ffffff";
+        x.fillRect(0, 0, cw, ch);
+        x.fillStyle = "#" + new THREE.Color(G.holeColor).getHexString();
+        // Hex grid: rows `rowStep` apart, every other row one hole shorter (centred: shifted half a pitch); only holes
+        // fully inside the border.
+        const rowStep = (G.pitch * Math.sqrt(3)) / 2;
+        const inner = G.edgeMargin + G.holeRadius; // a hole's centre at least this far from an edge
+        const rows = Math.floor((d - 2 * inner) / rowStep) + 1;
+        const cols = Math.floor((w - 2 * inner) / G.pitch) + 1;
+        const y0 = (d - (rows - 1) * rowStep) / 2; // the pattern centred
+        for (let r = 0; r < rows; r++) {
+          const n = r % 2 ? cols - 1 : cols;
+          const x0 = (w - (n - 1) * G.pitch) / 2;
+          for (let q = 0; q < n; q++) {
+            x.beginPath();
+            x.arc((x0 + q * G.pitch) * k, (y0 + r * rowStep) * k, G.holeRadius * k, 0, Math.PI * 2);
+            x.fill();
+          }
+        }
+        const t = new THREE.CanvasTexture(c);
+        t.colorSpace = THREE.SRGBColorSpace;
+        t.anisotropy = Math.min(perfAnisotropyCap, renderer.capabilities.getMaxAnisotropy());
+        return t;
+      }
       const _shelfDownLights = [];
       const _mainLightDownPoints = [];
       const brightMode = {
@@ -11780,6 +11831,42 @@ let _worldSwitched = false;
                   n.material = n.material.map(() => _blackPlasticMat);
                 } else {
                   n.material = _blackPlasticMat;
+                }
+                return;
+              }
+              if (n.name === "coffeeGrill") {
+                const G = KITCHEN_COFFEE_GRILL;
+                // Its UVs by its own extent (local x / z: it lies flat): one texture over the whole plate.
+                n.geometry = n.geometry.clone();
+                n.geometry.computeBoundingBox();
+                const bb = n.geometry.boundingBox;
+                const w = bb.max.x - bb.min.x, d = bb.max.z - bb.min.z;
+                const pos = n.geometry.attributes.position;
+                const uv = new Float32Array(pos.count * 2);
+                for (let i = 0; i < pos.count; i++) {
+                  uv[i * 2] = (pos.getX(i) - bb.min.x) / w;
+                  uv[i * 2 + 1] = 1 - (pos.getZ(i) - bb.min.z) / d;
+                }
+                n.geometry.setAttribute("uv", new THREE.BufferAttribute(uv, 2));
+                const tex = makeCoffeeGrillTexture(w, d);
+                const bump = tex.clone();
+                bump.colorSpace = THREE.NoColorSpace;
+                n.material = new THREE.MeshStandardMaterial({
+                  color: 0xffffff,
+                  map: tex,
+                  bumpMap: bump,
+                  bumpScale: G.bumpScale,
+                  metalness: G.metalness,
+                  roughness: G.roughness,
+                  envMapIntensity: G.envMapIntensity,
+                });
+                // Metal needs something to reflect: the scene's environment, or else (no quality tier builds
+                // one) its own from the kitchen's neutral gradient.
+                if (scene.environment) n.material.envMap = scene.environment;
+                else {
+                  const src = buildNeutralEnvironmentTexture();
+                  n.material.envMap = pmremGenerator.fromEquirectangular(src).texture;
+                  src.dispose();
                 }
                 return;
               }
