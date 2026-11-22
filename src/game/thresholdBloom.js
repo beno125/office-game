@@ -96,9 +96,19 @@ export function addThresholdBloom({ THREE, composer, afterPass, settings = BLOOM
  * at half the screen; the bright parts are picked with a 4 × 4 tent filter (no
  * single-tap sampling: a thin strip would alias into broken blocks), and
  * `radius` near 1 weights the wide, soft blur levels most.
- * @returns {{ pass: UnrealBloomPass, mark(material, weight?): void, setThreshold(threshold, knee): void }}
+ *
+ * Stable glow for thin emitters (`addMesh(mesh)`, with `getCamera`): a strip
+ * only 1–3 pixels wide covers a different set of pixels every time the camera
+ * moves, so a glow grown from the scene's own pixels crawls and pulses. Such
+ * meshes are also drawn (plain white, same geometry and world matrix) into a
+ * 4× multisampled coverage image right before the bloom: that gives their
+ * true, smooth on-screen coverage. The glow takes its strength from it, and
+ * its colour (their average) and visibility from the scene's own group pixels
+ * nearby (an 8 × 8 block of the full-size image), so whatever hides a strip
+ * still hides its glow.
+ * @returns {{ pass: UnrealBloomPass, mark(material, weight?): void, addMesh(mesh, weight?): void, setThreshold(threshold, knee): void }}
  */
-export function addBloomGroup({ THREE, composer, afterPass, settings }) {
+export function addBloomGroup({ THREE, composer, afterPass, settings, getCamera = null }) {
   const scale = settings.resolutionScale ?? 1;
   const size = new THREE.Vector2();
   composer.renderer.getDrawingBufferSize(size);
@@ -108,23 +118,61 @@ export function addBloomGroup({ THREE, composer, afterPass, settings }) {
     settings.radius,
     settings.threshold,
   );
+  // The coverage image (multisampled, resolved to a linear-filtered texture) and the meshes drawn into it.
+  const coverageTarget = new THREE.WebGLRenderTarget(Math.max(1, size.x), Math.max(1, size.y), {
+    samples: settings.coverageSamples ?? 4,
+    depthBuffer: false,
+    minFilter: THREE.LinearFilter,
+    magFilter: THREE.LinearFilter,
+  });
+  const coverageScene = new THREE.Scene();
+  const coverageMat = new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.DoubleSide, toneMapped: false });
+  const sources = []; // { mesh, proxy }
+  const BASE = BLOOM_GROUP_ALPHA_BASE.toFixed(1);
   pass.highPassUniforms.smoothWidth.value = settings.knee ?? 0.5;
   pass.materialHighPassFilter.fragmentShader = `
     uniform sampler2D tDiffuse;
+    uniform sampler2D uCoverage;
+    uniform float uUseCoverage;
     uniform vec3 defaultColor;
     uniform float defaultOpacity;
     uniform float luminosityThreshold;
     uniform float smoothWidth;
     uniform vec2 uSrcTexel; // one pixel of the full-size image
     varying vec2 vUv;
+    float maxc(vec3 c) { return max(c.r, max(c.g, c.b)); }
     // One pixel's glow (the group's own pixels only: alpha at or above the group base).
     vec3 glowAt(vec2 uv) {
       vec4 texel = texture2D(tDiffuse, uv);
-      float weight = texel.a >= ${BLOOM_GROUP_ALPHA_BASE.toFixed(1)} ? clamp(texel.a - ${BLOOM_GROUP_ALPHA_BASE.toFixed(1)}, 0.0, 1.0) : 0.0;
-      float v = max(texel.r, max(texel.g, texel.b));
-      return texel.rgb * weight * smoothstep(luminosityThreshold, luminosityThreshold + smoothWidth, v);
+      float weight = texel.a >= ${BASE} ? clamp(texel.a - ${BASE}, 0.0, 1.0) : 0.0;
+      return texel.rgb * weight * smoothstep(luminosityThreshold, luminosityThreshold + smoothWidth, maxc(texel.rgb));
     }
     void main() {
+      if (uUseCoverage > 0.5) {
+        // Colour and visibility: the average of the group's pixels in the 8 × 8 full-size block around this texel
+        // (exact pixel centres); none = hidden here.
+        vec2 base = floor(vUv / uSrcTexel) - 4.0;
+        vec3 sum = vec3(0.0);
+        float count = 0.0;
+        float weight = 0.0;
+        for (int j = 0; j < 8; j++) {
+          for (int i = 0; i < 8; i++) {
+            vec4 t = texture2D(tDiffuse, (base + vec2(float(i), float(j)) + 0.5) * uSrcTexel);
+            if (t.a >= ${BASE}) {
+              sum += t.rgb;
+              count += 1.0;
+              weight = max(weight, clamp(t.a - ${BASE}, 0.0, 1.0));
+            }
+          }
+        }
+        vec3 col = count > 0.0 ? sum / count : vec3(0.0);
+        // Strength: the smooth (multisampled) coverage, through the same 4 × 4 tent.
+        float cov = 0.25 * (
+          texture2D(uCoverage, vUv + uSrcTexel * vec2(-1.0, -1.0)).r + texture2D(uCoverage, vUv + uSrcTexel * vec2(1.0, -1.0)).r +
+          texture2D(uCoverage, vUv + uSrcTexel * vec2(-1.0, 1.0)).r + texture2D(uCoverage, vUv + uSrcTexel * vec2(1.0, 1.0)).r);
+        gl_FragColor = vec4(col * weight * cov * smoothstep(luminosityThreshold, luminosityThreshold + smoothWidth, maxc(col)), 1.0);
+        return;
+      }
       // 4 bilinear taps one pixel off the centre on each diagonal: a smooth 4 × 4 tent over the full-size pixels.
       vec3 c = 0.25 * (
         glowAt(vUv + uSrcTexel * vec2(-1.0, -1.0)) + glowAt(vUv + uSrcTexel * vec2(1.0, -1.0)) +
@@ -133,17 +181,48 @@ export function addBloomGroup({ THREE, composer, afterPass, settings }) {
     }
   `;
   pass.highPassUniforms.uSrcTexel = { value: new THREE.Vector2(1 / Math.max(1, size.x), 1 / Math.max(1, size.y)) };
+  pass.highPassUniforms.uCoverage = { value: coverageTarget.texture };
+  pass.highPassUniforms.uUseCoverage = { value: 0 };
   pass.materialHighPassFilter.uniforms = pass.highPassUniforms;
   pass.materialHighPassFilter.needsUpdate = true;
   const setSize = pass.setSize.bind(pass);
   pass.setSize = (w, h) => {
     pass.highPassUniforms.uSrcTexel.value.set(1 / Math.max(1, w), 1 / Math.max(1, h));
+    coverageTarget.setSize(Math.max(1, w), Math.max(1, h));
     setSize(Math.max(2, Math.round(w * scale)), Math.max(2, Math.round(h * scale)));
+  };
+  // Right before the bloom: the meshes' coverage, seen by the same camera as the scene.
+  const _clear = new THREE.Color();
+  const render = pass.render.bind(pass);
+  pass.render = (renderer, writeBuffer, readBuffer, deltaTime, maskActive) => {
+    const cam = getCamera ? getCamera() : null;
+    const useCoverage = sources.length > 0 && !!cam;
+    pass.highPassUniforms.uUseCoverage.value = useCoverage ? 1 : 0;
+    if (useCoverage) {
+      for (const s of sources) {
+        s.proxy.visible = s.mesh.visible && !!s.mesh.parent;
+        s.proxy.matrix.copy(s.mesh.matrixWorld);
+        s.proxy.matrixWorldNeedsUpdate = true;
+      }
+      const prevTarget = renderer.getRenderTarget();
+      const prevAutoClear = renderer.autoClear;
+      renderer.getClearColor(_clear);
+      const prevAlpha = renderer.getClearAlpha();
+      renderer.autoClear = false;
+      renderer.setRenderTarget(coverageTarget);
+      renderer.setClearColor(0x000000, 0);
+      renderer.clear(true, false, false);
+      renderer.render(coverageScene, cam);
+      renderer.setRenderTarget(prevTarget);
+      renderer.setClearColor(_clear, prevAlpha);
+      renderer.autoClear = prevAutoClear;
+    }
+    render(renderer, writeBuffer, readBuffer, deltaTime, maskActive);
   };
   const passes = composer.passes;
   const at = passes.indexOf(afterPass);
   composer.insertPass(pass, at >= 0 ? at + 1 : 1);
-  return {
+  const group = {
     pass,
     mark(material, weight = 1) {
       if (!material) return;
@@ -152,9 +231,25 @@ export function addBloomGroup({ THREE, composer, afterPass, settings }) {
         material,
         "bloomGroup",
         "uniform float uBloomGroupWeight;\n",
-        `gl_FragColor.a = ${BLOOM_GROUP_ALPHA_BASE.toFixed(1)} + clamp(uBloomGroupWeight, 0.0, 1.0);`,
+        `gl_FragColor.a = ${BASE} + clamp(uBloomGroupWeight, 0.0, 1.0);`,
         { uBloomGroupWeight: u },
       );
+    },
+    /** A thin emitter: its material is marked, and the mesh is drawn into the coverage image (stable glow). */
+    addMesh(mesh, weight = 1) {
+      if (!mesh || sources.some((s) => s.mesh === mesh)) return;
+      const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+      for (const m of mats) group.mark(m, weight);
+      const proxy = new THREE.Mesh(mesh.geometry, coverageMat);
+      proxy.matrixAutoUpdate = false;
+      proxy.frustumCulled = mesh.frustumCulled;
+      coverageScene.add(proxy);
+      sources.push({ mesh, proxy });
+    },
+    /** Forget the meshes (the level is being torn down). */
+    clearMeshes() {
+      for (const s of sources) coverageScene.remove(s.proxy);
+      sources.length = 0;
     },
     setThreshold(threshold, knee) {
       pass.threshold = threshold;
@@ -162,6 +257,7 @@ export function addBloomGroup({ THREE, composer, afterPass, settings }) {
       pass.highPassUniforms.smoothWidth.value = knee;
     },
   };
+  return group;
 }
 
 const _bloomPatched = new WeakSet();

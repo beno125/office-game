@@ -1345,8 +1345,8 @@ export function isKitchenSceneReady() {
        * after the main one, so nothing else glows more.
        */
       const PESEL_BLOOM = {
-        /** How strong the glow is (dark mode). */
-        strength: 0.5,
+        /** How strong the glow is (dark mode). (On the coverage source: about 2.2× the energy of the old pixel source, so 0.14 ≈ 60% of the earlier 0.5.) */
+        strength: 0.14,
         /** How far it spreads (0 tight → 1 wide; mixes the blur's mip levels). Near 1 the wide, soft levels lead,
          *  so the glow fades out round instead of hugging the strip's rectangle. */
         radius: 0.85,
@@ -1359,7 +1359,15 @@ export function isKitchenSceneReady() {
         /** Bright mode: the glow × this (the room is lit, the strips are plain white). */
         brightModeScale: 0.35,
       };
-      const peselBloom = addBloomGroup({ THREE, composer: finalComposer, afterPass: kitchenBloom.pass, settings: PESEL_BLOOM });
+      // getCamera: the strips are also drawn into a multisampled coverage image with the scene's camera, so their thin
+      // shapes don't make the glow crawl and pulse as the camera moves (see addBloomGroup).
+      const peselBloom = addBloomGroup({
+        THREE,
+        composer: finalComposer,
+        afterPass: kitchenBloom.pass,
+        settings: PESEL_BLOOM,
+        getCamera: () => renderScenePass.camera,
+      });
       // Slow-motion vignette (edge darkening): last, off unless a jump is slowed.
       const jumpVignettePass = new ShaderPass({
         uniforms: { tDiffuse: { value: null }, uStrength: { value: 0 } },
@@ -8188,9 +8196,10 @@ let _worldSwitched = false;
       };
       /** Padding around the plane's footprint that still counts as "over it" (world units). */
       const TRASH_FX_EDGE_PAD = 0.6;
-      // Drops the black hole floor (the plane itself) below the opening's lip. It's the fire's base too:
-      // particles under the floor are hidden, so a lower fire needs a deeper floor.
-      const TRASH_FX_Y_OFFSET = -1.25;
+      // Extra drop of the black hole floor (the plane itself) below where the model puts it. It's the fire's base too:
+      // particles under the floor are hidden, so a lower fire needs a deeper floor. 0 since ul-kitchen27, whose
+      // floors are already 1.1 lower; everything else (flames, floor glow, light) is placed from the plane's own bounds.
+      const TRASH_FX_Y_OFFSET = 0;
       /** The glow sits this far above the plane's top surface (+ polygonOffset), so it never z-fights. */
       const TRASH_FX_SURFACE_LIFT = 0.004;
       /** Draw order for the fire parts that sit behind the bin signs (translucent, renderOrder 2, no depth writes):
@@ -8213,18 +8222,18 @@ let _worldSwitched = false;
         flameSizeRange: [0.4, 1.5],
         emberSizeRange: [0.1, 0.34],
         /** Peak height above the base (world units): idle, and at full strength. Embers rise × emberRise of that.
-         *  (The floor is ~1.8 below the table top: idle flames stay in the hole, full ones tower over it.) */
-        idleHeight: 1.9,
+         *  (The floor is ~1.7 below the table top: idle flames stay in the hole, full ones tower over it.) */
+        idleHeight: 1.5,
         flareHeight: 7.5,
         emberRise: 1.5,
         /** Idle intensity level (0 → 1): with no car over the hole, the share of particles alive and the chase run at this level,
          *  and the particles' glow at halfway between it and full (so the idle fire stays visible, just softer). */
-        idleLevel: 0.5,
+        idleLevel: 0.32,
         /** Transition speed: time (s) to ramp up to full strength once a car is over the hole, and to fade back to idle once it's gone. */
         rampUp: 0.25,
         rampDown: 0.9,
         /** How lively each particle looks (size, opacity): idle (full strength = 1). */
-        idleHeat: 0.45,
+        idleHeat: 0.32,
         /** The floor glow's flare around each car: radius (world units, grows with speed) and its fade in / out (s). */
         flareRadius: 1.1,
         flareRadiusAtSpeed: 1.7,
@@ -8245,8 +8254,8 @@ let _worldSwitched = false;
         glowIdle: 0.12,
         glowCar: 0.35,
         /** The fire's light: idle and at full strength (flickers more as the fire flares), its range (world units) and height above the
-         *  hole's floor (above the table top, ~1.6 up, so it lights the track and the cars from above). */
-        lightIdle: 45,
+         *  hole's floor (above the table top, ~1.7 up, so it lights the track and the cars from above). */
+        lightIdle: 28,
         lightFlare: 220,
         lightRange: 11,
         lightDecay: 1.5,
@@ -9387,6 +9396,7 @@ let _worldSwitched = false;
         _safeRemoveBody(tablePlateBody); tablePlateBody = null;
         _safeRemoveBody(floorPhysBody); floorPhysBody = null;
         if (_peselLightMeshes.length) _peselLightMeshes.length = 0;
+        peselBloom.clearMeshes();
         resetTrashFx();
         stopMisterSpotLaser(_misterSpot);
         resetMisterSpotTrail();
@@ -9810,7 +9820,7 @@ let _worldSwitched = false;
         const sidePlane = _findKitchenMesh(kmodel, "mainTableSidePlane", meshByName);
         if (!topPlane && !sidePlane) {
           console.warn(
-            "ul-kitchen26.glb: mainTableTopPlane / mainTableSidePlane not found",
+            "ul-kitchen27.glb: mainTableTopPlane / mainTableSidePlane not found",
           );
           return { coverCloneStepX: null, topMat: null, sideMat: null };
         }
@@ -11271,7 +11281,7 @@ let _worldSwitched = false;
         const loadToken = ++_kitchenLoadToken;
         const kLoader = new GLTFLoader();
         kLoader.load(
-          kitchenAsset("ul-kitchen26.glb"),
+          kitchenAsset("ul-kitchen27.glb"),
           (gltf) => {
             if (!_worldSwitched || loadToken !== _kitchenLoadToken) return;
 
@@ -11293,7 +11303,7 @@ let _worldSwitched = false;
             });
             const surfaceMesh = kitchenPlate || kitchenPlatePhysic;
             if (!surfaceMesh) {
-              console.warn("ul-kitchen26.glb: no mainTablePlate/mainTablePlatePhysic mesh found");
+              console.warn("ul-kitchen27.glb: no mainTablePlate/mainTablePlatePhysic mesh found");
               _worldSwitched = false;
               return;
             }
@@ -12700,7 +12710,7 @@ let _worldSwitched = false;
                   const idx = parseInt(peselMatch[1], 10);
                   if (idx >= 1 && idx <= 34) {
                     _applyPeselStyleLight(n);
-                    peselBloom.mark(n.material); // their own soft glow (PESEL_BLOOM)
+                    peselBloom.addMesh(n); // their own soft, stable glow (PESEL_BLOOM)
                   }
                   return;
                 }
@@ -13140,7 +13150,7 @@ let _worldSwitched = false;
           },
           undefined,
           (err) => {
-            console.error("Failed to load ul-kitchen26.glb:", err);
+            console.error("Failed to load ul-kitchen27.glb:", err);
             _worldSwitched = false;
           },
         );
