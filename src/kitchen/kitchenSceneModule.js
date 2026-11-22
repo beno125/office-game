@@ -1347,13 +1347,15 @@ export function isKitchenSceneReady() {
       const PESEL_BLOOM = {
         /** How strong the glow is (dark mode). */
         strength: 0.5,
-        /** How far it spreads (0 tight → 1 wide; mixes the blur's mip levels). */
-        radius: 0.4,
+        /** How far it spreads (0 tight → 1 wide; mixes the blur's mip levels). Near 1 the wide, soft levels lead,
+         *  so the glow fades out round instead of hugging the strip's rectangle. */
+        radius: 0.85,
         /** Brightness (brightest colour channel, HDR) where the glow starts, and the soft knee above it (full glow at threshold + knee). */
         threshold: 0.6,
         knee: 0.9,
-        /** Bloom resolution vs. the drawing buffer (0.5 = half: smooth, and cheap). */
-        resolutionScale: 0.5,
+        /** Bloom resolution vs. the drawing buffer (the pass halves it once more inside: 1 = the glow starts at half the screen;
+         *  lower gets blocky on the thin strips). */
+        resolutionScale: 1,
         /** Bright mode: the glow × this (the room is lit, the strips are plain white). */
         brightModeScale: 0.35,
       };

@@ -87,15 +87,19 @@ export function addThresholdBloom({ THREE, composer, afterPass, settings = BLOOM
  * A bloom of its own for a chosen set of materials (selective: nothing else
  * feeds it), with its own strength, radius and soft threshold. One more
  * UnrealBloomPass (a 5-level mip chain of separable Gaussian blurs on
- * linear-filtered half-float targets, at `resolutionScale` of the drawing
- * buffer, resized with the composer), added after `afterPass`. Mark the
- * materials with `mark(material, weight)`. Their pixels glow by
- * weight × smoothstep(threshold, threshold + knee, brightest channel), so the
- * glow starts softly instead of at a hard cut.
+ * linear-filtered half-float targets, resized with the composer), added after
+ * `afterPass`. Mark the materials with `mark(material, weight)`. Their pixels
+ * glow by weight × smoothstep(threshold, threshold + knee, brightest channel),
+ * so the glow starts softly instead of at a hard cut.
+ * Made for small, thin emitters (strip lights): the pass halves its given
+ * resolution internally, so `resolutionScale` 1 (the default) starts the glow
+ * at half the screen; the bright parts are picked with a 4 × 4 tent filter (no
+ * single-tap sampling: a thin strip would alias into broken blocks), and
+ * `radius` near 1 weights the wide, soft blur levels most.
  * @returns {{ pass: UnrealBloomPass, mark(material, weight?): void, setThreshold(threshold, knee): void }}
  */
 export function addBloomGroup({ THREE, composer, afterPass, settings }) {
-  const scale = settings.resolutionScale ?? 0.5;
+  const scale = settings.resolutionScale ?? 1;
   const size = new THREE.Vector2();
   composer.renderer.getDrawingBufferSize(size);
   const pass = new UnrealBloomPass(
@@ -111,19 +115,31 @@ export function addBloomGroup({ THREE, composer, afterPass, settings }) {
     uniform float defaultOpacity;
     uniform float luminosityThreshold;
     uniform float smoothWidth;
+    uniform vec2 uSrcTexel; // one pixel of the full-size image
     varying vec2 vUv;
-    void main() {
-      vec4 texel = texture2D(tDiffuse, vUv);
-      // Only the group's own pixels (alpha at or above the group base).
+    // One pixel's glow (the group's own pixels only: alpha at or above the group base).
+    vec3 glowAt(vec2 uv) {
+      vec4 texel = texture2D(tDiffuse, uv);
       float weight = texel.a >= ${BLOOM_GROUP_ALPHA_BASE.toFixed(1)} ? clamp(texel.a - ${BLOOM_GROUP_ALPHA_BASE.toFixed(1)}, 0.0, 1.0) : 0.0;
       float v = max(texel.r, max(texel.g, texel.b));
-      float alpha = weight * smoothstep(luminosityThreshold, luminosityThreshold + smoothWidth, v);
-      gl_FragColor = mix(vec4(defaultColor.rgb, defaultOpacity), vec4(texel.rgb, 1.0), alpha);
+      return texel.rgb * weight * smoothstep(luminosityThreshold, luminosityThreshold + smoothWidth, v);
+    }
+    void main() {
+      // 4 bilinear taps one pixel off the centre on each diagonal: a smooth 4 × 4 tent over the full-size pixels.
+      vec3 c = 0.25 * (
+        glowAt(vUv + uSrcTexel * vec2(-1.0, -1.0)) + glowAt(vUv + uSrcTexel * vec2(1.0, -1.0)) +
+        glowAt(vUv + uSrcTexel * vec2(-1.0, 1.0)) + glowAt(vUv + uSrcTexel * vec2(1.0, 1.0)));
+      gl_FragColor = vec4(c, 1.0);
     }
   `;
+  pass.highPassUniforms.uSrcTexel = { value: new THREE.Vector2(1 / Math.max(1, size.x), 1 / Math.max(1, size.y)) };
+  pass.materialHighPassFilter.uniforms = pass.highPassUniforms;
   pass.materialHighPassFilter.needsUpdate = true;
   const setSize = pass.setSize.bind(pass);
-  pass.setSize = (w, h) => setSize(Math.max(2, Math.round(w * scale)), Math.max(2, Math.round(h * scale)));
+  pass.setSize = (w, h) => {
+    pass.highPassUniforms.uSrcTexel.value.set(1 / Math.max(1, w), 1 / Math.max(1, h));
+    setSize(Math.max(2, Math.round(w * scale)), Math.max(2, Math.round(h * scale)));
+  };
   const passes = composer.passes;
   const at = passes.indexOf(afterPass);
   composer.insertPass(pass, at >= 0 ? at + 1 : 1);
