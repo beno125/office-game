@@ -2133,6 +2133,7 @@ let _officeSceneAnimationFrame = 0;
         if (_officeReadyFrames < OFFICE_READY_WARMUP_FRAMES) return;
         _officeSceneReady = true;
         emitOfficeSceneEvent("office-scene-ready");
+        startScreenVideos(); // only now: they don't compete with the level's own loading
       }
 
       /**
@@ -12961,12 +12962,14 @@ let _officeSceneAnimationFrame = 0;
       const SCREEN_BLOOM = { weight: 0.5 };
             function setupScreenVideo(mesh, video, canvas, videoSrc) {
         if (!mesh) return null;
-        video.src = videoSrc;
+        // The source is set once the level is ready (startScreenVideos): nothing downloads before that.
+        video.preload = "none";
+        video.dataset.src = videoSrc;
         video.loop = true;
         video.muted = true;
         video.playsInline = true;
         video.setAttribute("playsinline", "");
-        video.play().catch(() => {});
+        if (_officeSceneReady) queueMicrotask(startScreenVideos); // the level was ready first
         canvas.width = 2048;
         canvas.height = 2048;
         const tex = new THREE.CanvasTexture(canvas);
@@ -16154,6 +16157,16 @@ diffuseColor.a = 1.0;
           console.error("[office] office-scene1.gltf failed to load:", err);
         },
       );
+
+      /** The monitors' videos start once the level is ready (until then they show their dark placeholder). */
+      function startScreenVideos() {
+        for (const v of [leftScreenVideo, rightScreenVideo]) {
+          if (!v || !v.dataset.src || v.src) continue;
+          v.preload = "auto";
+          v.src = v.dataset.src;
+          v.play().catch(() => {});
+        }
+      }
 
       function tryPlayScreenVideos() {
         if (leftScreenVideo && leftScreenVideo.paused)
