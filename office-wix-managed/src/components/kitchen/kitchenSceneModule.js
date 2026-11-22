@@ -32,7 +32,7 @@ import { SCENE_ROUTES, nextLevelPath } from "../game/sceneRoutes.js";
 import { createCinematicIntro, introEase, introEaseSine, introLerp } from "../game/cinematicIntro.js";
 import { startTransitionStrips, TRANSITION_STRIPS, TRANSITION_STRIP_COLORS } from "../game/transitionStrips.js";
 import { createCarLighting } from "../game/carLighting.js";
-import { addThresholdBloom, keepBelowBloomThreshold } from "../game/thresholdBloom.js";
+import { addThresholdBloom, keepBelowBloomThreshold, setBloomWeight } from "../game/thresholdBloom.js";
 import { createTouchDrive } from "../game/touch/touchDrive.js";
 import { createKitchenFood, trayFromMesh, addTrayShapes, KITCHEN_FOOD } from "./kitchenFood.js";
 import { createCameraDrag } from "../game/cameraDrag.js";
@@ -8094,6 +8094,215 @@ let _worldSwitched = false;
         if (!on) _trashFxLight.intensity = 0;
       }
 
+      // ── The coffee machine's screen (coffeeScreen): a lit drinks menu ────────────
+      // A drawn canvas image (a warm brown backdrop, a 4 × 2 grid of soft
+      // translucent tiles, each a glass drink and its name) used as the screen's
+      // emissive map, so it glows on its own (bright mode and dark mode alike)
+      // with a soft bloom of its own colour (no brighter, no white frame). The
+      // model's quad (3.47 × 2.04, facing its local +Z) gets fresh UVs from its
+      // own corners (its UVs were a rotated piece of another layout).
+      const COFFEE_SCREEN = {
+        /** How bright the screen glows (emissive intensity; under the bloom threshold, so it stays detailed). */
+        emissiveIntensity: 1.15,
+        /** Its soft bloom (share of its own colour added as glow; see thresholdBloom.js setBloomWeight). */
+        bloom: 0.22,
+        /** Texture width (px); the height follows the screen's aspect. */
+        texWidth: 2048,
+        drinks: ["Espresso", "Americano", "Cappuccino", "Latte", "Macchiato", "Hot water", "Hot milk", "Hot cream"],
+      };
+
+      /** Draws the menu image (canvas) for a screen of aspect `aspect` (width / height). */
+      function drawCoffeeScreenImage(aspect) {
+        const W = COFFEE_SCREEN.texWidth;
+        const H = Math.round(W / aspect);
+        const c = document.createElement("canvas");
+        c.width = W;
+        c.height = H;
+        const g = c.getContext("2d");
+        // Warm brown backdrop, lighter in the middle; a thin dark strip on top.
+        const bg = g.createRadialGradient(W * 0.5, H * 0.48, H * 0.05, W * 0.5, H * 0.5, W * 0.62);
+        bg.addColorStop(0, "#4a3626");
+        bg.addColorStop(0.55, "#2c1f16");
+        bg.addColorStop(1, "#100b08");
+        g.fillStyle = bg;
+        g.fillRect(0, 0, W, H);
+        g.fillStyle = "#070505";
+        g.fillRect(0, 0, W, H * 0.025);
+        // The grid.
+        const cols = 4, rows = 2;
+        const mx = W * 0.08, top = H * 0.17, bottom = H * 0.17, gap = W * 0.011;
+        const tw = (W - 2 * mx - (cols - 1) * gap) / cols;
+        const th = (H - top - bottom - (rows - 1) * gap) / rows;
+        const round = (x, y, w, h, r) => {
+          g.beginPath();
+          g.moveTo(x + r, y);
+          g.arcTo(x + w, y, x + w, y + h, r);
+          g.arcTo(x + w, y + h, x, y + h, r);
+          g.arcTo(x, y + h, x, y, r);
+          g.arcTo(x, y, x + w, y, r);
+          g.closePath();
+        };
+        COFFEE_SCREEN.drinks.forEach((name, i) => {
+          const x = mx + (i % cols) * (tw + gap);
+          const y = top + Math.floor(i / cols) * (th + gap);
+          // Tile: soft translucent warm grey, lighter at the top; a warm glow along its bottom edge.
+          const tg = g.createLinearGradient(0, y, 0, y + th);
+          tg.addColorStop(0, "rgba(255, 238, 220, 0.2)");
+          tg.addColorStop(1, "rgba(255, 238, 220, 0.12)");
+          round(x, y, tw, th, tw * 0.025);
+          g.fillStyle = tg;
+          g.fill();
+          g.strokeStyle = "rgba(255, 240, 225, 0.12)";
+          g.lineWidth = 2;
+          g.stroke();
+          const lg = g.createLinearGradient(x, 0, x + tw, 0);
+          lg.addColorStop(0, "rgba(255, 214, 170, 0)");
+          lg.addColorStop(0.5, "rgba(255, 214, 170, 0.75)");
+          lg.addColorStop(1, "rgba(255, 214, 170, 0)");
+          g.fillStyle = lg;
+          g.fillRect(x + tw * 0.08, y + th - 3, tw * 0.84, 3);
+          // The drink.
+          drawCoffeeScreenDrink(g, i, x + tw / 2, y + th * 0.43, th * 0.5);
+          // Its name.
+          g.fillStyle = "rgba(255, 255, 255, 0.94)";
+          g.font = `500 ${Math.round(th * 0.085)}px "Helvetica Neue", Arial, sans-serif`;
+          g.textAlign = "center";
+          g.textBaseline = "middle";
+          g.fillText(name, x + tw / 2, y + th * 0.84);
+        });
+        return c;
+      }
+
+      /** One glass drink, centred at (cx, cy), `s` tall. */
+      function drawCoffeeScreenDrink(g, i, cx, cy, s) {
+        const glass = "rgba(255, 255, 255, 0.75)";
+        const shine = (x, y, h) => {
+          g.strokeStyle = "rgba(255, 255, 255, 0.55)";
+          g.lineWidth = s * 0.018;
+          g.beginPath();
+          g.moveTo(x, y);
+          g.lineTo(x, y + h);
+          g.stroke();
+        };
+        const fillLayers = (x, y, w, h, layers) => {
+          let yy = y + h;
+          for (const [share, color] of layers) {
+            const lh = h * share;
+            g.fillStyle = color;
+            g.fillRect(x, yy - lh, w, lh);
+            yy -= lh;
+          }
+        };
+        const handle = (x, y, w, h) => {
+          g.strokeStyle = glass;
+          g.lineWidth = s * 0.03;
+          g.beginPath();
+          g.ellipse(x, y, w, h, 0, -Math.PI / 2, Math.PI / 2);
+          g.stroke();
+        };
+        // A straight glass (cup or tall glass): x centre, its width / height, the liquid layers (bottom first).
+        const tumbler = (w, h, layers, opts = {}) => {
+          const x = cx - w / 2, y = cy - h / 2 + (opts.dy || 0) * s;
+          g.save();
+          g.beginPath();
+          g.moveTo(x, y);
+          g.lineTo(x + w * 0.04, y + h);
+          g.lineTo(x + w * 0.96, y + h);
+          g.lineTo(x + w, y);
+          g.closePath();
+          g.clip();
+          fillLayers(x, y + h * (1 - (opts.fill || 0.85)), w, h * (opts.fill || 0.85), layers);
+          g.restore();
+          g.strokeStyle = glass;
+          g.lineWidth = s * 0.022;
+          g.beginPath();
+          g.moveTo(x, y);
+          g.lineTo(x + w * 0.04, y + h);
+          g.lineTo(x + w * 0.96, y + h);
+          g.lineTo(x + w, y);
+          g.stroke();
+          g.beginPath();
+          g.ellipse(x + w / 2, y, w / 2, w * 0.06, 0, 0, Math.PI * 2);
+          g.stroke();
+          shine(x + w * 0.14, y + h * 0.12, h * 0.6);
+          if (opts.handle) handle(x + w, y + h * 0.45, w * 0.28, h * 0.26);
+          if (opts.base) {
+            g.fillStyle = "rgba(255, 255, 255, 0.55)";
+            g.fillRect(x + w * 0.04, y + h, w * 0.92, s * 0.03);
+          }
+        };
+        switch (i) {
+          case 0: // espresso: a small cup
+            tumbler(s * 0.46, s * 0.4, [[0.15, "#5a3a24"], [0.85, "#1a0f08"]], { handle: true, fill: 0.7, dy: 0.08 });
+            break;
+          case 1: // americano: a taller cup
+            tumbler(s * 0.5, s * 0.58, [[1, "#1d120b"]], { handle: true, fill: 0.78 });
+            break;
+          case 2: { // cappuccino: a wide cup, foam on top with a swirl
+            tumbler(s * 0.72, s * 0.36, [[0.55, "#7a5236"], [0.45, "#e9d7c2"]], { handle: true, fill: 0.82, dy: 0.1 });
+            g.strokeStyle = "rgba(160, 110, 70, 0.8)";
+            g.lineWidth = s * 0.015;
+            g.beginPath();
+            g.ellipse(cx, cy - s * 0.04, s * 0.14, s * 0.03, 0, 0.3, Math.PI * 1.7);
+            g.stroke();
+            break;
+          }
+          case 3: // latte: a tall glass in layers
+            tumbler(s * 0.36, s * 0.9, [[0.3, "#e8d8c4"], [0.35, "#b58457"], [0.35, "#f4ece2"]], { fill: 0.92, base: true });
+            break;
+          case 4: { // macchiato: a glass on a stem
+            tumbler(s * 0.38, s * 0.5, [[0.45, "#a26f45"], [0.3, "#d9b48c"], [0.25, "#f2e6d6"]], { handle: true, fill: 0.95, dy: -0.12 });
+            g.strokeStyle = glass;
+            g.lineWidth = s * 0.03;
+            g.beginPath();
+            g.moveTo(cx, cy + s * 0.13);
+            g.lineTo(cx, cy + s * 0.36);
+            g.stroke();
+            g.beginPath();
+            g.ellipse(cx, cy + s * 0.38, s * 0.16, s * 0.035, 0, 0, Math.PI * 2);
+            g.stroke();
+            break;
+          }
+          case 5: // hot water: a tall glass, pale amber
+            tumbler(s * 0.4, s * 0.78, [[1, "rgba(235, 220, 140, 0.75)"]], { fill: 0.72, base: true });
+            break;
+          case 6: // hot milk
+            tumbler(s * 0.4, s * 0.78, [[1, "#f3f1ec"]], { fill: 0.82, base: true });
+            break;
+          default: // hot cream: a tall white glass
+            tumbler(s * 0.4, s * 0.86, [[1, "#f7f5f0"]], { fill: 0.97, base: true });
+            break;
+        }
+      }
+
+      /** coffeeScreen: fresh UVs from its corners, and the lit menu image as its glowing surface. */
+      function applyCoffeeScreen(mesh) {
+        const geo = mesh.geometry;
+        geo.computeBoundingBox();
+        const b = geo.boundingBox;
+        const w = b.max.x - b.min.x, h = b.max.y - b.min.y;
+        const pos = geo.attributes.position;
+        const uv = new Float32Array(pos.count * 2);
+        for (let i = 0; i < pos.count; i++) {
+          uv[i * 2] = (pos.getX(i) - b.min.x) / w; // left → right
+          uv[i * 2 + 1] = (pos.getY(i) - b.min.y) / h; // bottom → top
+        }
+        geo.setAttribute("uv", new THREE.BufferAttribute(uv, 2));
+        const tex = new THREE.CanvasTexture(drawCoffeeScreenImage(w / h));
+        tex.colorSpace = THREE.SRGBColorSpace;
+        tex.anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy());
+        const mat = new THREE.MeshStandardMaterial({
+          color: 0x000000, // all its light is its own (it doesn't light anything, no reflections of it)
+          emissive: 0xffffff,
+          emissiveMap: tex,
+          emissiveIntensity: COFFEE_SCREEN.emissiveIntensity,
+          roughness: 0.6,
+          metalness: 0,
+        });
+        setBloomWeight(mat, COFFEE_SCREEN.bloom);
+        mesh.material = mat;
+      }
+
       let _iceCoffeeTankMat = null;
       let _iceCoffeeSurfaceMat = null;
       function updateIceCoffeeTank(dt) {
@@ -11163,6 +11372,10 @@ let _worldSwitched = false;
                   n.material = _binSign1PlasticMat;
                 }
                 n.renderOrder = 2;
+                return;
+              }
+              if (n.name === "coffeeScreen") {
+                applyCoffeeScreen(n);
                 return;
               }
               if (_blackPlasticMeshNames.has(n.name)) {

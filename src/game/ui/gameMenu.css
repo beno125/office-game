@@ -23,6 +23,11 @@
   --wx-menu-close-delay-3: 0.1s;
   --wx-menu-cap-open: 0.06; /* cap seen edge-on: its height share when open */
   --wx-menu-z: 25; /* above the HUD (5) and results popup (12), under the loaders (30) */
+  /* Desktop: a side panel on the right, full height, sliding in / out. */
+  --wx-menu-side-w: 360px;
+  --wx-menu-side-open-ms: 320ms;
+  --wx-menu-side-close-ms: 280ms; /* matches MENU_SIDE_CLOSE_MS */
+  --wx-menu-side-pad: var(--wx-space-6);
 }
 
 /* Icon: fixed top left on every screen and level (safe-area aware), never moves. */
@@ -42,7 +47,7 @@
   .wx-menu { left: auto; right: var(--wx-menu-right); }
 }
 
-/* Centered modal: dimmed, slightly blurred backdrop + the panel in the middle. */
+/* Centered modal (touch devices; desktop: a side panel, below): dimmed, slightly blurred backdrop + the panel. */
 .wx-menu-modal {
   position: fixed;
   inset: 0;
@@ -210,6 +215,47 @@
 }
 .wx-menu-confirm-actions { display: flex; gap: var(--wx-space-3); margin-top: var(--wx-space-3); }
 .wx-menu-confirm-actions .wx-btn { flex: 1; padding: 0 var(--wx-space-4); }
+
+/* ---------- Desktop: a side panel on the right ---------- */
+
+/* Full height, attached to the right edge, sliding in and out (touch devices keep the centred panel). */
+@media (hover: hover) and (pointer: fine) {
+  .wx-menu-modal {
+    display: block;
+    padding: 0;
+    animation-duration: var(--wx-menu-side-open-ms);
+  }
+  .wx-menu-modal.is-closing { animation-duration: var(--wx-menu-side-close-ms); }
+  .wx-menu-panel {
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: min(var(--wx-menu-side-w), 100vw);
+    max-height: none;
+    align-content: start;
+    overflow-y: auto; /* taller than the screen: it scrolls inside */
+    overscroll-behavior: contain;
+    /* Room on top for the menu icon (top right, over the panel), and the safe areas. */
+    padding:
+      calc(var(--wx-menu-top) + var(--wx-menu-icon-h) + 2 * var(--wx-space-5))
+      calc(var(--wx-menu-side-pad) + env(safe-area-inset-right))
+      calc(var(--wx-menu-side-pad) + env(safe-area-inset-bottom))
+      var(--wx-menu-side-pad);
+    border-width: 0 0 0 1px;
+    border-radius: 0;
+    animation: wx-menu-side-in var(--wx-menu-side-open-ms) var(--wx-ease-out) both;
+  }
+  .wx-menu-modal.is-closing .wx-menu-panel { animation: wx-menu-side-out var(--wx-menu-side-close-ms) var(--wx-ease-out) both; }
+}
+@keyframes wx-menu-side-in {
+  from { transform: translateX(100%); }
+  to { transform: none; }
+}
+@keyframes wx-menu-side-out {
+  from { transform: none; }
+  to { transform: translateX(100%); }
+}
 
 @media (max-width: 480px) {
   :root { --wx-menu-inset: 12px; --wx-menu-icon-w: 38px; --wx-menu-icon-h: 21px; }

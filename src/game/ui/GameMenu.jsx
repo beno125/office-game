@@ -31,8 +31,11 @@ const MENU_STATE_POLL_MS = 250;
 const MENU_SHOW_DELAY_MS = INTRO_LETTERBOX.outSec * 1000 + 300;
 /** Class on <body> while the menu pauses the level: the HUD's CSS animations (countdown line) pause too. */
 const PAUSED_BODY_CLASS = "wx-game-paused";
-/** Panel / dialog close animation (ms, matches gameMenu.css). */
+/** Panel / dialog close animation (ms, matches gameMenu.css): the centred panel (touch), the side panel (desktop). */
 const MENU_CLOSE_MS = 180;
+const MENU_SIDE_CLOSE_MS = 280;
+/** Desktop (mouse): the menu is a side panel (gameMenu.css, same media query). */
+const SIDE_PANEL_MEDIA = "(hover: hover) and (pointer: fine)";
 /** Confirmation copy by level (a race in the kitchen, a round in the meeting room). */
 const CONFIRM_COPY = {
   [SCENE_ROUTES.kitchen]: { title: "Leave the race?", text: "The race in progress will be lost." },
@@ -101,10 +104,11 @@ export default function GameMenu({ level, getState, onPause }) {
   const closeMenu = useCallback((focusIcon = true) => {
     setConfirm(null);
     setClosing(true);
+    const side = typeof window.matchMedia === "function" && window.matchMedia(SIDE_PANEL_MEDIA).matches;
     window.setTimeout(() => {
       setOpen(false);
       setClosing(false);
-    }, MENU_CLOSE_MS);
+    }, side ? MENU_SIDE_CLOSE_MS : MENU_CLOSE_MS);
     if (!leavingRef.current) {
       document.body.classList.remove(PAUSED_BODY_CLASS);
       onPauseRef.current?.(false);
