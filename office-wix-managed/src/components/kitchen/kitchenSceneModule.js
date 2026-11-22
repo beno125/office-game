@@ -35,6 +35,7 @@ import { createCarLighting } from "../game/carLighting.js";
 import { addBloomGroup, addThresholdBloom, keepBelowBloomThreshold, setBloomWeight } from "../game/thresholdBloom.js";
 import { createTouchDrive } from "../game/touch/touchDrive.js";
 import { createKitchenFood, trayFromMesh, addTrayShapes, KITCHEN_FOOD } from "./kitchenFood.js";
+import { createMilkCartons } from "./kitchenMilkCartons.js";
 import { createCameraDrag } from "../game/cameraDrag.js";
 import {
   CAR_MASS,
@@ -2500,6 +2501,7 @@ let _worldSwitched = false;
       /** Food scattered from the plates (kitchenFood.js): table / floor / plates and each other. */
       const PHYS_GROUP_FOOD = 16384;
       let _kitchenFood = null;
+      let _milkCartons = null; // kitchenMilkCartons.js
 
       physicsWorld = new CANNON.World({
         gravity: new CANNON.Vec3(0, -480, 0),
@@ -9837,6 +9839,10 @@ let _worldSwitched = false;
         if (_peselLightMeshes.length) _peselLightMeshes.length = 0;
         peselBloom.clearMeshes();
         resetTrashFx();
+        if (_milkCartons) {
+          _milkCartons.dispose();
+          _milkCartons = null;
+        }
         stopMisterSpotLaser(_misterSpot);
         resetMisterSpotTrail();
         _misterSpot = null;
@@ -12979,6 +12985,21 @@ let _worldSwitched = false;
             setupKitchenPropPhysics(kmodel);
             buildKitchenRaceBoundaries(kmodel);
             setupKitchenFood();
+            // Milk cartons on the fridges' shelves (static, behind the glass doors; see kitchenMilkCartons.js).
+            if (!_milkCartons) {
+              try {
+                _milkCartons = createMilkCartons({
+                  THREE,
+                  scene,
+                  renderer,
+                  fridgeMeshes: [kmodel.getObjectByName("fridgeBodyLeft"), kmodel.getObjectByName("fridgeBodyRight")],
+                });
+                const report = _milkCartons.check();
+                if (report.issues.length) console.warn("Milk cartons:", report.issues);
+              } catch (e) {
+                console.warn("Failed to set up the milk cartons:", e);
+              }
+            }
             setupKitchenRamp(kmodel, tablePlatePhysicsMaterial);
             _raceModel = kmodel;
 
