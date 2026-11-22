@@ -10112,7 +10112,9 @@ let _officeSceneAnimationFrame = 0;
         } else {
           carShadowPlane = new THREE.Mesh(
             shadowPlaneGeo,
-            new THREE.ShadowMaterial({ opacity: 0.45 }),
+            // No depth: it reaches past the desk's edge (planeMargin), invisible there, and would hide what's behind it
+            // (the drawer's ring, cut along its edge, seen from above).
+            new THREE.ShadowMaterial({ opacity: 0.45, depthWrite: false }),
           );
           carShadowPlane.name = "carShadowPlane";
           carShadowPlane.rotation.x = -Math.PI / 2;
