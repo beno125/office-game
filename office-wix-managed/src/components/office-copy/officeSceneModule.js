@@ -24,6 +24,7 @@ import { createCameraDrag } from "../game/cameraDrag.js";
 import { createCarLighting } from "../game/carLighting.js";
 import { createTouchDrive } from "../game/touch/touchDrive.js";
 import { addThresholdBloom, BLOOM_EMISSIVE, setBloomWeight } from "../game/thresholdBloom.js";
+import { createSubDimensionPortal, SUB_DIMENSION_LOOK } from "../game/subDimensionPortal.js";
 
 const _OFFICE_BASE = `${import.meta.env.BASE_URL}office-scene-optimized/`;
 function officeAsset(relativePath) {
@@ -3272,42 +3273,50 @@ let _officeSceneAnimationFrame = 0;
       const DRAWER_OPEN_HOLD = 7000;
       const DRAWER_PART_NAMES = ["drawerPannel", "drawerEffect", "drawer"];
       let _drawerEffectMesh = null;
-      const _drawerPortalMaterials = [];
-      const _drawerPortalRingMaterials = [];
       const DRAWER_PORTAL_HEIGHT = 3;
-      const DRAWER_PORTAL_PARTICLE_COUNT = 420;
-      let _drawerPortalParticles = null;
-      let _drawerPortalParticleMaterial = null;
-      const _drawerPortalFogMaterials = [];
+      /**
+       * The drawer's gateway to the Kitchen: the Kitchen intro portal's sub-dimensional look (subDimensionPortal.js,
+       * shared with that shot) as an opening in the drawer's floor, shaped like it (a rounded rectangle inset from
+       * its inner walls), its tunnel going down through the desk, its streaks / sparks / smoke rising out of it.
+       * It follows the drawer's own sequence: it opens as the drawer finishes opening (openTime) and collapses as it
+       * closes (the drawer's 0.22 s fade).
+       */
+      const DRAWER_GATEWAY = {
+        /** Colours and glow: the Kitchen portal's (tunnel near / deep / core, light colour, streak palette); override here. */
+        look: { ...SUB_DIMENSION_LOOK },
+        /** Overall intensity (× glow, smoke, flash, haze) and animation speed (× time: streaks, smoke, spin, bands). */
+        intensity: 1,
+        speed: 1,
+        /** Distortion: the walls' turning bands (0 = none, Kitchen 0.15), and the smoke's noise / billow (in `smoke`). */
+        wallBands: 0.15,
+        /** Opening: inset from the drawer's inner walls (world units), squareness (2 = ellipse, higher = squarer). */
+        inset: 0.55,
+        squareness: 4,
+        /** Seconds for it to open (its tunnel deepens, the smoke and streaks come in), from when the drawer is open. */
+        openTime: 1.2,
+        /** The opening's flash as it opens (× intensity). */
+        flash: 0.9,
+        stencilBit: 2,
+        /** The tunnel (world units): depth; streaks: count, share of the opening, length / width, speed (units/s). */
+        tunnelDepth: 14,
+        tunnelStreaks: 150,
+        tunnelRadius: [0.15, 0.92],
+        tunnelLen: [0.6, 1.8],
+        tunnelWidth: [0.018, 0.04],
+        tunnelSpeed: [7, 13],
+        rimSpin: 0.55,
+        /** The rim of coloured smoke (the Kitchen's): its noiseScale / noiseSpeed / billow are the "distortion". */
+        smoke: { count: 150, size: [0.55, 0.95], thickness: 0.24, depth: 0.42, billow: 0.12, billowSpeed: [0.6, 1.4], alpha: 0.5, noiseScale: 2.6, noiseSpeed: 0.35, glow: 1.15, innerGlow: 0.9 },
+        rimParticles: { count: 120, driftShare: 0.35, size: [2.5, 6], life: [0.9, 1.8], driftOut: 0.9, driftForward: 0.5 },
+        /** Streaks that carry on up out of the opening (world units, cone, share of lines while open, from when). */
+        escape: { distance: 6, spreadDeg: [1.5, 9], decel: 0.06, fadeStart: 0.45, steady: 0.3, burst: 1, burstWidth: 0.2, from: 0.3 },
+        /** The opening's burst wave (count, speed), at this time (s). */
+        wave: { count: 70, speed: [6, 11] },
+        waveAt: 0.35,
+        sparks: { count: 70, life: [0.7, 1.4], speedOut: [1.2, 2.8], speedSide: [0.2, 1.0], size: [3, 7] },
+      };
+      let _drawerGateway = null;
       let _drawerPortalPointLight = null;
-      const _drawerPortalParticlePhase = new Float32Array(
-        DRAWER_PORTAL_PARTICLE_COUNT,
-      );
-      const _drawerPortalParticleAngle = new Float32Array(
-        DRAWER_PORTAL_PARTICLE_COUNT,
-      );
-      const _drawerPortalParticleRadius = new Float32Array(
-        DRAWER_PORTAL_PARTICLE_COUNT,
-      );
-      const _drawerPortalParticleSpeed = new Float32Array(
-        DRAWER_PORTAL_PARTICLE_COUNT,
-      );
-      const DRAWER_PORTAL_PARTICLE_HEIGHT = 15;
-      const _drawerPortalParticleMaxHeight = new Float32Array(
-        DRAWER_PORTAL_PARTICLE_COUNT,
-      );
-      const _drawerPortalParticleWobble = new Float32Array(
-        DRAWER_PORTAL_PARTICLE_COUNT,
-      );
-      const _drawerPortalParticleSparkiness = new Float32Array(
-        DRAWER_PORTAL_PARTICLE_COUNT,
-      );
-      const _drawerPortalParticleDriftX = new Float32Array(
-        DRAWER_PORTAL_PARTICLE_COUNT,
-      );
-      const _drawerPortalParticleDriftZ = new Float32Array(
-        DRAWER_PORTAL_PARTICLE_COUNT,
-      );
       const DRAWER_PORTAL_BOLT_COUNT = 14;
       const DRAWER_PORTAL_BOLT_SEGMENTS = 10;
       const DRAWER_PORTAL_ELECTRIC_HEIGHT = 8;
@@ -7643,537 +7652,12 @@ let _officeSceneAnimationFrame = 0;
         syncStarFromPhysics();
       }
 
-      // Kitchen-transition light tunnel inside the portal: streaks in the kitchen
-      // palette rush out of the dark centre toward the rings, speeding up on the
-      // same curve as the kitchen loader's streaks.
-      /** Angular slots for streaks (about this many lanes around the portal). */
-      const DRAWER_PORTAL_WARP_LANES = 120;
-      /** Share of lanes that carry a streak (0..1). */
-      const DRAWER_PORTAL_WARP_FILL = 0.55;
-      /** Streak speed: start, gain and the seconds it takes to reach full speed (kitchen loader: 0.35, 2.65, 6.2). */
-      const DRAWER_PORTAL_WARP_SPEED_START = 0.35;
-      const DRAWER_PORTAL_WARP_SPEED_GAIN = 2.65;
-      const DRAWER_PORTAL_WARP_RAMP_SEC = 6.2;
-      /** Streak brightness (added light) and how dark the tunnel's centre gets (0 = no darkening). */
-      const DRAWER_PORTAL_WARP_INTENSITY = 2.1;
-      const DRAWER_PORTAL_WARP_CENTER_DARKEN = 0.55;
-      const glslFloat = (v) => (Number.isInteger(v) ? `${v}.0` : `${v}`);
-
-      function createDrawerPortalMaterial(layer) {
-        return new THREE.ShaderMaterial({
-          uniforms: {
-            uTime: { value: 0 },
-            uLayer: { value: layer },
-            uOpacity: { value: 0 },
-          },
-          vertexShader: `
-            varying vec2 vUv;
-            uniform float uTime;
-            uniform float uLayer;
-
-            void main() {
-              vUv = uv;
-              vec3 p = position;
-              float pulse = 1.0 + sin(uTime * 2.4 + uLayer * 1.7) * 0.012;
-              p.xz *= pulse;
-              gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
-            }
-          `,
-          fragmentShader: `
-            precision highp float;
-            varying vec2 vUv;
-            uniform float uTime;
-            uniform float uLayer;
-            uniform float uOpacity;
-
-            #define PI 3.14159265359
-            #define WARP_LANES ${glslFloat(DRAWER_PORTAL_WARP_LANES)}
-            #define WARP_FILL ${glslFloat(DRAWER_PORTAL_WARP_FILL)}
-            #define WARP_SPEED_START ${glslFloat(DRAWER_PORTAL_WARP_SPEED_START)}
-            #define WARP_SPEED_GAIN ${glslFloat(DRAWER_PORTAL_WARP_SPEED_GAIN)}
-            #define WARP_RAMP_SEC ${glslFloat(DRAWER_PORTAL_WARP_RAMP_SEC)}
-            #define WARP_INTENSITY ${glslFloat(DRAWER_PORTAL_WARP_INTENSITY)}
-            #define WARP_CENTER_DARKEN ${glslFloat(DRAWER_PORTAL_WARP_CENTER_DARKEN)}
-
-            float hash21(vec2 p) {
-              p = fract(p * vec2(123.34, 456.21));
-              p += dot(p, p + 45.32);
-              return fract(p.x * p.y);
-            }
-
-            // Kitchen transition palette (#165dff #2090ff #715cff #ff319d #d52cff), linear.
-            vec3 kitchenStreakColor(float i) {
-              if (i < 1.0) return vec3(0.008, 0.107, 1.0);
-              if (i < 2.0) return vec3(0.015, 0.279, 1.0);
-              if (i < 3.0) return vec3(0.165, 0.107, 1.0);
-              if (i < 4.0) return vec3(1.0, 0.030, 0.337);
-              return vec3(0.665, 0.025, 1.0);
-            }
-
-            float energyRing(float r, float center, float width) {
-              return 1.0 - smoothstep(width, width * 2.4, abs(r - center));
-            }
-
-            void main() {
-              vec2 p = (vUv - 0.5) * 3.6;
-              float r = length(p);
-              float a = atan(p.y, p.x);
-              float layerPhase = uLayer * 0.83;
-
-              float angularNoise =
-                sin(a * 9.0 - uTime * 3.2 + layerPhase) * 0.018 +
-                sin(a * 23.0 + uTime * 4.7 - layerPhase) * 0.009 +
-                sin(a * 47.0 - uTime * 2.1) * 0.004;
-
-              float outerR = 1.25 - uLayer * 0.022 + angularNoise;
-              float innerR = 0.90 - uLayer * 0.018 - angularNoise * 0.55;
-              float outer = energyRing(r, outerR, 0.055 + uLayer * 0.003);
-              float inner = energyRing(r, innerR, 0.04 + uLayer * 0.002);
-              float outerCore = energyRing(r, outerR - 0.006, 0.009);
-              float innerCore = energyRing(r, innerR - 0.004, 0.007);
-              float outerBevel =
-                energyRing(r, outerR - 0.026, 0.012) * 0.75 +
-                energyRing(r, outerR + 0.032, 0.016) * 0.28;
-              float innerBevel =
-                energyRing(r, innerR - 0.020, 0.009) * 0.68 +
-                energyRing(r, innerR + 0.024, 0.013) * 0.24;
-              float filament = energyRing(
-                r,
-                mix(innerR, outerR, 0.48) +
-                  sin(a * 14.0 + uTime * 3.0 + layerPhase) * 0.025,
-                0.013
-              );
-
-              float spin = 0.5 + 0.5 * sin(a * 6.0 - uTime * 5.0 + r * 34.0);
-              vec3 electricBlue = vec3(0.008, 0.08, 0.62);
-              vec3 cyan = vec3(0.015, 0.30, 0.85);
-              vec3 hotPink = vec3(0.95, 0.015, 0.34);
-              vec3 violet = vec3(0.40, 0.012, 0.85);
-              vec3 energyColor = mix(electricBlue, cyan, spin);
-              energyColor = mix(
-                energyColor,
-                mix(hotPink, violet, 0.5 + 0.5 * sin(a * 4.0 + uTime * 2.2)),
-                smoothstep(0.58, 0.84, r)
-              );
-
-              float portalFillR = outerR - 0.07;
-              float portalMask =
-                1.0 - smoothstep(portalFillR - 0.02, portalFillR + 0.055, r);
-              float depthBands =
-                0.5 + 0.5 * sin(r * 58.0 - uTime * 3.4 + a * 2.0);
-              float vortex =
-                0.5 + 0.5 * sin(a * 5.0 - r * 25.0 + uTime * 2.0);
-              vec3 abyss = mix(
-                vec3(0.002, 0.006, 0.045),
-                vec3(0.22, 0.008, 0.34),
-                depthBands * vortex
-              );
-
-              float sector = floor((a + PI) * 38.0 / (2.0 * PI));
-              float sparkRnd = hash21(vec2(sector, floor(uTime * 9.0) + uLayer));
-              float sparkAngle = abs(fract((a + PI) * 38.0 / (2.0 * PI)) - 0.5);
-              float sparkRadius =
-                0.80 + (sparkRnd - 0.5) * 0.22 +
-                fract(uTime * (0.16 + sparkRnd * 0.18) + sparkRnd) * 0.14;
-              float sparks =
-                (1.0 - smoothstep(0.018, 0.06, abs(r - sparkRadius))) *
-                (1.0 - smoothstep(0.025, 0.48, sparkAngle)) *
-                step(0.62, sparkRnd);
-
-              float ringGlow =
-                outer * 1.15 +
-                inner * 1.0 +
-                outerBevel * 0.55 +
-                innerBevel * 0.5 +
-                filament * 0.6;
-              float halo =
-                exp(-abs(r - outerR) * 11.0) * 0.42 +
-                exp(-abs(r - innerR) * 14.0) * 0.3;
-              // Light tunnel (kitchen transition): dark centre, streaks racing outward.
-              float tunnelDepth = mix(1.0 - WARP_CENTER_DARKEN, 1.0, smoothstep(0.0, 0.7, r));
-              abyss *= tunnelDepth;
-              float rampT = min(uTime, WARP_RAMP_SEC);
-              float warpT =
-                WARP_SPEED_START * rampT +
-                WARP_SPEED_GAIN * WARP_RAMP_SEC / 3.2 * pow(rampT / WARP_RAMP_SEC, 3.2) +
-                (WARP_SPEED_START + WARP_SPEED_GAIN) * max(uTime - WARP_RAMP_SEC, 0.0);
-              float lanePos = (a + PI) / (2.0 * PI) * WARP_LANES;
-              float lane = floor(lanePos);
-              float laneRnd = hash21(vec2(lane, 7.13));
-              float laneSpeed = 0.55 + hash21(vec2(lane, 19.7)) * 0.9;
-              float depth = fract(warpT * laneSpeed * 0.42 + laneRnd);
-              float headR = mix(0.03, portalFillR, depth * depth);
-              float tailLen = 0.04 + 0.34 * depth * depth;
-              float alongStreak =
-                smoothstep(headR - tailLen, headR, r) *
-                (1.0 - smoothstep(headR, headR + 0.012, r));
-              float across = abs(fract(lanePos) - 0.5);
-              float streakCore = 1.0 - smoothstep(0.05, 0.12, across);
-              float streakGlow = 1.0 - smoothstep(0.1, 0.5, across);
-              float streak =
-                alongStreak * (streakCore + streakGlow * 0.4) *
-                smoothstep(0.0, 0.22, depth) *
-                step(1.0 - WARP_FILL, hash21(vec2(lane, 3.71))) *
-                portalMask * (uLayer < 0.5 ? 1.0 : 0.0);
-              vec3 streakColor = kitchenStreakColor(floor(laneRnd * 5.0));
-              vec3 color =
-                abyss * portalMask * (uLayer < 0.5 ? 1.0 : 0.18) +
-                energyColor * (ringGlow + halo + sparks * 2.4) +
-                streakColor * streak * WARP_INTENSITY;
-              color +=
-                vec3(1.2, 0.08, 0.5) * outerCore +
-                vec3(0.03, 0.25, 1.05) * innerCore;
-              color *= 0.75;
-
-              float alpha =
-                portalMask * (uLayer < 0.5 ? 0.92 : 0.08) +
-                clamp(
-                  ringGlow * 0.82 +
-                    (outerCore + innerCore) * 0.45 +
-                    halo * 0.42 +
-                    sparks,
-                  0.0,
-                  1.0
-                );
-              alpha *= 1.0 - smoothstep(1.36, 1.42, r);
-              alpha *= uOpacity * (1.0 - uLayer * 0.105);
-              if (alpha < 0.01) discard;
-              gl_FragColor = vec4(color, alpha);
-            }
-          `,
-          transparent: true,
-          depthWrite: false,
-          depthTest: true,
-          side: THREE.DoubleSide,
-          blending:
-            layer === 0 ? THREE.NormalBlending : THREE.AdditiveBlending,
-          toneMapped: false,
-        });
-      }
-
       function setupDrawerPortalEffect() {
-        if (!_drawerEffectMesh || _drawerPortalMaterials.length) return;
+        if (!_drawerEffectMesh || _drawerGateway) return;
         _drawerEffectMesh.position.z += 0.6;
-        _drawerEffectMesh.geometry = _drawerEffectMesh.geometry.clone();
-        _drawerEffectMesh.geometry.scale(2.6, 1, 2.6);
-        const layerCount = 1;
-        const portalHeight = DRAWER_PORTAL_HEIGHT;
-        const outerRingGeometry = new THREE.TorusGeometry(1.8, 0.11, 12, 64);
-        const innerRingGeometry = new THREE.TorusGeometry(1.3, 0.08, 12, 64);
-        const outerRingMaterial = new THREE.MeshStandardMaterial({
-          color: 0x7a124f,
-          emissive: 0xaa0053,
-          emissiveIntensity: 2.2,
-          roughness: 0.18,
-          metalness: 0.12,
-          transparent: true,
-          opacity: 0,
-          depthWrite: false,
-          depthTest: true,
-        });
-        const innerRingMaterial = new THREE.MeshStandardMaterial({
-          color: 0x12359b,
-          emissive: 0x001ea8,
-          emissiveIntensity: 2,
-          roughness: 0.16,
-          metalness: 0.08,
-          transparent: true,
-          opacity: 0,
-          depthWrite: false,
-          depthTest: true,
-        });
-        outerRingMaterial.userData.baseEmissiveIntensity = 2.2;
-        innerRingMaterial.userData.baseEmissiveIntensity = 2;
-
-        const particlePositions = new Float32Array(
-          DRAWER_PORTAL_PARTICLE_COUNT * 3,
-        );
-        const particleColors = new Float32Array(
-          DRAWER_PORTAL_PARTICLE_COUNT * 3,
-        );
-        const particleSizes = new Float32Array(DRAWER_PORTAL_PARTICLE_COUNT);
-        const particleLife = new Float32Array(DRAWER_PORTAL_PARTICLE_COUNT);
-        const portalParticleColors = [
-          new THREE.Color(0x165dff),
-          new THREE.Color(0x2090ff),
-          new THREE.Color(0x715cff),
-          new THREE.Color(0xff319d),
-          new THREE.Color(0xd52cff),
-        ];
-        for (let i = 0; i < DRAWER_PORTAL_PARTICLE_COUNT; i++) {
-          _drawerPortalParticlePhase[i] = Math.random();
-          _drawerPortalParticleAngle[i] = Math.random() * Math.PI * 2;
-          _drawerPortalParticleRadius[i] = 1 + Math.random() * 1.3;
-          const sparkiness =
-            Math.random() < 0.24 ? 0.58 + Math.random() * 0.42 : 0;
-          _drawerPortalParticleSparkiness[i] = sparkiness;
-          _drawerPortalParticleSpeed[i] =
-            sparkiness > 0
-              ? 0.04 + Math.random() * 0.065
-              : 0.13 + Math.random() * 0.28;
-          _drawerPortalParticleMaxHeight[i] =
-            sparkiness > 0
-              ? 10 +
-                Math.random() * (DRAWER_PORTAL_PARTICLE_HEIGHT - 10)
-              : 6 + Math.random() * 3;
-          _drawerPortalParticleWobble[i] =
-            0.45 + Math.random() * 1.4;
-          const driftAngle = Math.random() * Math.PI * 2;
-          const driftDistance =
-            sparkiness * (4 + Math.random() * 5.5);
-          _drawerPortalParticleDriftX[i] =
-            Math.cos(driftAngle) * driftDistance;
-          _drawerPortalParticleDriftZ[i] =
-            Math.sin(driftAngle) * driftDistance;
-          particleSizes[i] =
-            sparkiness > 0
-              ? 0.35 + Math.random() * 0.75
-              : 0.55 + Math.random() * 1.35;
-          const color = portalParticleColors[
-            i % portalParticleColors.length
-          ].clone();
-          color.multiplyScalar(0.8 + Math.random() * 0.3);
-          particleColors[i * 3] = color.r;
-          particleColors[i * 3 + 1] = color.g;
-          particleColors[i * 3 + 2] = color.b;
-        }
-        const particleGeometry = new THREE.BufferGeometry();
-        particleGeometry.setAttribute(
-          "position",
-          new THREE.BufferAttribute(particlePositions, 3),
-        );
-        particleGeometry.setAttribute(
-          "color",
-          new THREE.BufferAttribute(particleColors, 3),
-        );
-        particleGeometry.setAttribute(
-          "sizeScale",
-          new THREE.BufferAttribute(particleSizes, 1),
-        );
-        particleGeometry.setAttribute(
-          "lifeProgress",
-          new THREE.BufferAttribute(particleLife, 1),
-        );
-        _drawerPortalParticleMaterial = new THREE.ShaderMaterial({
-          uniforms: {
-            uSize: { value: 190 },
-            uOpacity: { value: 0 },
-          },
-          vertexShader: `
-            attribute vec3 color;
-            attribute float sizeScale;
-            attribute float lifeProgress;
-            varying vec3 vColor;
-            varying float vLife;
-            uniform float uSize;
-            void main() {
-              vColor = color;
-              vLife = lifeProgress;
-              vec4 mv = modelViewMatrix * vec4(position, 1.0);
-              gl_Position = projectionMatrix * mv;
-              float attenuation = 1.0 / max(0.1, -mv.z);
-              float verticalSize = mix(
-                1.5,
-                0.22,
-                smoothstep(0.0, 1.0, lifeProgress)
-              );
-              gl_PointSize = min(
-                uSize * attenuation * sizeScale * verticalSize,
-                84.0
-              );
-            }
-          `,
-          fragmentShader: `
-            precision highp float;
-            varying vec3 vColor;
-            varying float vLife;
-            uniform float uOpacity;
-            void main() {
-              vec2 center = gl_PointCoord - 0.5;
-              float distanceFromCenter = length(center) * 2.0;
-              float aa = max(fwidth(distanceFromCenter) * 2.2, 0.025);
-              float core = exp(-(distanceFromCenter * distanceFromCenter) / 0.16);
-              float halo = exp(-(distanceFromCenter * distanceFromCenter) * 1.35);
-              float verticalFade =
-                smoothstep(0.0, 0.08, vLife) *
-                (1.0 - smoothstep(0.82, 1.0, vLife));
-              float alpha =
-                (core * 0.62 + halo * 0.22) * verticalFade * uOpacity;
-              alpha *= 1.0 - smoothstep(0.72 - aa, 1.0, distanceFromCenter);
-              if (alpha < 0.008) discard;
-              vec3 color = vColor * (0.9 + core * 1.8);
-              gl_FragColor = vec4(color, alpha);
-            }
-          `,
-          transparent: true,
-          depthWrite: false,
-          depthTest: true,
-          blending: THREE.AdditiveBlending,
-          toneMapped: false,
-        });
-        _drawerPortalParticles = new THREE.Points(
-          particleGeometry,
-          _drawerPortalParticleMaterial,
-        );
-        _drawerPortalParticles.name = "drawerPortalParticles";
-        _drawerPortalParticles.frustumCulled = false;
-        _drawerPortalParticles.renderOrder = 90;
-        _drawerPortalParticles.layers.enable(CAR_LIGHTS_BLOOM_LAYER);
-        _drawerEffectMesh.add(_drawerPortalParticles);
-
-        const fogGeometry = new THREE.CylinderGeometry(
-          1,
-          1,
-          1,
-          64,
-          14,
-          true,
-        );
-        const fogVertexShader = `
-          varying vec2 vUv;
-          varying vec3 vLocalPosition;
-          void main() {
-            vUv = uv;
-            vLocalPosition = position;
-            gl_Position =
-              projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-          }
-        `;
-        const fogFragmentShader = `
-          precision highp float;
-          varying vec2 vUv;
-          varying vec3 vLocalPosition;
-          uniform float uTime;
-          uniform float uOpacity;
-          uniform float uLayer;
-
-          float fogHash(vec2 p) {
-            return fract(
-              sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123
-            );
-          }
-
-          float fogNoise(vec2 p) {
-            vec2 i = floor(p);
-            vec2 f = fract(p);
-            f = f * f * (3.0 - 2.0 * f);
-            return mix(
-              mix(fogHash(i), fogHash(i + vec2(1.0, 0.0)), f.x),
-              mix(
-                fogHash(i + vec2(0.0, 1.0)),
-                fogHash(i + vec2(1.0, 1.0)),
-                f.x
-              ),
-              f.y
-            );
-          }
-
-          float fogFbm(vec2 p) {
-            float value = 0.0;
-            float amplitude = 0.55;
-            for (int i = 0; i < 5; i++) {
-              value += fogNoise(p) * amplitude;
-              p = p * 2.03 + vec2(7.1, 3.7);
-              amplitude *= 0.5;
-            }
-            return value;
-          }
-
-          void main() {
-            float angle = atan(vLocalPosition.z, vLocalPosition.x);
-            vec2 flowUv =
-              vLocalPosition.xz * (2.8 + uLayer * 0.32) +
-              vec2(
-                vUv.y * 2.2 + uLayer * 2.7,
-                -vUv.y * 5.4 - uTime * (0.28 + uLayer * 0.035)
-              );
-            float broadFog = fogFbm(flowUv);
-            float fineFog = fogFbm(
-              flowUv * 1.9 + vec2(uTime * 0.22, -uTime * 0.14)
-            );
-            float swirl =
-              sin(angle * 4.0 - uTime * 0.8 + vUv.y * 13.0) * 0.11;
-            float density = smoothstep(
-              0.42,
-              0.88,
-              broadFog * 0.72 + fineFog * 0.38 + swirl
-            );
-            float edgeNoise = fogFbm(
-              vLocalPosition.xz * 3.7 +
-              vec2(uTime * 0.12, -uTime * 0.09 + uLayer)
-            );
-            float bottomBoundary =
-              0.015 + edgeNoise * 0.075 +
-              sin(angle * 5.0 + uTime * 0.45) * 0.018;
-            float topBoundary =
-              0.5 + edgeNoise * 0.34 +
-              sin(angle * 3.0 - uTime * 0.32 + uLayer) * 0.09;
-            float bottomFade = smoothstep(
-              bottomBoundary,
-              bottomBoundary + 0.13,
-              vUv.y
-            );
-            float middleFade = 1.0 - smoothstep(
-              topBoundary - 0.2,
-              topBoundary + 0.035,
-              vUv.y
-            );
-            float brokenEdge =
-              0.58 + edgeNoise * 0.42;
-            float alpha =
-              density *
-              bottomFade *
-              middleFade *
-              brokenEdge *
-              uOpacity *
-              0.24;
-            if (alpha < 0.006) discard;
-            vec3 deepPurple = vec3(0.18, 0.015, 0.42);
-            vec3 hotPink = vec3(0.78, 0.025, 0.48);
-            vec3 electricBlue = vec3(0.025, 0.18, 0.82);
-            vec3 color = mix(deepPurple, hotPink, fineFog);
-            color = mix(color, electricBlue, broadFog * 0.42);
-            gl_FragColor = vec4(color, alpha);
-          }
-        `;
-        const fogGroup = new THREE.Group();
-        fogGroup.name = "drawerPortalShaderFog";
-        const fogRadii = [1.35, 1.82, 2.28];
-        const fogHeights = [4.2, 4.65, 4.35];
-        for (let layer = 0; layer < fogRadii.length; layer++) {
-          const fogMaterial = new THREE.ShaderMaterial({
-            uniforms: {
-              uTime: { value: 0 },
-              uOpacity: { value: 0 },
-              uLayer: { value: layer },
-            },
-            vertexShader: fogVertexShader,
-            fragmentShader: fogFragmentShader,
-            transparent: true,
-            depthWrite: false,
-            depthTest: true,
-            side: THREE.DoubleSide,
-            blending: THREE.NormalBlending,
-            toneMapped: false,
-          });
-          _drawerPortalFogMaterials.push(fogMaterial);
-          const fogLayer = new THREE.Mesh(fogGeometry, fogMaterial);
-          fogLayer.name = `drawerPortalFogLayer${layer}`;
-          fogLayer.position.y = fogHeights[layer] * 0.5;
-          fogLayer.rotation.y = layer * 0.73;
-          fogLayer.scale.set(
-            fogRadii[layer],
-            fogHeights[layer],
-            fogRadii[layer],
-          );
-          fogLayer.renderOrder = 34 + layer;
-          fogLayer.frustumCulled = false;
-          fogGroup.add(fogLayer);
-        }
-        _drawerEffectMesh.add(fogGroup);
 
         _drawerPortalPointLight = new THREE.PointLight(
-          0x7448ff,
+          DRAWER_GATEWAY.look.lightColor, // the portal's violet (the Kitchen portal's light)
           0,
           52,
           1.65,
@@ -8190,11 +7674,10 @@ let _officeSceneAnimationFrame = 0;
             3,
         );
         const boltColors = new Float32Array(boltPositions.length);
+        // The Kitchen portal's arcs: a white-hot blue and the transition palette.
         const electricityColors = [
-          new THREE.Color(0x004cff),
-          new THREE.Color(0x096dff),
-          new THREE.Color(0x1c8fff),
-          new THREE.Color(0x596aff),
+          new THREE.Color(DRAWER_GATEWAY.look.arcLightColor),
+          ...DRAWER_GATEWAY.look.palette.map((c) => new THREE.Color(c)),
         ];
         let boltVertex = 0;
         for (let bolt = 0; bolt < DRAWER_PORTAL_BOLT_COUNT; bolt++) {
@@ -8409,63 +7892,39 @@ let _officeSceneAnimationFrame = 0;
         });
         _drawerEffectMesh.add(_drawerPortalArrow);
 
-        for (let layer = 0; layer < layerCount; layer++) {
-          const layerProgress =
-            layerCount > 1 ? layer / (layerCount - 1) : 0;
-          const layerScale = 1 - layerProgress * 0.14;
-          const material = createDrawerPortalMaterial(layerProgress * 4);
-          _drawerPortalMaterials.push(material);
-          if (layer === 0) {
-            _drawerEffectMesh.material = material;
-            _drawerEffectMesh.renderOrder = 20;
-          } else {
-            const depthLayer = new THREE.Mesh(
-              _drawerEffectMesh.geometry,
-              material,
-            );
-            depthLayer.name = `drawerPortalDepth${layer}`;
-            depthLayer.position.y = layerProgress * portalHeight;
-            depthLayer.scale.set(layerScale, 1, layerScale);
-            depthLayer.renderOrder = 20 + layer;
-            depthLayer.frustumCulled = false;
-            _drawerEffectMesh.add(depthLayer);
-          }
-
-          const outerLayerMaterial = outerRingMaterial.clone();
-          outerLayerMaterial.userData.baseEmissiveIntensity = 2.2;
-          outerLayerMaterial.userData.layerIndex = layer;
-          const innerLayerMaterial = innerRingMaterial.clone();
-          innerLayerMaterial.userData.baseEmissiveIntensity = 2;
-          innerLayerMaterial.userData.layerIndex = layer;
-          _drawerPortalRingMaterials.push(
-            outerLayerMaterial,
-            innerLayerMaterial,
-          );
-
-          const outerRing = new THREE.Mesh(
-            outerRingGeometry,
-            outerLayerMaterial,
-          );
-          outerRing.name = `drawerPortalOuterRing${layer}`;
-          outerRing.rotation.x = Math.PI * 0.5;
-          outerRing.position.y = layerProgress * portalHeight + 0.012;
-          outerRing.scale.setScalar(layerScale);
-          outerRing.renderOrder = 40 + layer;
-          outerRing.frustumCulled = false;
-          _drawerEffectMesh.add(outerRing);
-
-          const innerRing = new THREE.Mesh(
-            innerRingGeometry,
-            innerLayerMaterial,
-          );
-          innerRing.name = `drawerPortalInnerRing${layer}`;
-          innerRing.rotation.x = Math.PI * 0.5;
-          innerRing.position.y = layerProgress * portalHeight + 0.016;
-          innerRing.scale.setScalar(layerScale);
-          innerRing.renderOrder = 60 + layer;
-          innerRing.frustumCulled = false;
-          _drawerEffectMesh.add(innerRing);
+        // The gateway: an opening in the drawer's floor, fitted to its inside (found from the drawer's own mesh).
+        {
+          const G = DRAWER_GATEWAY;
+          const drawer = drawerGroup && drawerGroup.getObjectByName("drawer");
+          const box = new THREE.Box3().setFromObject(drawer || _drawerEffectMesh);
+          const c = box.getCenter(new THREE.Vector3());
+          const ray = new THREE.Raycaster();
+          const cast = (o, d, fb) => {
+            if (!drawer) return fb;
+            ray.set(o, d);
+            const h = ray.intersectObject(drawer, false)[0];
+            return h ? h.distance : fb;
+          };
+          const floorY = box.max.y + 1 - cast(new THREE.Vector3(c.x, box.max.y + 1, c.z), new THREE.Vector3(0, -1, 0), box.max.y + 1 - box.min.y);
+          const mid = new THREE.Vector3(c.x, floorY + 0.3, c.z);
+          const xl = cast(mid, new THREE.Vector3(-1, 0, 0), (box.max.x - box.min.x) / 2);
+          const xr = cast(mid, new THREE.Vector3(1, 0, 0), (box.max.x - box.min.x) / 2);
+          const zb = cast(mid, new THREE.Vector3(0, 0, -1), (box.max.z - box.min.z) / 2);
+          const zf = cast(mid, new THREE.Vector3(0, 0, 1), (box.max.z - box.min.z) / 2);
+          const centre = new THREE.Vector3(c.x + (xr - xl) / 2, floorY + 0.015, c.z + (zf - zb) / 2);
+          _drawerGateway = createSubDimensionPortal(THREE, {
+            ...G,
+            halfX: Math.max(0.5, (xl + xr) / 2 - G.inset),
+            halfY: Math.max(0.5, (zb + zf) / 2 - G.inset),
+          });
+          const gate = _drawerGateway.group;
+          _drawerEffectMesh.updateMatrixWorld(true);
+          gate.position.copy(_drawerEffectMesh.worldToLocal(centre));
+          gate.rotation.x = -Math.PI / 2; // its out (local +z) is up
+          _drawerEffectMesh.add(gate);
         }
+        // The drawer's own effect plane only carries the effect now (not drawn itself).
+        _drawerEffectMesh.material = new THREE.MeshBasicMaterial({ visible: false });
         _drawerEffectMesh.frustumCulled = false;
         _drawerEffectMesh.visible = false;
       }
@@ -8488,18 +7947,7 @@ let _officeSceneAnimationFrame = 0;
         }
         _drawerEffectMesh.visible = true;
         _drawerPortalStartMs = performance.now();
-        for (let i = 0; i < _drawerPortalMaterials.length; i++) {
-          _drawerPortalMaterials[i].uniforms.uOpacity.value = 0;
-        }
-        for (let i = 0; i < _drawerPortalRingMaterials.length; i++) {
-          _drawerPortalRingMaterials[i].opacity = 0;
-        }
-        if (_drawerPortalParticleMaterial) {
-          _drawerPortalParticleMaterial.uniforms.uOpacity.value = 0;
-        }
-        for (let i = 0; i < _drawerPortalFogMaterials.length; i++) {
-          _drawerPortalFogMaterials[i].uniforms.uOpacity.value = 0;
-        }
+        if (_drawerGateway) _drawerGateway.update({ time: 0, open: 0, close: 0 });
         if (_drawerPortalPointLight) {
           _drawerPortalPointLight.intensity = 0;
         }
@@ -8527,104 +7975,13 @@ let _officeSceneAnimationFrame = 0;
         const fadeOutTime =
           (performance.now() - _drawerPortalFadeOutStartMs) / 1000;
         const isFadingOut = _drawerState === "closing";
-        const highestLayer = _drawerPortalMaterials.length - 1;
-        for (let i = 0; i < _drawerPortalMaterials.length; i++) {
-          const material = _drawerPortalMaterials[i];
-          const reveal = isFadingOut
-            ? 1 -
-              THREE.MathUtils.smoothstep(
-                fadeOutTime,
-                (highestLayer - i) * 0.015,
-                (highestLayer - i) * 0.015 + 0.09,
-              )
-            : THREE.MathUtils.smoothstep(
-                portalTime,
-                i * 0.13,
-                i * 0.13 + 0.42,
-              );
-          material.uniforms.uTime.value = portalTime;
-          material.uniforms.uOpacity.value = reveal;
-        }
-        for (let i = 0; i < _drawerPortalRingMaterials.length; i++) {
-          const material = _drawerPortalRingMaterials[i];
-          const layerIndex = material.userData.layerIndex;
-          const reveal = isFadingOut
-            ? 1 -
-              THREE.MathUtils.smoothstep(
-                fadeOutTime,
-                (highestLayer - layerIndex) * 0.015,
-                (highestLayer - layerIndex) * 0.015 + 0.09,
-              )
-            : THREE.MathUtils.smoothstep(
-                portalTime,
-                layerIndex * 0.13,
-                layerIndex * 0.13 + 0.42,
-              );
-          const pulse = 0.88 + Math.sin(portalTime * 3.2 + i * 1.7) * 0.12;
-          material.opacity = reveal * 0.72;
-          material.emissiveIntensity =
-            material.userData.baseEmissiveIntensity * pulse;
-        }
-        if (_drawerPortalParticles) {
-          _drawerPortalParticleMaterial.uniforms.uOpacity.value = isFadingOut
-            ? 1 - THREE.MathUtils.smoothstep(fadeOutTime, 0, 0.22)
-            : THREE.MathUtils.smoothstep(portalTime, 0, 1.2);
-          const positionAttribute =
-            _drawerPortalParticles.geometry.attributes.position;
-          const lifeAttribute =
-            _drawerPortalParticles.geometry.attributes.lifeProgress;
-          const positions = positionAttribute.array;
-          const lifeValues = lifeAttribute.array;
-          for (let i = 0; i < DRAWER_PORTAL_PARTICLE_COUNT; i++) {
-            const rise =
-              (_drawerPortalParticlePhase[i] +
-                portalTime * _drawerPortalParticleSpeed[i]) %
-              1;
-            const sparkiness = _drawerPortalParticleSparkiness[i];
-            const sparkRise =
-              1 - Math.pow(1 - rise, 1.7);
-            const y =
-              THREE.MathUtils.lerp(rise, sparkRise, sparkiness) *
-              _drawerPortalParticleMaxHeight[i];
-            const angle =
-              _drawerPortalParticleAngle[i] +
-              portalTime *
-                (0.35 +
-                  _drawerPortalParticleSpeed[i] *
-                    (1.8 + _drawerPortalParticleWobble[i])) +
-              rise * (3.2 + _drawerPortalParticleWobble[i] * 2.4) +
-              Math.sin(
-                portalTime * _drawerPortalParticleWobble[i] * 2.7 + i,
-              ) *
-                0.35;
-            const radius =
-              _drawerPortalParticleRadius[i] +
-              Math.sin(
-                portalTime * (1.8 + _drawerPortalParticleWobble[i]) +
-                  i * 1.71,
-              ) *
-                (0.055 + rise * 0.12) +
-              Math.cos(portalTime * 4.7 + i * 0.83) * 0.04;
-            const outwardTravel =
-              sparkiness * Math.pow(rise, 1.22);
-            positions[i * 3] =
-              Math.cos(angle) * radius +
-              _drawerPortalParticleDriftX[i] * outwardTravel;
-            positions[i * 3 + 1] = y;
-            positions[i * 3 + 2] =
-              Math.sin(angle) * radius +
-              _drawerPortalParticleDriftZ[i] * outwardTravel;
-            lifeValues[i] = rise;
-          }
-          positionAttribute.needsUpdate = true;
-          lifeAttribute.needsUpdate = true;
-        }
-        for (let i = 0; i < _drawerPortalFogMaterials.length; i++) {
-          const material = _drawerPortalFogMaterials[i];
-          material.uniforms.uTime.value = portalTime;
-          material.uniforms.uOpacity.value = isFadingOut
-            ? 1 - THREE.MathUtils.smoothstep(fadeOutTime, 0, 0.22)
-            : THREE.MathUtils.smoothstep(portalTime, 0.05, 1.05);
+        // The gateway: opens over openTime once the drawer is open, collapses over the drawer's 0.22 s fade as it closes.
+        if (_drawerGateway) {
+          _drawerGateway.update({
+            time: portalTime,
+            open: THREE.MathUtils.smoothstep(portalTime, 0, DRAWER_GATEWAY.openTime),
+            close: isFadingOut ? THREE.MathUtils.smoothstep(fadeOutTime, 0, 0.22) : 0,
+          });
         }
         if (_drawerPortalPointLight) {
           const lightFade = isFadingOut
