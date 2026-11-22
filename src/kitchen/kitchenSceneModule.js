@@ -3994,22 +3994,22 @@ let _worldSwitched = false;
         impactThreshold: 1.5,
         impactFull: 12,
         /** Burst size: sparks at the threshold / at full. */
-        burstMin: 5,
-        burstMax: 41,
+        burstMin: 4,
+        burstMax: 36,
         /** Scrape: speed along the wall (units/s) below which nothing sparks, the speed for the full rate, and that rate (sparks/s). */
         scrapeThreshold: 2,
         scrapeFull: 14,
-        scrapeRate: 140,
+        scrapeRate: 124,
         /** Spark speed (units/s): soft / full contact (× a random 0.55–1). */
-        speedMin: 1.9,
-        speedMax: 7.5,
+        speedMin: 1.7,
+        speedMax: 6.6,
         /** Direction mix: off the wall, back against the car's travel, upward; plus a random spread. */
         dirWall: 0.7,
         dirBack: 0.9,
         dirUp: 0.55,
-        spread: 0.65,
+        spread: 0.57,
         /** Life (s): random within this range. */
-        life: [0.22, 0.5],
+        life: [0.19, 0.44],
         /** Far sparks: this share of them is launched faster (speed × farSpeed, random within) and lives longer
          *  (life × farLife), so they arc much farther; the rest stay close to the contact. */
         farShare: 0.3,
@@ -4024,19 +4024,19 @@ let _worldSwitched = false;
         gravity: 16,
         bounce: 0.3,
         /** Head size (world units at 1 unit away, perspective) and the streak's length (× velocity, seconds). */
-        size: 0.14,
-        streak: 0.04,
+        size: 0.125,
+        streak: 0.035,
         /** Colours (start → end of life) and brightness (HDR × colour; above the kitchen bloom's threshold, 12, the young sparks glow; the streak at a share of it). */
         colorHot: 0xfff6d8,
         colorMid: 0xffc24a,
         colorEnd: 0xff6a1a,
-        brightness: 12.8,
-        streakBrightness: 0.32,
+        brightness: 12.2,
+        streakBrightness: 0.3,
         /** Contact height: this far below the rails' top (where a bumper meets them). */
         below: 0.2,
         /** Flash on strong hits: hit strength (0–1) it starts from, peak intensity, range (units), fade time (s), colour. */
         flashFrom: 0.45,
-        flashIntensity: 29,
+        flashIntensity: 25,
         flashRange: 5.5,
         flashTime: 0.12,
         flashColor: 0xffb35a,
