@@ -3286,11 +3286,15 @@ let _officeSceneAnimationFrame = 0;
         ...PORTAL_RING_DEFAULTS,
         flow: -1,
         /**
-         * Inside the drawer: the whole effect (every part's furthest reach, found by `drawerRingReach`) scaled down
-         * uniformly to fit between the drawer's inner walls, bottom and front (world units kept clear of each: `margin`),
-         * against its inner front (the end it opens toward). Its body (smoke, rim) stays under the walls' top too.
+         * Inside the drawer: the whole effect scaled uniformly (never stretched) so its smoke ring's outer edge (its
+         * furthest reach, found by `drawerRingReach`) meets the inner walls (its shorter span decides: the ring is
+         * round), against its inner front (the end it opens toward), its lowest part on the bottom. Its sparks,
+         * drifting rim particles and arcs (reaching further) stop at that edge.
+         * `padding`: world units kept clear of the walls, bottom and front (0: touching them).
+         * `fillScale`: × the size that fills it (1: fills it; under 1 smaller; over 1 would go through the walls).
          */
-        margin: 0.06,
+        padding: 0,
+        fillScale: 1,
         openHold: 2.6,
         closeTime: 0.5,
       };
@@ -3314,27 +3318,28 @@ let _officeSceneAnimationFrame = 0;
       }
       /**
        * How far the ring's parts reach from its centre (it lies flat, facing up): `side` across (the furthest of the
-       * smoke, rim particles, sparks, lines, burst arcs, haze and flash), `body` above and below its plane (the smoke
-       * and rim particles; the arcs never go below its floor). From the ring's shaders and arc code.
+       * smoke, the rim particles' orbit, the lines, haze and flash; the sparks, drifting rim particles and arcs stop
+       * there: the ring's `maxReach`), `body` above and below its plane (the smoke and rim particles; the arcs never go
+       * below its floor). From the ring's shaders and arc code.
        */
       function drawerRingReach(P) {
         const R = P.radius;
         const Rmax = 1.1 * R; // its largest size: the build-up's swirl at the start / the burst's overshoot
-        const S = P.smoke, Q = P.rimParticles, X = P.sparks, E = P.escape, A = P.arcs;
+        const S = P.smoke, Q = P.rimParticles, E = P.escape;
         const smokeHalf = 0.5 * S.size[1] * 1.1 * 1.15; // a smoke sprite's visible half (size × its largest scale × billow)
         const thick = 1.8 * S.thickness; // the smoke band's widest (in the build-up)
         const side = Math.max(
           Rmax + thick + S.billow + smokeHalf, // smoke
-          Rmax + thick * 0.9 + Q.driftOut + 0.05, // rim particles drifting off (+ a point's glow)
-          0.9 * Rmax + X.speedSide[1] * X.life[1] + 0.05, // sparks
+          Rmax + thick * 0.9 + DRAWER_RING_GLOW, // rim particles' orbit (+ a point's glow)
           1.1 * (P.tunnelRadius[1] * R + E.distance * Math.tan((E.spreadDeg[1] * Math.PI) / 180)), // lines out there
-          2.1 * R + A.width[1] * 1.1, // burst arcs (their far end; their jag reaches less)
           1.25 * Rmax, // haze
           0.5 * 1.75 * R, // flash
         );
         const body = 0.5 * S.depth + Math.max(smokeHalf, Q.driftForward);
         return { side, body };
       }
+      /** The glow round a spark / rim particle / an arc's half width (world units): kept inside its `maxReach` too. */
+      const DRAWER_RING_GLOW = 0.05;
       let _drawerRing = null;
       let _drawerPortalPointLight = null;
       let _drawerPortalArrow = null;
@@ -7785,15 +7790,12 @@ let _officeSceneAnimationFrame = 0;
             minZ: mid.z - zb, maxZ: mid.z + zf, // maxZ: its inner front (the end it opens toward)
             minY: floorY, maxY: box.max.y,
           };
-          // Scaled to fit: across within the walls (both ways), its body between the bottom and the walls' top.
-          const m = R.margin;
+          // Scaled to fill it: its reach across up to the walls (the shorter of the two spans), never larger than the Kitchen's.
+          const m = R.padding;
           const r1 = drawerRingReach(R);
-          const s = Math.min(
-            1,
-            (inside.maxX - inside.minX - 2 * m) / (2 * r1.side),
-            (inside.maxZ - inside.minZ - 2 * m) / (2 * r1.side),
-            (inside.maxY - inside.minY - 2 * m) / (2 * r1.body),
-          );
+          const s =
+            R.fillScale *
+            Math.min(1, (inside.maxX - inside.minX - 2 * m) / (2 * r1.side), (inside.maxZ - inside.minZ - 2 * m) / (2 * r1.side));
           const P = scaleDrawerRing(R, s);
           const reach = drawerRingReach(P);
           // Against the inner front, centred between the walls, just over the bottom (it moves with the drawer: a child of its effect plane).
@@ -7812,7 +7814,8 @@ let _officeSceneAnimationFrame = 0;
             fwd: new THREE.Vector3(0, 1, 0),
             floorY: inside.minY, // the drawer's bottom: nothing goes under it
             arcScale: s,
-            flashMax: 2 * reach.body, // its flash (a camera-facing glow) no taller than its body: between the bottom and the walls' top
+            flashMax: 2 * reach.body, // its flash (a camera-facing glow) no taller than its body: never under the bottom
+            maxReach: reach.side - DRAWER_RING_GLOW, // sparks, drifting rim particles and arcs stop at the walls
             stencilBit: 2,
             flow: R.flow,
             getCamera: () => camera,

@@ -181,6 +181,7 @@ const WALLS_FS = `
 const SPARKS_VS = `
                 attribute vec4 aS; attribute vec4 aV; attribute vec3 aColor;
                 uniform float uTime; uniform float uRing; uniform float uSuck; uniform float uFloorY; uniform float uFloorFade; uniform float uFlow;
+                uniform float uMaxR; // the farthest across (a ring in a tight space; huge: no limit)
                 varying vec3 vColor; varying float vA;
                 void main() {
                   float life = aS.w;
@@ -189,6 +190,8 @@ const SPARKS_VS = `
                   float u = age / life;
                   vec2 dir = normalize(aS.xy + 1e-4);
                   vec3 p = vec3(aS.xy * uRing + dir * aV.y * age, aV.x * age * (1.0 - 0.3 * u));
+                  float pr = length(p.xy);
+                  if (pr > uMaxR) p.xy *= uMaxR / pr;
                   p = mix(p, vec3(0.0), uSuck * uSuck);
                   vec4 wp = modelMatrix * vec4(p, 1.0);
                   vA = sin(3.14159 * u) * smoothstep(0.0, uFloorFade, wp.y - uFloorY) * (1.0 - smoothstep(0.55, 1.0, uSuck));
@@ -253,6 +256,7 @@ const RIM_VS = `
                 attribute vec4 aP; attribute vec4 aQ; attribute vec3 aColor;
                 uniform float uTime; uniform float uRing; uniform float uSpin; uniform float uThick; uniform float uFloorY;
                 uniform vec2 uDrift; uniform float uDepthS; uniform float uFlow;
+                uniform float uMaxR; // the farthest across (huge: no limit)
                 varying vec3 vColor; varying float vA;
                 void main() {
                   float a = aP.x + uTime * uSpin * aQ.x * 1.3;
@@ -265,7 +269,7 @@ const RIM_VS = `
                     fwd = u * uDrift.y;
                     alpha = sin(3.14159 * u);
                   }
-                  float r = uRing + aP.y * uThick * 0.9 + out_;
+                  float r = min(uMaxR, uRing + aP.y * uThick * 0.9 + out_);
                   vec3 c = vec3(cos(a) * r, sin(a) * r, aP.z * uDepthS * 0.5 + fwd);
                   vec4 wp = modelMatrix * vec4(c, 1.0);
                   vec4 mv = viewMatrix * wp;
@@ -335,7 +339,8 @@ const smoothRange = (a, b, x) => {
  * @param {object} o { P (settings: PORTAL_RING_DEFAULTS' shape), scene (arcs / lights / the ring itself unless `parent`),
  *   parent? (the ring's group and light go here instead, positioned with `localCentre`), centre (Vector3, world), fwd (unit),
  *   floorY (nothing below it), stencilBit, flow (1 out, -1 in), getCamera (for the arcs), bloomLayer? (layer to enable),
- *   arcScale? (the arcs' fixed distances × this, for a ring scaled down; 1 by default), flashMax? (the flash's largest size) }
+ *   arcScale? (the arcs' fixed distances × this, for a ring scaled down; 1 by default), flashMax? (the flash's largest size),
+ *   maxReach? (the farthest across its plane the sparks, drifting rim particles and arcs go; no limit by default) }
  */
 export function createPortalRing(THREE, o) {
   const P = o.P;
@@ -344,6 +349,8 @@ export function createPortalRing(THREE, o) {
   const arcScale = o.arcScale ?? 1;
   /** The flash sprite's largest size (world units; a ring in a tight space; none in the Kitchen). */
   const flashMax = o.flashMax ?? Infinity;
+  /** The farthest across its plane the sparks, drifting rim particles and arcs go (a ring in a tight space; none in the Kitchen). */
+  const maxReach = o.maxReach ?? 1e9;
   const K = { centre: o.centre, fwd: o.fwd, top: o.floorY };
   K.uniforms = {
     uTime: { value: 0 },
@@ -570,6 +577,7 @@ export function createPortalRing(THREE, o) {
           uFloorFade: K.uniforms.uFloorFade,
           uGlow: K.uniforms.uGlow,
           uFlow: K.uniforms.uFlow,
+          uMaxR: { value: maxReach },
           uLevel: { value: 0 },
         },
         vertexShader: SPARKS_VS,
@@ -674,6 +682,7 @@ export function createPortalRing(THREE, o) {
           uFlow: K.uniforms.uFlow,
           uAlpha: { value: 0 },
           uDrift: { value: new THREE.Vector2(Q.driftOut, Q.driftForward) },
+          uMaxR: { value: maxReach },
           uDepthS: { value: S.depth },
         },
         vertexShader: RIM_VS,
@@ -761,8 +770,17 @@ export function createPortalRing(THREE, o) {
         p.y += (Math.random() - 0.5) * 2 * amp;
         p.z += (Math.random() - 0.5) * 2 * amp;
       }
+      if (o.maxReach != null) clampAcross(p);
       if (p.y < K.top) p.y = K.top;
     }
+  }
+  /** A point no farther across the ring's plane than `maxReach` from its centre (its axis part kept). */
+  function clampAcross(p) {
+    _arcV.subVectors(p, _c);
+    const along = _arcV.dot(_f);
+    _arcV.addScaledVector(_f, -along);
+    const d = _arcV.length();
+    if (d > maxReach) p.copy(_c).addScaledVector(_f, along).addScaledVector(_arcV, maxReach / d);
   }
   /** Starts an arc: `kind` "build" (round the forming ring, some down to the floor), "burst" (shooting out), "rim", "close" (into the centre). */
   function spawnArc(kind, strength, ringR) {
