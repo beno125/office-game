@@ -3087,10 +3087,10 @@ let _worldSwitched = false;
       // car leaves it with exactly that (capped): height and distance follow
       // from the car's speed and the ramp's angle.
       const RAMP_MESH_NAME = "ramp";
-      /** Takeoff: vertical speed off the edge = climb speed (speed × slope) × this… */
-      const RAMP_TAKEOFF_SCALE = 1.8;
-      /** …capped here (top speed: ≈ 4.4 natural → ≈ 7.9). */
-      const RAMP_TAKEOFF_MAX_VY = 10;
+      /** Takeoff: vertical speed off the edge = climb speed (speed × slope) × this (was 1.8: +17%, a bit bigger jump)… */
+      const RAMP_TAKEOFF_SCALE = 2.1;
+      /** …capped here (top speed: ≈ 4.4 natural → ≈ 9.2; was 10, +17%; never reached at top speed). */
+      const RAMP_TAKEOFF_MAX_VY = 11.7;
       /** Below this climb speed a car just drops off the edge (no launch). */
       const RAMP_LAUNCH_MIN_VY = 1;
       /** The ground under a car fell away by more than this → airborne. */
@@ -5770,7 +5770,7 @@ let _worldSwitched = false;
       const JUMP_SLOWMO_SCALE = 0.2; // world time scale in slow motion
       const JUMP_SLOWMO_EASE_IN_SEC = 0.08; // real seconds into slow motion (kicks in at takeoff)
       const JUMP_SLOWMO_EASE_OUT_SEC = 0.35; // real seconds back to 1× (from the landing)
-      const JUMP_SLOWMO_MAX_REAL_SEC = 4.2; // a very long jump leaves slow motion after this (a top-speed flight fits)
+      const JUMP_SLOWMO_MAX_REAL_SEC = 4.8; // a very long jump leaves slow motion after this (a top-speed flight fits: ~0.82 s × 5; was 4.2)
       const JUMP_CAM_ZOOM = 0.25; // camera distance × this (close to the car)
       const JUMP_CAM_MIN_DIST = 4.2; // never closer than this to the car (whole car in frame)
       /**
@@ -6801,222 +6801,147 @@ let _worldSwitched = false;
         _carLightRight.set(_carLightFwd.z, 0, -_carLightFwd.x);
       }
 
-      const TRASH_FX_PARTICLE_COUNT = 900;
-      /** Keeps additive brightness steady if the count changes. */
-      const TRASH_FX_STACK_SCALE = 480 / TRASH_FX_PARTICLE_COUNT;
-      /** Padding around the plane's footprint that still counts as "above". */
-      const TRASH_FX_EDGE_PAD = 0.6;
-      // Portal size relative to the counter opening, and how far it sits
-      // below the opening's lip.
-      const TRASH_FX_RADIUS_SCALE = 0.62;
-      // Drops the black hole floor and the effect together. The floor was
-      // covering any part of the effect placed under it, so the glow stayed put.
-      const TRASH_FX_Y_OFFSET = -0.45;
+      // ── The glow on trashPlane1 (the hole's dark floor): a flat shader on its
+      // top surface. Idle: a faint, slowly breathing glow with soft rings
+      // drifting outward. Every race car over it: a glow that follows it, and
+      // ripples spreading from where it drives (bigger / brighter at speed),
+      // fading back to idle once it's gone. No physics; visual only.
       const TRASH_FX_ENABLED = true;
-      /** Fits the column into the hole, under the table surface. */
-      const TRASH_FX_HEIGHT_SCALE = 0.22;
-      /** Particle space is a unit radius; each plane scales it to fit. */
-      const TRASH_FX_ROLE_STREAK = 0;
-      const TRASH_FX_ROLE_MOTE = 1;
-      const TRASH_FX_ROLE_SPARK = 2;
+      /** Padding around the plane's footprint that still counts as "over it" (world units). */
+      const TRASH_FX_EDGE_PAD = 0.6;
+      // Drops the black hole floor (the plane itself) below the opening's lip.
+      const TRASH_FX_Y_OFFSET = -0.45;
+      /** Sits this far above the plane's top surface (+ polygonOffset), so it never z-fights. */
+      const TRASH_FX_SURFACE_LIFT = 0.004;
+      const TRASH_FX = {
+        color: 0x2a82ff, // the game's lighter accent blue
+        hot: 0xbfe6ff, // highlight at the centre of a glow / crest of a ripple
+        /** Soft edge: corner radius (× the smaller half size) and feather (× the smaller half size). */
+        corner: 0.55,
+        feather: 0.35,
+        /** Idle: base glow strength, its breathing (per s) and depth, the drifting rings (count across, speed). */
+        idle: { strength: 0.16, pulseSpeed: 0.9, pulseDepth: 0.35, rings: 5, ringSpeed: 0.18, ringStrength: 0.12 },
+        /** The glow under each car: radius (world units, grows with speed) and strength. */
+        carGlow: { radius: 0.9, radiusAtSpeed: 1.6, strength: 0.45 },
+        /** Fade in / out of a car's reaction (s). */
+        fadeIn: 0.12,
+        fadeOut: 0.6,
+        /** Ripples: one every `spacing` world units driven (or `interval` s when slow), expanding at `speed`, `width` wide, living `life` s. */
+        ripple: { spacing: 0.9, interval: 0.35, speed: 3.2, speedAtSpeed: 5.5, width: 0.22, life: 1.1, strength: 0.7 },
+        /** How much of the glow / ripple crests turn toward the highlight colour (soft neon, not white). */
+        hotGlow: 0.3,
+        hotRipple: 0.18,
+        /** The plane's light on its surroundings at full reaction (it's off at idle). */
+        lightIntensity: 3,
+        /** Bright mode: the whole effect × this (dark mode: 1). */
+        brightModeScale: 0.75,
+      };
+      const TRASH_FX_MAX_CARS = 6;
+      const TRASH_FX_MAX_RIPPLES = 16;
       const _trashFxPlanes = [];
       const _trashFxBox = new THREE.Box3();
       let _trashFxTime = 0;
-      let _trashFxFade = 0;
-      let _trashFxActivePlane = null;
-      const _trashFxRise = new Float32Array(TRASH_FX_PARTICLE_COUNT);
-      const _trashFxRiseSpeed = new Float32Array(TRASH_FX_PARTICLE_COUNT);
-      const _trashFxSpread = new Float32Array(TRASH_FX_PARTICLE_COUNT * 2);
-      const _trashFxMaxHeight = new Float32Array(TRASH_FX_PARTICLE_COUNT);
-      const _trashFxRadialDrift = new Float32Array(TRASH_FX_PARTICLE_COUNT);
-      const _trashFxSparkDir = new Float32Array(TRASH_FX_PARTICLE_COUNT * 3);
-      const _trashFxSparkReach = new Float32Array(TRASH_FX_PARTICLE_COUNT);
-      const _trashFxRole = new Float32Array(TRASH_FX_PARTICLE_COUNT);
-      const _trashFxLife = new Float32Array(TRASH_FX_PARTICLE_COUNT);
-      const _trashFxPositions = new Float32Array(TRASH_FX_PARTICLE_COUNT * 3);
-      const _trashFxColors = new Float32Array(TRASH_FX_PARTICLE_COUNT * 3);
-      const _trashFxSizeScale = new Float32Array(TRASH_FX_PARTICLE_COUNT);
-      const _trashFxPalette = [
-        new THREE.Color(0x9fd8ff),
-        new THREE.Color(0x66bcff),
-        new THREE.Color(0x3f9bff),
-        new THREE.Color(0x86ccff),
-        new THREE.Color(0xd8f2ff),
-        new THREE.Color(0x4fb4ff),
-      ];
-      for (let i = 0; i < TRASH_FX_PARTICLE_COUNT; i++) {
-        // Most of the effect is the ring of streaks; the rest is centre
-        // motes and a few sparks that leave the column entirely.
-        const roll = i % 10;
-        const role =
-          roll < 7
-            ? TRASH_FX_ROLE_STREAK
-            : roll < 9
-              ? TRASH_FX_ROLE_MOTE
-              : TRASH_FX_ROLE_SPARK;
-        _trashFxRole[i] = role;
-        _trashFxRise[i] = Math.random();
-        const angle = Math.random() * Math.PI * 2;
-        let r;
-        if (role === TRASH_FX_ROLE_STREAK) {
-          r = 0.84 + Math.random() * 0.16;
-          _trashFxMaxHeight[i] = 1.5 + Math.random() * 1.9;
-          _trashFxRiseSpeed[i] = 0.5 + Math.random() * 0.75;
-          _trashFxSizeScale[i] = 2.1 + Math.random() * 1.5;
-          _trashFxRadialDrift[i] = 0.1 + Math.random() * 0.3;
-        } else if (role === TRASH_FX_ROLE_MOTE) {
-          r = Math.sqrt(Math.random()) * 0.72;
-          _trashFxMaxHeight[i] = 1.1 + Math.random() * 1.6;
-          _trashFxRiseSpeed[i] = 0.35 + Math.random() * 0.6;
-          _trashFxSizeScale[i] = 0.5 + Math.random() * 0.75;
-          _trashFxRadialDrift[i] = -0.04 + Math.random() * 0.16;
-        } else {
-          r = 0.4 + Math.random() * 0.6;
-          _trashFxMaxHeight[i] = 1;
-          _trashFxRiseSpeed[i] = 0.4 + Math.random() * 0.7;
-          _trashFxSizeScale[i] = 0.7 + Math.random() * 0.9;
-          _trashFxRadialDrift[i] = 0;
-          const theta = Math.random() * Math.PI * 2;
-          const dirY = -0.15 + Math.random() * 1.05;
-          const horiz = Math.sqrt(Math.max(0, 1 - dirY * dirY * 0.25));
-          _trashFxSparkDir[i * 3] = Math.cos(theta) * horiz;
-          _trashFxSparkDir[i * 3 + 1] = dirY;
-          _trashFxSparkDir[i * 3 + 2] = Math.sin(theta) * horiz;
-          _trashFxSparkReach[i] = 0.8 + Math.random() * 1.5;
-        }
-        _trashFxSpread[i * 2] = Math.cos(angle) * r;
-        _trashFxSpread[i * 2 + 1] = Math.sin(angle) * r;
-        const c = _trashFxPalette[i % _trashFxPalette.length].clone();
-        c.multiplyScalar(0.8 + Math.random() * 0.25);
-        _trashFxColors[i * 3] = c.r;
-        _trashFxColors[i * 3 + 1] = c.g;
-        _trashFxColors[i * 3 + 2] = c.b;
-      }
-      const _trashFxGeo = new THREE.BufferGeometry();
-      _trashFxGeo.setAttribute(
-        "position",
-        new THREE.BufferAttribute(_trashFxPositions, 3),
-      );
-      _trashFxGeo.setAttribute(
-        "color",
-        new THREE.BufferAttribute(_trashFxColors, 3),
-      );
-      _trashFxGeo.setAttribute(
-        "sizeScale",
-        new THREE.BufferAttribute(_trashFxSizeScale, 1),
-      );
-      _trashFxGeo.setAttribute(
-        "role",
-        new THREE.BufferAttribute(_trashFxRole, 1),
-      );
-      _trashFxGeo.setAttribute(
-        "life",
-        new THREE.BufferAttribute(_trashFxLife, 1),
-      );
+      const _trashFxCarState = new Map(); // race car → { strength, travel, sinceRipple, lastX, lastZ }
+      const _trashFxRipples = Array.from({ length: TRASH_FX_MAX_RIPPLES }, () => ({ x: 0, z: 0, age: 1e3, strength: 0, speed: 0 }));
+      let _trashFxNextRipple = 0;
       const _trashFxMat = new THREE.ShaderMaterial({
         transparent: true,
         depthWrite: false,
         depthTest: true,
         blending: THREE.AdditiveBlending,
+        polygonOffset: true,
+        polygonOffsetFactor: -1,
+        polygonOffsetUnits: -4,
+        toneMapped: false,
         uniforms: {
-          uSize: { value: 560 },
-          uFade: { value: 0 },
-          uStack: { value: TRASH_FX_STACK_SCALE },
+          uTime: { value: 0 },
+          uCenter: { value: new THREE.Vector2() },
+          uHalf: { value: new THREE.Vector2(1, 1) },
+          uCorner: { value: 0.5 },
+          uFeather: { value: 0.3 },
+          uColor: { value: new THREE.Color(TRASH_FX.color) },
+          uHot: { value: new THREE.Color(TRASH_FX.hot) },
+          uScale: { value: 1 },
+          uIdle: { value: new THREE.Vector4(TRASH_FX.idle.strength, TRASH_FX.idle.pulseSpeed, TRASH_FX.idle.pulseDepth, TRASH_FX.idle.ringStrength) },
+          uIdleRings: { value: new THREE.Vector2(TRASH_FX.idle.rings, TRASH_FX.idle.ringSpeed) },
+          uCars: { value: Array.from({ length: TRASH_FX_MAX_CARS }, () => new THREE.Vector4()) }, // x, z, strength, glow radius
+          uRipples: { value: Array.from({ length: TRASH_FX_MAX_RIPPLES }, () => new THREE.Vector4(0, 0, 1e3, 0)) }, // x, z, radius, strength
+          uRippleWidth: { value: TRASH_FX.ripple.width },
+          uCarGlow: { value: TRASH_FX.carGlow.strength },
+          uHotK: { value: new THREE.Vector2(TRASH_FX.hotGlow, TRASH_FX.hotRipple) },
         },
         vertexShader: `
-        attribute vec3 color;
-        attribute float sizeScale;
-        attribute float role;
-        attribute float life;
-        varying vec3 vColor;
-        varying float vRole;
-        varying float vLife;
-        uniform float uSize;
+        varying vec2 vXZ;
         void main() {
-          vColor = color;
-          vRole = role;
-          vLife = life;
-          vec4 mv = modelViewMatrix * vec4(position, 1.0);
-          gl_Position = projectionMatrix * mv;
-          float att = 1.0 / max(0.1, -mv.z);
-          gl_PointSize = min(uSize * att * sizeScale, 110.0);
+          vec4 w = modelMatrix * vec4(position, 1.0);
+          vXZ = w.xz;
+          gl_Position = projectionMatrix * viewMatrix * w;
         }
       `,
         fragmentShader: `
-        varying vec3 vColor;
-        varying float vRole;
-        varying float vLife;
-        uniform float uFade;
-        uniform float uStack;
+        #define MAX_CARS ${TRASH_FX_MAX_CARS}
+        #define MAX_RIPPLES ${TRASH_FX_MAX_RIPPLES}
+        varying vec2 vXZ;
+        uniform float uTime;
+        uniform vec2 uCenter;
+        uniform vec2 uHalf;
+        uniform float uCorner;
+        uniform float uFeather;
+        uniform vec3 uColor;
+        uniform vec3 uHot;
+        uniform float uScale;
+        uniform vec4 uIdle;
+        uniform vec2 uIdleRings;
+        uniform vec4 uCars[MAX_CARS];
+        uniform vec4 uRipples[MAX_RIPPLES];
+        uniform float uRippleWidth;
+        uniform float uCarGlow;
+        uniform vec2 uHotK;
+        float sdRoundBox(vec2 p, vec2 b, float r) {
+          vec2 q = abs(p) - b + r;
+          return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+        }
         void main() {
-          vec2 c = gl_PointCoord - 0.5;
-          // Streaks squeeze the sprite horizontally so each point reads as a
-          // vertical shaft of light rather than a round blob.
-          float streak = step(vRole, 0.5);
-          vec2 q = vec2(c.x * mix(1.0, 7.5, streak), c.y);
-          float d = length(q) * 2.0;
-          float aa = max(fwidth(d) * 2.35, 0.02);
-          float core = exp(-(d * d) / (0.17 + aa * 0.45));
-          float halo = exp(-(d * d) * (1.1 + aa * 0.35)) * 0.5;
-          float a = core * 0.52 + halo * 0.17;
-          float rise = clamp(vLife, 0.0, 1.0);
-          float bottomFade = smoothstep(0.0, 0.14, rise);
-          float topFade = 1.0 - smoothstep(0.3, 1.0, rise);
-          a *= bottomFade * topFade * uFade * uStack;
-          vec3 col = vColor;
-          float hot = 1.0 - smoothstep(0.0, 0.42, rise);
-          col = mix(col, vec3(1.0), hot * 0.8 * core);
-          col += vec3(0.05, 0.18, 0.4) * halo;
-          col *= 1.0 + core * 0.75;
-          gl_FragColor = vec4(col, a * 0.92);
+          vec2 local = vXZ - uCenter;
+          // Soft edges: a rounded rectangle, feathered inward (no hard border).
+          float d = sdRoundBox(local, uHalf, uCorner);
+          float mask = smoothstep(0.0, uFeather, -d);
+          float rn = length(local / uHalf); // 0 centre → ~1 edge
+          // Idle: a breathing glow toward the centre, and soft rings drifting outward.
+          float breathe = 1.0 - uIdle.z * (0.5 + 0.5 * cos(uTime * uIdle.y));
+          float idle = uIdle.x * breathe * (1.0 - smoothstep(0.0, 1.1, rn));
+          float rings = pow(0.5 + 0.5 * sin((rn * uIdleRings.x - uTime * uIdleRings.y) * 6.2831853), 8.0);
+          idle += uIdle.w * rings * (1.0 - smoothstep(0.2, 1.0, rn));
+          // Cars: a glow that follows each one.
+          float glow = 0.0;
+          for (int i = 0; i < MAX_CARS; i++) {
+            vec4 c = uCars[i];
+            if (c.z <= 0.001) continue;
+            vec2 dv = vXZ - c.xy;
+            glow += c.z * exp(-dot(dv, dv) / (c.w * c.w));
+          }
+          // Ripples spreading from where they drove.
+          float ripple = 0.0;
+          for (int j = 0; j < MAX_RIPPLES; j++) {
+            vec4 r = uRipples[j];
+            if (r.w <= 0.001) continue;
+            float e = (length(vXZ - r.xy) - r.z) / uRippleWidth;
+            ripple += r.w * exp(-e * e);
+          }
+          glow *= uCarGlow;
+          vec3 col = uColor * (idle + glow + ripple * 0.85) + uHot * (glow * glow * uHotK.x + ripple * ripple * uHotK.y);
+          gl_FragColor = vec4(col * mask * uScale, 1.0);
         }
       `,
       });
-      const _trashFxPoints = new THREE.Points(_trashFxGeo, _trashFxMat);
-      _trashFxPoints.visible = false;
-      _trashFxPoints.frustumCulled = false;
-      _trashFxPoints.renderOrder = 5;
-      _trashFxPoints.layers.enable(CAR_LIGHTS_BLOOM_LAYER);
-      scene.add(_trashFxPoints);
-
-      /** Flat additive rings stacked at the base, built at unit radius. */
-      function createTrashFxRing(innerR, outerR, hexColor, baseOpacity, spin) {
-        const geo = new THREE.RingGeometry(innerR, outerR, 108);
-        geo.rotateX(-Math.PI / 2);
-        const mat = new THREE.MeshBasicMaterial({
-          color: hexColor,
-          transparent: true,
-          opacity: 0,
-          blending: THREE.AdditiveBlending,
-          depthWrite: false,
-          depthTest: true,
-          side: THREE.DoubleSide,
-          toneMapped: false,
-        });
-        const mesh = new THREE.Mesh(geo, mat);
-        mesh.visible = false;
-        mesh.renderOrder = 5;
-        mesh.layers.enable(CAR_LIGHTS_BLOOM_LAYER);
-        scene.add(mesh);
-        return { mesh, mat, baseOpacity, spin };
-      }
-      const _trashFxRings = [
-        createTrashFxRing(0.0, 0.98, 0x225c9e, 0.3, 0.0),
-        createTrashFxRing(0.82, 1.0, 0xcfeaff, 0.95, 0.6),
-        createTrashFxRing(1.02, 1.1, 0x7fd0ff, 0.6, -0.42),
-        createTrashFxRing(1.12, 1.19, 0x4fa8ff, 0.4, 0.28),
-      ];
+      const _trashFxMesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2), _trashFxMat);
+      _trashFxMesh.name = "trashFxSurface";
+      _trashFxMesh.visible = false;
+      _trashFxMesh.renderOrder = 5;
+      _trashFxMesh.layers.enable(CAR_LIGHTS_BLOOM_LAYER);
+      scene.add(_trashFxMesh);
       const _trashFxLight = new THREE.PointLight(0x6cc4ff, 0, 22, 1.5);
       scene.add(_trashFxLight);
-      const _trashFxGroup = new THREE.Group();
-      _trashFxGroup.name = "trashFx";
-      scene.add(_trashFxGroup);
-      _trashFxGroup.add(_trashFxPoints);
-      for (let _ri = 0; _ri < _trashFxRings.length; _ri++) {
-        _trashFxGroup.add(_trashFxRings[_ri].mesh);
-      }
-      _trashFxGroup.add(_trashFxLight);
-      _trashFxGroup.position.y = TRASH_FX_Y_OFFSET;
 
       function registerTrashPlane(mesh) {
         mesh.updateMatrixWorld(true);
@@ -7036,11 +6961,14 @@ let _worldSwitched = false;
         }
         mesh.material = Array.isArray(mesh.material) ? _clonedMats : _clonedMats[0];
         mesh.renderOrder = 1;
-        _trashFxBox.setFromObject(mesh);
+        // The black hole floor sits below the opening's lip.
+        mesh.position.y += TRASH_FX_Y_OFFSET;
+        mesh.updateMatrixWorld(true);
+        _trashFxBox.setFromObject(mesh); // its actual top surface (after the drop)
         if (_trashFxBox.isEmpty()) return;
         const halfX = (_trashFxBox.max.x - _trashFxBox.min.x) * 0.5;
         const halfZ = (_trashFxBox.max.z - _trashFxBox.min.z) * 0.5;
-        _trashFxPlanes.push({
+        const plane = {
           minX: _trashFxBox.min.x - TRASH_FX_EDGE_PAD,
           maxX: _trashFxBox.max.x + TRASH_FX_EDGE_PAD,
           minZ: _trashFxBox.min.z - TRASH_FX_EDGE_PAD,
@@ -7048,31 +6976,25 @@ let _worldSwitched = false;
           centerX: (_trashFxBox.min.x + _trashFxBox.max.x) * 0.5,
           centerZ: (_trashFxBox.min.z + _trashFxBox.max.z) * 0.5,
           topY: _trashFxBox.max.y,
-          radius: Math.max(0.4, Math.min(halfX, halfZ) * TRASH_FX_RADIUS_SCALE),
-        });
-        // The glow was clipped to this disc, so the disc has to move with it.
-        mesh.position.y += TRASH_FX_Y_OFFSET;
-        mesh.updateMatrixWorld(true);
-      }
-
-      function findTrashPlaneUnderCar() {
-        if (!car) return null;
-        const cx = car.position.x;
-        const cz = car.position.z;
-        for (let i = 0; i < _trashFxPlanes.length; i++) {
-          const p = _trashFxPlanes[i];
-          if (cx >= p.minX && cx <= p.maxX && cz >= p.minZ && cz <= p.maxZ) {
-            return p;
-          }
-        }
-        return null;
+          halfX,
+          halfZ,
+        };
+        _trashFxPlanes.push(plane);
+        // The surface glow covers its footprint, right on top of it.
+        _trashFxMesh.position.set(plane.centerX, plane.topY + TRASH_FX_SURFACE_LIFT, plane.centerZ);
+        _trashFxMesh.scale.set(halfX * 2, 1, halfZ * 2);
+        _trashFxMesh.updateMatrixWorld(true);
+        const u = _trashFxMat.uniforms;
+        u.uCenter.value.set(plane.centerX, plane.centerZ);
+        u.uHalf.value.set(halfX, halfZ);
+        const m = Math.min(halfX, halfZ);
+        u.uCorner.value = m * TRASH_FX.corner;
+        u.uFeather.value = m * TRASH_FX.feather;
+        _trashFxLight.position.set(plane.centerX, plane.topY + 0.3, plane.centerZ);
       }
 
       function setTrashFxVisible(on) {
-        _trashFxPoints.visible = on;
-        for (let i = 0; i < _trashFxRings.length; i++) {
-          _trashFxRings[i].mesh.visible = on;
-        }
+        _trashFxMesh.visible = on;
         if (!on) _trashFxLight.intensity = 0;
       }
 
@@ -7082,79 +7004,73 @@ let _worldSwitched = false;
         if (_iceCoffeeSurfaceMat) _iceCoffeeSurfaceMat.uniforms.uTime.value += dt;
       }
       function updateTrashPlaneEffect(dt) {
-        if (!TRASH_FX_ENABLED) {
-          if (_trashFxPoints.visible) setTrashFxVisible(false);
-          return;
-        }
-        if (!_trashFxPlanes.length || !_kitchenWorldActive) {
-          if (_trashFxPoints.visible) setTrashFxVisible(false);
-          return;
-        }
-        const plane = findTrashPlaneUnderCar();
-        if (plane) _trashFxActivePlane = plane;
-        const fadeTarget = plane ? 1 : 0;
-        _trashFxFade += (fadeTarget - _trashFxFade) * Math.min(1, dt * 6.5);
-        const f = THREE.MathUtils.clamp(_trashFxFade, 0, 1);
-        if (f <= 0.01 || !_trashFxActivePlane) {
-          if (_trashFxPoints.visible) setTrashFxVisible(false);
+        const plane = _trashFxPlanes[0];
+        if (!TRASH_FX_ENABLED || !plane || !_kitchenWorldActive) {
+          if (_trashFxMesh.visible) setTrashFxVisible(false);
           return;
         }
         setTrashFxVisible(true);
-        _trashFxMat.uniforms.uFade.value = f;
         _trashFxTime += dt;
-
-        const active = _trashFxActivePlane;
-        const scale = active.radius;
-        const baseY = active.topY + 0.02;
-        _trashFxPoints.position.set(active.centerX, baseY, active.centerZ);
-        _trashFxPoints.scale.setScalar(scale);
-
-        for (let i = 0; i < _trashFxRings.length; i++) {
-          const ring = _trashFxRings[i];
-          ring.mesh.position.set(
-            active.centerX,
-            baseY + i * 0.03,
-            active.centerZ,
-          );
-          ring.mesh.scale.setScalar(scale * (0.98 + 0.03 * Math.sin(_trashFxTime * 1.6 + i)));
-          ring.mesh.rotation.y = _trashFxTime * ring.spin;
-          ring.mat.opacity = ring.baseOpacity * f;
-        }
-
-        const posAttr = _trashFxGeo.attributes.position;
-        const lifeAttr = _trashFxGeo.attributes.life;
-        const arr = posAttr.array;
-        const heightScale = (0.75 + f * 0.85) * TRASH_FX_HEIGHT_SCALE;
-        for (let i = 0; i < TRASH_FX_PARTICLE_COUNT; i++) {
-          _trashFxRise[i] += dt * _trashFxRiseSpeed[i];
-          if (_trashFxRise[i] > 1) _trashFxRise[i] -= 1;
-          const t = _trashFxRise[i];
-          _trashFxLife[i] = t;
-          const sx = _trashFxSpread[i * 2];
-          const sz = _trashFxSpread[i * 2 + 1];
-          if (_trashFxRole[i] === TRASH_FX_ROLE_SPARK) {
-            const travel = t * _trashFxSparkReach[i] * heightScale;
-            arr[i * 3] = sx + _trashFxSparkDir[i * 3] * travel;
-            arr[i * 3 + 1] = 0.35 + _trashFxSparkDir[i * 3 + 1] * travel;
-            arr[i * 3 + 2] = sz + _trashFxSparkDir[i * 3 + 2] * travel;
-            continue;
+        const u = _trashFxMat.uniforms;
+        u.uTime.value = _trashFxTime;
+        u.uScale.value = THREE.MathUtils.lerp(1, TRASH_FX.brightModeScale, THREE.MathUtils.clamp(lightBlend, 0, 1));
+        // Every race car (the player alone before the race is set up).
+        const cars = _raceCars.length ? _raceCars : car ? [{ pos: car.position, state: carState }] : [];
+        let peak = 0;
+        let slot = 0;
+        for (let i = 0; i < cars.length && slot < TRASH_FX_MAX_CARS; i++) {
+          const rc = cars[i];
+          const p = rc.pos;
+          if (!p) continue;
+          let cs = _trashFxCarState.get(rc);
+          if (!cs) {
+            cs = { strength: 0, travel: 0, sinceRipple: 0, lastX: p.x, lastZ: p.z };
+            _trashFxCarState.set(rc, cs);
           }
-          const y = t * _trashFxMaxHeight[i] * heightScale;
-          // Streaks lean outward as they climb, which gives the cone flare.
-          const widen = 1 + t * _trashFxRadialDrift[i];
-          arr[i * 3] = sx * widen;
-          arr[i * 3 + 1] = y;
-          arr[i * 3 + 2] = sz * widen;
+          const over = p.x >= plane.minX && p.x <= plane.maxX && p.z >= plane.minZ && p.z <= plane.maxZ;
+          const maxSpeed = (rc.state && rc.state.maxSpeed) || carState.maxSpeed || 1;
+          const speed01 = THREE.MathUtils.clamp(Math.abs((rc.state && rc.state.speed) || 0) / maxSpeed, 0, 1);
+          // Its reaction fades in quickly and out smoothly (delta-time based).
+          const tau = over ? TRASH_FX.fadeIn : TRASH_FX.fadeOut;
+          cs.strength += ((over ? 0.55 + 0.45 * speed01 : 0) - cs.strength) * (1 - Math.exp(-dt / tau));
+          const moved = Math.hypot(p.x - cs.lastX, p.z - cs.lastZ);
+          cs.lastX = p.x;
+          cs.lastZ = p.z;
+          if (over) {
+            // Ripples from where it drives: by distance travelled (or time when slow).
+            cs.travel += moved;
+            cs.sinceRipple += dt;
+            if (cs.travel >= TRASH_FX.ripple.spacing || cs.sinceRipple >= TRASH_FX.ripple.interval) {
+              const r = _trashFxRipples[_trashFxNextRipple];
+              _trashFxNextRipple = (_trashFxNextRipple + 1) % TRASH_FX_MAX_RIPPLES;
+              r.x = p.x;
+              r.z = p.z;
+              r.age = 0;
+              r.strength = TRASH_FX.ripple.strength * (0.4 + 0.6 * speed01);
+              r.speed = THREE.MathUtils.lerp(TRASH_FX.ripple.speed, TRASH_FX.ripple.speedAtSpeed, speed01);
+              cs.travel = 0;
+              cs.sinceRipple = 0;
+            }
+          } else {
+            cs.travel = 0;
+            cs.sinceRipple = TRASH_FX.ripple.interval; // the first ripple comes as soon as it's over it
+          }
+          if (cs.strength > 0.002) {
+            const radius = THREE.MathUtils.lerp(TRASH_FX.carGlow.radius, TRASH_FX.carGlow.radiusAtSpeed, speed01);
+            u.uCars.value[slot++].set(p.x, p.z, cs.strength, radius);
+            peak = Math.max(peak, cs.strength);
+          }
         }
-        posAttr.needsUpdate = true;
-        lifeAttr.needsUpdate = true;
-
-        _trashFxLight.position.set(
-          active.centerX,
-          baseY,
-          active.centerZ,
-        );
-        _trashFxLight.intensity = f * 4;
+        for (; slot < TRASH_FX_MAX_CARS; slot++) u.uCars.value[slot].z = 0;
+        for (let j = 0; j < TRASH_FX_MAX_RIPPLES; j++) {
+          const r = _trashFxRipples[j];
+          r.age += dt;
+          const life = r.age / TRASH_FX.ripple.life;
+          const k = life < 1 ? (1 - life) * (1 - life) : 0;
+          u.uRipples.value[j].set(r.x, r.z, r.age * r.speed, r.strength * k);
+          peak = Math.max(peak, r.strength * k * 0.6);
+        }
+        _trashFxLight.intensity = TRASH_FX.lightIntensity * peak * u.uScale.value;
       }
 
       const FLAME_EFFECT_PARTICLE_COUNT = 60;
@@ -7494,8 +7410,8 @@ let _worldSwitched = false;
         _safeRemoveBody(floorPhysBody); floorPhysBody = null;
         if (_peselLightMeshes.length) _peselLightMeshes.length = 0;
         if (_trashFxPlanes.length) _trashFxPlanes.length = 0;
-        _trashFxFade = 0;
-        _trashFxActivePlane = null;
+        _trashFxCarState.clear();
+        for (const r of _trashFxRipples) r.strength = 0;
         setTrashFxVisible(false);
         stopMisterSpotLaser(_misterSpot);
         resetMisterSpotTrail();
