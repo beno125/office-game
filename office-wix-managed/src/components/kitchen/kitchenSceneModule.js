@@ -8150,11 +8150,12 @@ let _worldSwitched = false;
       // ── Fire in the three trash holes (trashPlane1/2/3, the holes' dark floors):
       // flame particles rising from each floor, a glow on it and a light that
       // lights the hole's surroundings and the cars. One effect (createTrashFx),
-      // three colours (TRASH_FX_COLORS). Idle: low, flickering flames and a few
-      // embers. Every race car over a hole: the flames around it flare up tall
-      // and bright (more at speed) and fade back once it's gone; the flames and
-      // embers also lean after nearby cars (a gentle, lagging pull). Visual only
-      // (no physics). The particles are placed and animated in the vertex shader.
+      // three colours (TRASH_FX_COLORS). Idle (no car over the hole): a weaker
+      // fire (fewer particles, lower, softer glow, dimmer light). A race car over
+      // the hole: it ramps up to full strength and fades back once it's gone.
+      // The particles are simulated on the CPU with a velocity each: they rise,
+      // and steer after the nearest car (any race car), trailing behind it.
+      // Visual only (no physics).
       const TRASH_FX_ENABLED = true;
       /** The planes that get the fire (model names). */
       const TRASH_FX_PLANE_NAMES = ["trashPlane1", "trashPlane2", "trashPlane3"];
@@ -8166,17 +8167,19 @@ let _worldSwitched = false;
       };
       /** Padding around the plane's footprint that still counts as "over it" (world units). */
       const TRASH_FX_EDGE_PAD = 0.6;
-      // Drops the black hole floor (the plane itself) below the opening's lip.
-      const TRASH_FX_Y_OFFSET = -0.45;
+      // Drops the black hole floor (the plane itself) below the opening's lip. It's the fire's base too:
+      // particles under the floor are hidden, so a lower fire needs a deeper floor.
+      const TRASH_FX_Y_OFFSET = -1.25;
       /** The glow sits this far above the plane's top surface (+ polygonOffset), so it never z-fights. */
       const TRASH_FX_SURFACE_LIFT = 0.004;
       const TRASH_FX = {
-        /** Particles: flames + embers (a share of them), spread over this part of the floor (× the smaller half size). */
+        /** Particles per hole (at full strength): flames + embers (a share of them), spawned over this part of the floor (× the smaller half size). */
         count: 520,
         emberShare: 0.18,
         spread: 0.92,
-        /** Where the flames start, relative to the floor's surface (world units; negative = lower). */
-        originOffset: -0.15,
+        /** Base offset: where the flames start, relative to the floor's surface (world units; negative = lower).
+         *  To move the whole fire lower, deepen the floor (TRASH_FX_Y_OFFSET): flames under the floor are hidden. */
+        originOffset: -0.1,
         /** Flame size (px at 1 unit away) and how long a flame lives (s). */
         flameSize: 1500,
         flameLife: 0.9,
@@ -8184,40 +8187,48 @@ let _worldSwitched = false;
         /** Random size per particle (× flameSize): flames and embers. Skewed so big ones are rarer. */
         flameSizeRange: [0.4, 1.5],
         emberSizeRange: [0.1, 0.34],
-        /** Flame height above the origin (world units): idle, and at full flare over a car. Embers rise × emberRise of that.
-         *  (The floor is ~1 below the table top: idle flames stay in the hole, a flare shoots well out of it.) */
-        idleHeight: 0.9,
-        flareHeight: 3.8,
+        /** Peak height above the base (world units): idle, and at full strength. Embers rise × emberRise of that.
+         *  (The floor is ~1.8 below the table top: idle flames stay in the hole, full ones tower over it.) */
+        idleHeight: 1.9,
+        flareHeight: 7.5,
         emberRise: 1.5,
-        /** Idle heat (0 → 1): how lively the fire is with no car over it. */
-        idleHeat: 0.22,
-        /** The flare around each car: radius (world units, grows with speed). */
+        /** Idle intensity level (0 → 1): with no car over the hole, the share of particles alive and the chase run at this level,
+         *  and the particles' glow at halfway between it and full (so the idle fire stays visible, just softer). */
+        idleLevel: 0.5,
+        /** Transition speed: time (s) to ramp up to full strength once a car is over the hole, and to fade back to idle once it's gone. */
+        rampUp: 0.25,
+        rampDown: 0.9,
+        /** How lively each particle looks (size, opacity): idle (full strength = 1). */
+        idleHeat: 0.45,
+        /** The floor glow's flare around each car: radius (world units, grows with speed) and its fade in / out (s). */
         flareRadius: 1.1,
         flareRadiusAtSpeed: 1.7,
-        /** Fade in / out of a car's flare (s). */
         fadeIn: 0.1,
         fadeOut: 0.7,
-        /** Particle glow: colour × this (over 1 = blooms), plus a white-hot centre of this strength. */
+        /** Particle glow: colour × this (over 1 = blooms), plus a white-hot centre of this strength (× idleLevel when idle). */
         glowStrength: 1.7,
         hotCore: 0.6,
-        /** Chase: how far the particles lean toward a nearby car (share of the gap; older particles lean the most),
-         *  at most this far (world units), for cars within this range (soft falloff), following the car with this lag (s). */
-        chaseStrength: 0.35,
-        chaseMax: 1.1,
-        chaseRange: 3.5,
-        chaseLag: 0.35,
-        /** The warm glow on the floor: idle strength, and under a car. */
+        /** Chase: each particle steers its sideways velocity toward the nearest race car within chaseRange (world units),
+         *  aiming for chaseSpeed (units/s) at chaseStrength (steering rate, 1/s: higher = snappier). It keeps rising meanwhile. */
+        chaseStrength: 7,
+        chaseSpeed: 11,
+        chaseRange: 7,
+        /** Sideways flicker of each particle (units/s): flames, embers. */
+        swayFlame: 0.35,
+        swayEmber: 1.1,
+        /** The floor glow: idle strength, and under a car. */
         glowIdle: 0.12,
         glowCar: 0.35,
-        /** The fire's light: idle and at full flare (flickers more as the fire flares), its range (world units) and height above the
-         *  hole's floor (above the table top, ~1 up, so it lights the track and the cars from above). */
+        /** The fire's light: idle and at full strength (flickers more as the fire flares), its range (world units) and height above the
+         *  hole's floor (above the table top, ~1.6 up, so it lights the track and the cars from above). */
         lightIdle: 45,
         lightFlare: 220,
         lightRange: 11,
         lightDecay: 1.5,
-        lightHeight: 2.6,
-        /** The light leans toward a chased car by this share of the particles' lean. */
+        lightHeight: 3.4,
+        /** The light follows the particles' centre by this share (at most lightChaseMax units sideways). */
         lightChase: 0.5,
+        lightChaseMax: 2.5,
         /** Bright mode: the whole effect × this (dark mode: 1). */
         brightModeScale: 0.8,
       };
@@ -8232,30 +8243,6 @@ let _worldSwitched = false;
         uScale: { value: 1 },
         uIdleHeat: { value: TRASH_FX.idleHeat },
       };
-
-      // Flames / embers: each particle has a fixed spot on a unit disc and a phase; its rise is computed per frame on the GPU.
-      // One geometry for every hole (each hole's material places it).
-      const _trashFxGeo = new THREE.BufferGeometry();
-      {
-        const n = TRASH_FX.count;
-        const base = new Float32Array(n * 3); // x, z (unit disc), phase
-        const props = new Float32Array(n * 3); // role (0 flame, 1 ember), size, sway
-        for (let i = 0; i < n; i++) {
-          const ember = Math.random() < TRASH_FX.emberShare;
-          const a = Math.random() * Math.PI * 2;
-          const r = Math.sqrt(Math.random());
-          const [sMin, sMax] = ember ? TRASH_FX.emberSizeRange : TRASH_FX.flameSizeRange;
-          base[i * 3] = Math.cos(a) * r;
-          base[i * 3 + 1] = Math.sin(a) * r;
-          base[i * 3 + 2] = Math.random();
-          props[i * 3] = ember ? 1 : 0;
-          props[i * 3 + 1] = sMin + (sMax - sMin) * Math.pow(Math.random(), 1.6);
-          props[i * 3 + 2] = Math.random() * 6.2831853;
-        }
-        _trashFxGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(n * 3), 3));
-        _trashFxGeo.setAttribute("aBase", new THREE.BufferAttribute(base, 3));
-        _trashFxGeo.setAttribute("aProps", new THREE.BufferAttribute(props, 3));
-      }
       const _trashFxGlowGeo = new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2);
       const _trashFxCarsGlsl = `
         #define MAX_CARS ${TRASH_FX_MAX_CARS}
@@ -8272,56 +8259,23 @@ let _worldSwitched = false;
           return h;
         }
       `;
+      // The particles arrive placed (CPU simulation): the shader sizes and colours them.
       const _trashFxVertex = `
-        attribute vec3 aBase;
-        attribute vec3 aProps;
-        uniform float uTime;
-        uniform vec3 uCenter;
-        uniform float uRadius;
+        attribute vec4 aInfo; // life (0 → 1, < 0 = not alive), ember, size, seed
         uniform float uSize;
-        uniform vec2 uLife;
-        uniform vec3 uHeight;
-        ${_trashFxCarsGlsl}
-        uniform vec3 uChaseCars[MAX_CARS]; // lagged x, z, weight
-        uniform vec3 uChase; // strength, max distance, range
+        uniform float uHeat;
         varying float vLife;
         varying float vHeat;
         varying float vEmber;
-        // The pull toward nearby cars (clamped, soft falloff with distance).
-        vec2 chasePull(vec2 spot) {
-          vec2 off = vec2(0.0);
-          for (int i = 0; i < MAX_CARS; i++) {
-            vec3 c = uChaseCars[i];
-            if (c.z <= 0.001) continue;
-            vec2 d = c.xy - spot;
-            float dist = length(d);
-            float fall = exp(-(dist * dist) / (uChase.z * uChase.z));
-            off += d * min(1.0, uChase.y / max(dist, 0.001)) * c.z * fall;
-          }
-          return off * uChase.x;
-        }
         void main() {
-          float ember = aProps.x;
-          vec2 spot = uCenter.xz + aBase.xy * uRadius;
-          float heat = clamp(uIdleHeat + carHeat(spot), 0.0, 1.0);
-          float life = fract(uTime / mix(uLife.x, uLife.y, ember) + aBase.z);
-          float h = mix(uHeight.x, uHeight.y, smoothstep(uIdleHeat, 1.0, heat)) * mix(1.0, uHeight.z, ember);
-          float rise = life * (ember > 0.5 ? life : 1.0); // embers speed up as they climb
-          vec3 p = vec3(spot.x, uCenter.y, spot.y);
-          p.y += rise * h;
-          // Flicker and sway: flames lick sideways a little, embers drift further.
-          float sway = sin(uTime * (3.0 + aProps.z) + aProps.z * 5.0) * (0.04 + 0.18 * ember) * life;
-          p.x += sway;
-          p.z += cos(uTime * (2.3 + aProps.z) + aProps.z * 3.0) * (0.03 + 0.14 * ember) * life;
-          // Lean after nearby cars: the older (higher) a particle, the further it has followed.
-          p.xz += chasePull(spot) * life * life * mix(1.0, 1.4, ember);
-          // Flames draw in toward their own axis as they rise (a pointed tongue).
-          vec4 mv = modelViewMatrix * vec4(p, 1.0);
+          float life = aInfo.x;
+          float ember = aInfo.y;
+          vec4 mv = modelViewMatrix * vec4(position, 1.0);
           gl_Position = projectionMatrix * mv;
-          float shrink = ember > 0.5 ? 1.0 : (1.0 - life * 0.75);
-          gl_PointSize = min(uSize * aProps.y * shrink * (0.6 + 0.6 * heat) / max(0.1, -mv.z), 160.0);
+          float shrink = ember > 0.5 ? 1.0 : (1.0 - max(life, 0.0) * 0.75); // flames narrow to a tip as they rise
+          gl_PointSize = life < 0.0 ? 0.0 : min(uSize * aInfo.z * shrink * (0.6 + 0.6 * uHeat) / max(0.1, -mv.z), 160.0);
           vLife = life;
-          vHeat = heat;
+          vHeat = uHeat;
           vEmber = ember;
         }
       `;
@@ -8335,6 +8289,7 @@ let _worldSwitched = false;
         varying float vHeat;
         varying float vEmber;
         void main() {
+          if (vLife < 0.0) discard;
           vec2 c = gl_PointCoord - 0.5;
           // A soft teardrop for flames (wider at the base), a round spark for embers.
           c.x *= mix(1.0 + (0.5 - gl_PointCoord.y) * 0.8, 1.0, vEmber);
@@ -8380,8 +8335,37 @@ let _worldSwitched = false;
 
       /** One hole's fire (particles, floor glow, light) in the given colours ({ core, mid, tip }). Hidden until placed. */
       function createTrashFx(colors) {
-        const cars = Array.from({ length: TRASH_FX_MAX_CARS }, () => new THREE.Vector4()); // x, z, strength, radius
-        const chaseCars = Array.from({ length: TRASH_FX_MAX_CARS }, () => new THREE.Vector3()); // lagged x, z, weight
+        const n = TRASH_FX.count;
+        // Simulation state (per particle).
+        const sim = {
+          pos: new Float32Array(n * 3),
+          vel: new Float32Array(n * 3),
+          age: new Float32Array(n),
+          life: new Float32Array(n),
+          wait: new Float32Array(n), // time left before it (re)spawns
+          alive: new Uint8Array(n),
+          rank: new Float32Array(n), // alive only while rank < the current share (idle: idleLevel)
+          ember: new Uint8Array(n),
+          seed: new Float32Array(n),
+        };
+        const info = new Float32Array(n * 4); // life, ember, size, seed
+        for (let i = 0; i < n; i++) {
+          const ember = Math.random() < TRASH_FX.emberShare;
+          const [sMin, sMax] = ember ? TRASH_FX.emberSizeRange : TRASH_FX.flameSizeRange;
+          sim.ember[i] = ember ? 1 : 0;
+          sim.rank[i] = Math.random();
+          sim.seed[i] = Math.random() * 6.2831853;
+          info[i * 4] = -1;
+          info[i * 4 + 1] = ember ? 1 : 0;
+          info[i * 4 + 2] = sMin + (sMax - sMin) * Math.pow(Math.random(), 1.6);
+          info[i * 4 + 3] = sim.seed[i];
+        }
+        const geo = new THREE.BufferGeometry();
+        const posAttr = new THREE.BufferAttribute(sim.pos, 3).setUsage(THREE.DynamicDrawUsage);
+        const infoAttr = new THREE.BufferAttribute(info, 4).setUsage(THREE.DynamicDrawUsage);
+        geo.setAttribute("position", posAttr);
+        geo.setAttribute("aInfo", infoAttr);
+        const cars = Array.from({ length: TRASH_FX_MAX_CARS }, () => new THREE.Vector4()); // x, z, strength, radius (floor glow)
         const uCars = { value: cars };
         const mat = new THREE.ShaderMaterial({
           transparent: true,
@@ -8390,17 +8374,9 @@ let _worldSwitched = false;
           blending: THREE.AdditiveBlending,
           toneMapped: false,
           uniforms: {
-            uTime: _trashFxShared.uTime,
             uScale: _trashFxShared.uScale,
-            uIdleHeat: _trashFxShared.uIdleHeat,
-            uCars,
-            uChaseCars: { value: chaseCars },
-            uChase: { value: new THREE.Vector3(TRASH_FX.chaseStrength, TRASH_FX.chaseMax, TRASH_FX.chaseRange) },
-            uCenter: { value: new THREE.Vector3() }, // x, emit y, z
-            uRadius: { value: 1 },
             uSize: { value: TRASH_FX.flameSize },
-            uLife: { value: new THREE.Vector2(TRASH_FX.flameLife, TRASH_FX.emberLife) },
-            uHeight: { value: new THREE.Vector3(TRASH_FX.idleHeight, TRASH_FX.flareHeight, TRASH_FX.emberRise) },
+            uHeat: { value: TRASH_FX.idleHeat },
             uCore: { value: new THREE.Color(colors.core) },
             uMid: { value: new THREE.Color(colors.mid) },
             uTip: { value: new THREE.Color(colors.tip) },
@@ -8409,10 +8385,10 @@ let _worldSwitched = false;
           vertexShader: _trashFxVertex,
           fragmentShader: _trashFxFragment,
         });
-        const points = new THREE.Points(_trashFxGeo, mat);
+        const points = new THREE.Points(geo, mat);
         points.name = "trashFxFire";
         points.visible = false;
-        points.frustumCulled = false; // placed in the shader
+        points.frustumCulled = false; // particles fly after the cars: no fixed bounds
         points.renderOrder = 6;
         points.layers.enable(CAR_LIGHTS_BLOOM_LAYER);
         scene.add(points);
@@ -8449,11 +8425,30 @@ let _worldSwitched = false;
         // Always in the scene (intensity 0 when off), so the light count never changes (no shader recompiles).
         const light = new THREE.PointLight(colors.mid, 0, TRASH_FX.lightRange, TRASH_FX.lightDecay);
         scene.add(light);
-        const fx = { points, glow, light, mat, glowMat, cars, chaseCars, carState: new Map(), plane: null, lightBase: new THREE.Vector3() };
+        const fx = {
+          points, glow, light, mat, glowMat, cars, sim, info, posAttr, infoAttr,
+          carState: new Map(),
+          plane: null,
+          radius: 1,
+          activity: 0, // 0 idle → 1 full strength
+          lightBase: new THREE.Vector3(),
+        };
         _trashFxList.push(fx);
         return fx;
       }
       for (const name of TRASH_FX_PLANE_NAMES) createTrashFx(TRASH_FX_COLORS[name]);
+
+      /** Every particle back to "not alive", with a staggered first spawn. */
+      function resetTrashFxParticles(fx) {
+        const s = fx.sim;
+        for (let i = 0; i < TRASH_FX.count; i++) {
+          s.alive[i] = 0;
+          s.wait[i] = Math.random() * (s.ember[i] ? TRASH_FX.emberLife : TRASH_FX.flameLife);
+          fx.info[i * 4] = -1;
+        }
+        fx.activity = 0;
+        fx.infoAttr.needsUpdate = true;
+      }
 
       function registerTrashPlane(mesh) {
         const fx = _trashFxList[TRASH_FX_PLANE_NAMES.indexOf(mesh.name)];
@@ -8494,8 +8489,8 @@ let _worldSwitched = false;
         fx.plane = plane;
         fx.carState.clear();
         const radius = Math.min(halfX, halfZ);
-        fx.mat.uniforms.uCenter.value.set(plane.centerX, plane.topY + TRASH_FX.originOffset, plane.centerZ);
-        fx.mat.uniforms.uRadius.value = radius * TRASH_FX.spread;
+        fx.radius = radius * TRASH_FX.spread;
+        resetTrashFxParticles(fx);
         fx.glow.position.set(plane.centerX, plane.topY + TRASH_FX_SURFACE_LIFT, plane.centerZ);
         fx.glow.scale.set(radius * 2, 1, radius * 2);
         fx.glow.updateMatrixWorld(true);
@@ -8737,6 +8732,116 @@ let _worldSwitched = false;
       function updateIceCoffeeTank(dt) {
         if (_iceCoffeeSurfaceMat) _iceCoffeeSurfaceMat.uniforms.uTime.value += dt;
       }
+      /** One hole's particles for this frame: spawn / rise / steer after the nearest car (carPts: x, y, z per car). */
+      function stepTrashFxParticles(fx, dt, carPts, carCount) {
+        const s = fx.sim;
+        const plane = fx.plane;
+        const a = fx.activity;
+        const share = THREE.MathUtils.lerp(TRASH_FX.idleLevel, 1, a);
+        const height = THREE.MathUtils.lerp(TRASH_FX.idleHeight, TRASH_FX.flareHeight, a);
+        const steer = TRASH_FX.chaseStrength * share; // idle: weaker chase
+        const range2 = TRASH_FX.chaseRange * TRASH_FX.chaseRange;
+        const baseY = plane.topY + TRASH_FX.originOffset;
+        const riseK = 1 - Math.exp(-dt * 8); // how fast a particle settles on its rise speed
+        const t = _trashFxTime;
+        let sumX = 0;
+        let sumZ = 0;
+        let alive = 0;
+        for (let i = 0; i < TRASH_FX.count; i++) {
+          const i3 = i * 3;
+          const i4 = i * 4;
+          const ember = s.ember[i];
+          if (!s.alive[i]) {
+            // Only the current share of particles respawns (fewer when idle; the others finish their life and stay out).
+            s.wait[i] -= dt;
+            if (s.wait[i] > 0 || s.rank[i] >= share) {
+              fx.info[i4] = -1;
+              continue;
+            }
+            const ang = Math.random() * Math.PI * 2;
+            const r = Math.sqrt(Math.random()) * fx.radius;
+            s.pos[i3] = plane.centerX + Math.cos(ang) * r;
+            s.pos[i3 + 1] = baseY;
+            s.pos[i3 + 2] = plane.centerZ + Math.sin(ang) * r;
+            s.vel[i3] = 0;
+            s.vel[i3 + 1] = 0;
+            s.vel[i3 + 2] = 0;
+            s.age[i] = 0;
+            s.life[i] = (ember ? TRASH_FX.emberLife : TRASH_FX.flameLife) * (0.8 + Math.random() * 0.4);
+            s.alive[i] = 1;
+          }
+          s.age[i] += dt;
+          const life01 = s.age[i] / s.life[i];
+          if (life01 >= 1) {
+            s.alive[i] = 0;
+            s.wait[i] = 0;
+            fx.info[i4] = -1;
+            continue;
+          }
+          // Rise: a flame climbs steadily to the peak over its life; an ember speeds up as it climbs.
+          const peak = height * (ember ? TRASH_FX.emberRise : 1);
+          const vyTarget = (peak / s.life[i]) * (ember ? 2 * life01 : 1);
+          s.vel[i3 + 1] += (vyTarget - s.vel[i3 + 1]) * riseK;
+          // Chase: steer toward the nearest car in range (re-picked every frame, so it switches when another gets closer).
+          const px = s.pos[i3];
+          const py = s.pos[i3 + 1];
+          const pz = s.pos[i3 + 2];
+          let best = -1;
+          let bestD2 = range2;
+          for (let c = 0; c < carCount; c++) {
+            const dx = carPts[c * 3] - px;
+            const dz = carPts[c * 3 + 2] - pz;
+            const d2 = dx * dx + dz * dz;
+            if (d2 < bestD2) {
+              bestD2 = d2;
+              best = c;
+            }
+          }
+          if (best >= 0) {
+            const dx = carPts[best * 3] - px;
+            const dz = carPts[best * 3 + 2] - pz;
+            const d = Math.sqrt(bestD2) || 1;
+            const near = 1 - d / TRASH_FX.chaseRange; // stronger the closer the car
+            const k = 1 - Math.exp(-dt * steer * (0.35 + 0.65 * near));
+            // Slows as it reaches the car (no overshooting circles around it).
+            const sp = Math.min(TRASH_FX.chaseSpeed, d * 6) / d;
+            s.vel[i3] += (dx * sp - s.vel[i3]) * k;
+            s.vel[i3 + 2] += (dz * sp - s.vel[i3 + 2]) * k;
+          } else {
+            // No car near: the sideways drift settles.
+            const damp = Math.exp(-dt * 2.5);
+            s.vel[i3] *= damp;
+            s.vel[i3 + 2] *= damp;
+          }
+          // Flicker: flames lick sideways a little, embers drift further.
+          const sway = ember ? TRASH_FX.swayEmber : TRASH_FX.swayFlame;
+          const seed = s.seed[i];
+          s.pos[i3] = px + (s.vel[i3] + Math.sin(t * (3 + seed) + seed * 5) * sway) * dt;
+          s.pos[i3 + 1] = py + s.vel[i3 + 1] * dt;
+          s.pos[i3 + 2] = pz + (s.vel[i3 + 2] + Math.cos(t * (2.3 + seed) + seed * 3) * sway) * dt;
+          fx.info[i4] = life01;
+          sumX += s.pos[i3];
+          sumZ += s.pos[i3 + 2];
+          alive++;
+        }
+        fx.posAttr.needsUpdate = true;
+        fx.infoAttr.needsUpdate = true;
+        // The light follows the particles' centre (a share of its offset, clamped).
+        let lx = 0;
+        let lz = 0;
+        if (alive) {
+          lx = (sumX / alive - plane.centerX) * TRASH_FX.lightChase;
+          lz = (sumZ / alive - plane.centerZ) * TRASH_FX.lightChase;
+          const l = Math.hypot(lx, lz);
+          if (l > TRASH_FX.lightChaseMax) {
+            lx *= TRASH_FX.lightChaseMax / l;
+            lz *= TRASH_FX.lightChaseMax / l;
+          }
+        }
+        fx.light.position.set(fx.lightBase.x + lx, fx.lightBase.y, fx.lightBase.z + lz);
+      }
+
+      const _trashFxCarPts = new Float32Array(TRASH_FX_MAX_CARS * 3);
       function updateTrashPlaneEffect(dt) {
         const anyPlaced = _trashFxList.some((fx) => fx.plane);
         if (!TRASH_FX_ENABLED || !anyPlaced || !_kitchenWorldActive) {
@@ -8744,36 +8849,42 @@ let _worldSwitched = false;
           return;
         }
         setTrashFxVisible(true);
+        dt = Math.min(dt, 0.05); // a long frame doesn't fling the particles
         _trashFxTime += dt;
         _trashFxShared.uTime.value = _trashFxTime;
         _trashFxShared.uScale.value = THREE.MathUtils.lerp(1, TRASH_FX.brightModeScale, THREE.MathUtils.clamp(lightBlend, 0, 1));
         // Every race car (the player alone before the race is set up).
         const cars = _raceCars.length ? _raceCars : car ? [{ pos: car.position, state: carState }] : [];
-        const lagK = 1 - Math.exp(-dt / TRASH_FX.chaseLag);
-        const chaseReach = TRASH_FX.chaseRange * 2.5; // beyond this a car's pull is ~0: skip it
+        let carCount = 0;
+        for (let i = 0; i < cars.length && carCount < TRASH_FX_MAX_CARS; i++) {
+          const p = cars[i].pos;
+          if (!p) continue;
+          _trashFxCarPts[carCount * 3] = p.x;
+          _trashFxCarPts[carCount * 3 + 1] = p.y;
+          _trashFxCarPts[carCount * 3 + 2] = p.z;
+          carCount++;
+        }
         for (let f = 0; f < _trashFxList.length; f++) {
           const fx = _trashFxList[f];
           const plane = fx.plane;
           if (!plane) continue;
+          let anyOver = false;
           let peak = 0;
           let slot = 0;
-          let chaseSlot = 0;
-          let leanX = 0;
-          let leanZ = 0;
           for (let i = 0; i < cars.length; i++) {
             const rc = cars[i];
             const p = rc.pos;
             if (!p) continue;
             let cs = fx.carState.get(rc);
             if (!cs) {
-              cs = { strength: 0, lagX: p.x, lagZ: p.z };
+              cs = { strength: 0 };
               fx.carState.set(rc, cs);
             }
-            // The flare (the existing reaction to a car driving over the hole).
             const over = p.x >= plane.minX && p.x <= plane.maxX && p.z >= plane.minZ && p.z <= plane.maxZ;
+            if (over) anyOver = true;
             const maxSpeed = (rc.state && rc.state.maxSpeed) || carState.maxSpeed || 1;
             const speed01 = THREE.MathUtils.clamp(Math.abs((rc.state && rc.state.speed) || 0) / maxSpeed, 0, 1);
-            // Its flare fades in quickly and out smoothly (delta-time based).
+            // The floor glow's flare under it fades in quickly and out smoothly (delta-time based).
             const tau = over ? TRASH_FX.fadeIn : TRASH_FX.fadeOut;
             cs.strength += ((over ? 0.55 + 0.45 * speed01 : 0) - cs.strength) * (1 - Math.exp(-dt / tau));
             if (cs.strength > 0.002 && slot < TRASH_FX_MAX_CARS) {
@@ -8781,28 +8892,22 @@ let _worldSwitched = false;
               fx.cars[slot++].set(p.x, p.z, cs.strength, radius);
               peak = Math.max(peak, cs.strength);
             }
-            // The chase: particles follow a lagging copy of the car's position.
-            cs.lagX += (p.x - cs.lagX) * lagK;
-            cs.lagZ += (p.z - cs.lagZ) * lagK;
-            const dx = cs.lagX - plane.centerX;
-            const dz = cs.lagZ - plane.centerZ;
-            const dist = Math.hypot(dx, dz);
-            if (dist < chaseReach && chaseSlot < TRASH_FX_MAX_CARS) {
-              fx.chaseCars[chaseSlot++].set(cs.lagX, cs.lagZ, 1);
-              // The light leans the same way (the same clamp and falloff as the particles, at the hole's centre).
-              const pull = Math.min(1, TRASH_FX.chaseMax / Math.max(dist, 0.001)) * Math.exp(-(dist * dist) / (TRASH_FX.chaseRange * TRASH_FX.chaseRange));
-              leanX += dx * pull;
-              leanZ += dz * pull;
-            }
           }
           for (; slot < TRASH_FX_MAX_CARS; slot++) fx.cars[slot].z = 0;
-          for (; chaseSlot < TRASH_FX_MAX_CARS; chaseSlot++) fx.chaseCars[chaseSlot].z = 0;
-          const lean = TRASH_FX.chaseStrength * TRASH_FX.lightChase;
-          fx.light.position.set(fx.lightBase.x + leanX * lean, fx.lightBase.y, fx.lightBase.z + leanZ * lean);
+          // Idle ↔ full strength: ramps up while a car is over the hole, fades back once it's gone.
+          const target = anyOver ? 1 : 0;
+          const ramp = target > fx.activity ? TRASH_FX.rampUp : TRASH_FX.rampDown;
+          fx.activity += (target - fx.activity) * (1 - Math.exp(-dt / ramp));
+          const a = fx.activity;
+          fx.mat.uniforms.uHeat.value = THREE.MathUtils.lerp(TRASH_FX.idleHeat, 1, a);
+          const glowLevel = THREE.MathUtils.lerp(0.5 + 0.5 * TRASH_FX.idleLevel, 1, a);
+          fx.mat.uniforms.uGlowFx.value.set(TRASH_FX.glowStrength * glowLevel, TRASH_FX.hotCore * glowLevel);
+          stepTrashFxParticles(fx, dt, _trashFxCarPts, carCount);
           // Flicker deeper as the fire flares (each hole on its own beat).
           const t = _trashFxTime + f * 1.7;
-          const flicker = 1 - (0.12 + 0.18 * peak) * (0.5 + 0.5 * Math.sin(t * 17) * Math.sin(t * 9.1 + 2));
-          fx.light.intensity = THREE.MathUtils.lerp(TRASH_FX.lightIdle, TRASH_FX.lightFlare, peak) * flicker * _trashFxShared.uScale.value;
+          const flare = Math.max(a, peak);
+          const flicker = 1 - (0.12 + 0.18 * flare) * (0.5 + 0.5 * Math.sin(t * 17) * Math.sin(t * 9.1 + 2));
+          fx.light.intensity = THREE.MathUtils.lerp(TRASH_FX.lightIdle, TRASH_FX.lightFlare, a) * flicker * _trashFxShared.uScale.value;
         }
       }
 
