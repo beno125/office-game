@@ -5741,10 +5741,16 @@ let _worldSwitched = false;
         carEase: 1.6, // ease-out power of its drive (higher: faster out of the tunnel)
         closeFrom: 3.6, // the ring collapses…
         closeTo: 4.2, // …into the closing flash
-        /** Size and place (world units): ring radius, its centre above the table, how far behind the player's grid spot. */
-        radius: 1.75,
-        centreHeight: 1.45,
+        /**
+         * Size and place (world units): ring radius; the portal stands on the table from its bounds: the
+         * bottom of its smoke ring sits `heightOffset` above the table's top (measured there at runtime).
+         * How far behind the player's grid spot.
+         */
+        radius: 1.55,
+        heightOffset: 0.08,
         behindGrid: 10,
+        /** The car drives out at the opening's floor and lands on the table over this distance past the opening. */
+        landDistance: 2.6,
         /** The tunnel: how deep it looks (world units), and where the car starts in it. */
         tunnelDepth: 14,
         carStartDepth: 8,
@@ -5754,15 +5760,17 @@ let _worldSwitched = false;
         tunnelLen: [0.6, 1.8],
         tunnelWidth: [0.018, 0.04],
         tunnelSpeed: [7, 13],
-        /** The rim: streaks round a torus (count), its thickness (radial / depth, world units), spin (rad/s), arcs (rad). */
-        rimStreaks: 90,
-        rimThickness: 0.22,
-        rimDepth: 0.3,
-        rimSpin: 1.7,
-        rimArc: [0.2, 0.6],
-        rimWidth: [0.025, 0.055],
-        /** Gather: the rim's streaks fly in from this × the radius. */
+        /** The rim's turning speed (rad/s; faster while closing). Gather: it comes in from this × the radius. */
+        rimSpin: 0.55,
         gatherFrom: 2.4,
+        /**
+         * The rim: a ring of coloured smoke (soft sprites with animated noise): count, sprite size, how far it
+         * spreads across the ring (radial / depth, world units), how far it billows out and back, its opacity,
+         * noise scale / speed, and the glow from within (brightest at the inner edge).
+         */
+        smoke: { count: 150, size: [0.55, 0.95], thickness: 0.24, depth: 0.42, billow: 0.12, billowSpeed: [0.6, 1.4], alpha: 0.5, noiseScale: 2.6, noiseSpeed: 0.35, glow: 1.15, innerGlow: 0.9 },
+        /** Small glowing particles orbiting with the smoke (a share drifting off and fading): count, size, life (s). */
+        rimParticles: { count: 120, driftShare: 0.35, size: [2.5, 6], life: [0.9, 1.8], driftOut: 0.9, driftForward: 0.5 },
         /** Brightness (× colour; the scene's bloom picks it up). It's slightly stronger for this shot (bright mode too). */
         glow: 2.2,
         /** The tunnel's inner glow: colour, near the opening → deep inside. */
@@ -5773,19 +5781,15 @@ let _worldSwitched = false;
         light: { color: 0x7d74ff, intensity: 6, flash: 10, distance: 10 },
         /**
          * Lines breaking out into the kitchen: a tunnel line that escapes carries on through the opening
-         * (the same line, unmasked past the opening's plane) for `distance` world units, spreading in a
-         * cone (`spreadDeg`, its outer share wider: past the rim), some swirling along the rim (`swirl`,
-         * rad per unit), slowing by `decel`, fading from `fadeStart` of the way, and before the table
-         * (within `floorFade` above it). Which lines escape follows the shot: `steady` share while open,
-         * a `burst` at the opening, `car` while the car comes out, none while closing.
+         * (the same line, unmasked past the opening's plane) for `distance` world units, straight on in a
+         * tight cone (`spreadDeg`), slowing by `decel`, fading from `fadeStart` of the way, and before the
+         * table (within `floorFade` above it). Which lines escape follows the shot: `steady` share while
+         * open, a `burst` at the opening, `car` while the car comes out, none while closing.
          */
         escape: {
           distance: 5,
-          spreadDeg: [6, 38],
-          rimSpreadDeg: [45, 70],
-          rimShare: 0.25,
-          swirl: 0.5,
-          decel: 0.35,
+          spreadDeg: [1.5, 9], // straight out of the opening, in a tight cone (was 6–38°, some 45–70° / swirling)
+          decel: 0.06, // a very slight slowdown along the straight path
           fadeStart: 0.45,
           floorFade: 0.35,
           steady: 0.3,
@@ -5798,7 +5802,7 @@ let _worldSwitched = false;
         /** Sparks drifting out of the opening: count, life (s), speed out / sideways (units/s), size. */
         sparks: { count: 70, life: [0.7, 1.4], speedOut: [1.2, 2.8], speedSide: [0.2, 1.0], size: [3, 7] },
         /** Camera: in front of the ring toward the table's front, low; a slow push-in following the car out. */
-        cam: { distFrom: 4.6, distTo: 3.7, side: 2.8, heightFrom: 1.5, heightTo: 1.25, lookHeight: 1.0, follow: 0.35, fovFrom: 52, fovTo: 46 },
+        cam: { distFrom: 5.2, distTo: 4.3, side: 3.0, heightFrom: 2.1, heightTo: 1.8, lookHeight: 1.7, follow: 0.35, fovFrom: 54, fovTo: 48 },
       };
       const KITCHEN_PORTAL_STENCIL = 2; // stencil bit of the opening
       const _kPortal = {
@@ -5847,16 +5851,13 @@ let _worldSwitched = false;
 
       // Shared streak shader: a thin glowing line between two local points, widened across the view.
       const _kPortalStreakVS = `
-        attribute vec4 aA; // tunnel / wave: radius, angle, phase, speed | rim: radius offset, angle, depth, speed
-        attribute vec4 aB; // tunnel / wave: length, width, -, -        | rim: arc, width, -, -
-        attribute vec4 aE; // out of the opening: spread (tan), swirl, id, -
+        attribute vec4 aA; // radius, angle, phase, speed
+        attribute vec4 aB; // length, width, -, -
+        attribute vec4 aE; // out of the opening: spread (tan), -, id, -
         attribute vec3 aColor;
         uniform float uTime;
-        uniform float uMode; // 0 tunnel line (continuing out if it escapes), 1 rim, 2 burst wave (out only)
+        uniform float uMode; // 0 tunnel line (continuing out if it escapes), 2 burst wave (out only)
         uniform float uDepth; // tunnel depth (world units)
-        uniform float uRing; // rim radius (world units)
-        uniform float uSpin;
-        uniform float uThick;
         uniform float uEsc; // escape distance
         uniform float uDecel;
         uniform float uFadeStart;
@@ -5884,13 +5885,7 @@ let _worldSwitched = false;
           vec3 tangent;
           float along = position.x; // 0 tail → 1 head
           vFloor = 1.0;
-          if (uMode > 0.5 && uMode < 1.5) {
-            float a = aA.y + uTime * uSpin * aA.w + along * aB.x;
-            float r = uRing + aA.x * uThick;
-            p = vec3(cos(a) * r, sin(a) * r, aA.z);
-            tangent = vec3(-sin(a), cos(a), 0.0);
-            vFade = sin(3.14159 * along);
-          } else {
+          {
             float len = aB.x * (0.6 + 0.4 * aA.w / 10.0);
             float dHead;
             bool escapes;
@@ -5916,14 +5911,13 @@ let _worldSwitched = false;
               vFade = nearFade * (1.0 - smoothstep(uDepth * 0.7, uDepth, dist)) * (0.55 + 0.45 * smoothstep(uDepth, 0.0, dist));
               if (uMode > 1.5) vFade = 0.0;
             } else {
-              // Out in the kitchen: spreading in a cone, some swirling along the rim, slowing down.
+              // Out in the kitchen: straight on (a tight cone), barely slowing; pulled back along it when closing.
               float x = -dist;
-              float xs = x * (1.0 - uDecel * min(x, uEsc) / (2.0 * uEsc));
-              float rr = aA.x + xs * aE.x;
-              float th = aA.y + xs * aE.y;
-              p = vec3(cos(th) * rr, sin(th) * rr, xs);
-              tangent = normalize(vec3(cos(th) * aE.x - sin(th) * rr * aE.y, sin(th) * aE.x + cos(th) * rr * aE.y, 1.0));
-              p = mix(p, vec3(0.0, 0.0, 0.0), uSuck * uSuck);
+              float xr = x * (1.0 - uSuck * uSuck);
+              float xs = xr * (1.0 - uDecel * min(xr, uEsc) / (2.0 * uEsc));
+              vec2 dir2 = vec2(cos(aA.y), sin(aA.y));
+              p = vec3(dir2 * (aA.x + xs * aE.x), xs);
+              tangent = normalize(vec3(dir2 * aE.x, 1.0));
               float grow = uMode > 1.5 ? smoothstep(0.0, 0.3, x) : 1.0;
               vFade = escapes ? (1.0 - smoothstep(uEsc * uFadeStart, uEsc, x)) * grow * (1.0 - smoothstep(0.55, 1.0, uSuck)) : 0.0;
               vec4 wp = modelMatrix * vec4(p, 1.0);
@@ -5959,7 +5953,7 @@ let _worldSwitched = false;
       `;
       /** Instanced streaks (a ribbon per instance: x along 0..1, y across −1..1). */
       function _kPortalStreaks(count, mode, fill) {
-        const seg = 8; // curved along the rim / the cone out of the opening
+        const seg = 6; // its run bends where it leaves the tunnel (the cone)
         const g = new THREE.PlaneGeometry(1, 2, seg, 1);
         g.translate(0.5, 0, 0);
         const ig = new THREE.InstancedBufferGeometry().copy(g);
@@ -5970,11 +5964,8 @@ let _worldSwitched = false;
         const D = Math.PI / 180;
         for (let i = 0; i < count; i++) {
           fill(i, A, B);
-          // Out of the opening: a cone (its outer share wider, past the rim, some swirling along it).
-          const rim = Math.random() < X.rimShare;
-          const deg = rim ? X.rimSpreadDeg[0] + Math.random() * (X.rimSpreadDeg[1] - X.rimSpreadDeg[0]) : X.spreadDeg[0] + Math.random() * (X.spreadDeg[1] - X.spreadDeg[0]);
-          E[i * 4] = Math.tan(deg * D);
-          E[i * 4 + 1] = rim ? (Math.random() * 2 - 1) * X.swirl : 0;
+          // Out of the opening: straight on, in a tight cone.
+          E[i * 4] = Math.tan((X.spreadDeg[0] + Math.random() * (X.spreadDeg[1] - X.spreadDeg[0])) * D);
           E[i * 4 + 2] = Math.random() * 100;
           col.set(TRANSITION_STRIP_COLORS[i % TRANSITION_STRIP_COLORS.length]);
           C[i * 3] = col.r;
@@ -6026,7 +6017,14 @@ let _worldSwitched = false;
         _kPortal.gridAngle = carState.angle;
         _kPortal.fwd.set(Math.sin(carState.angle), 0, Math.cos(carState.angle));
         _kPortal.centre.copy(_kPortal.grid).addScaledVector(_kPortal.fwd, -P.behindGrid);
-        _kPortal.centre.y = R.surf + P.centreHeight;
+        // Stands on the table from its bounds: the table's top measured here, the smoke ring's bottom just above it.
+        const top = kitchenGroundY(_kPortal.centre.x, _kPortal.centre.z);
+        _kPortal.top = Number.isFinite(top) ? top : R.surf;
+        const S = P.smoke;
+        const below = P.radius + S.thickness + S.billow + S.size[1] * 0.4; // centre → the smoke's lowest edge
+        _kPortal.centre.y = _kPortal.top + below + P.heightOffset;
+        // The car: at the opening's floor inside the tunnel, landing on the table past it.
+        _kPortal.carLift = Math.max(0, _kPortal.centre.y - P.radius + 0.06 - _kPortal.top);
         _kPortal.start.copy(_kPortal.centre).addScaledVector(_kPortal.fwd, -P.carStartDepth);
         _kPortal.start.y = car.position.y;
         // The opening's plane: the real car is kept only in front of it while it crosses it.
@@ -6036,14 +6034,14 @@ let _worldSwitched = false;
           uDepth: { value: P.tunnelDepth },
           uRing: { value: P.radius },
           uSpin: { value: P.rimSpin },
-          uThick: { value: P.rimThickness },
+          uThick: { value: P.smoke.thickness },
           uGlow: { value: P.glow },
           uEsc: { value: P.escape.distance },
           uDecel: { value: P.escape.decel },
           uFadeStart: { value: P.escape.fadeStart },
           uSuck: { value: 0 },
           uWaveAt: { value: P.burstEnd - 0.25 },
-          uFloorY: { value: R.surf },
+          uFloorY: { value: _kPortal.top },
           uFloorFade: { value: P.escape.floorFade },
           uEscLevels: { value: new THREE.Vector4(P.escape.steady, P.escape.burst, P.escape.car, 0) },
           uEscTimes: { value: new THREE.Vector4(P.burstEnd, P.burstEnd, P.escape.burstWidth, P.closeFrom) },
@@ -6246,19 +6244,181 @@ let _worldSwitched = false;
           G.add(sparks);
           _kPortal.sparks = sparks;
         }
-        // 5. The rim: streaks swirling round a torus, at different radii and depths (seen from every side).
-        const rim = _kPortalStreaks(P.rimStreaks, 1, (i, A, B) => {
-          A[i * 4] = (Math.random() * 2 - 1);
-          A[i * 4 + 1] = Math.random() * Math.PI * 2;
-          A[i * 4 + 2] = (Math.random() * 2 - 1) * P.rimDepth * 0.5;
-          A[i * 4 + 3] = 0.7 + Math.random() * 0.6;
-          B[i * 4] = P.rimArc[0] + Math.random() * (P.rimArc[1] - P.rimArc[0]);
-          B[i * 4 + 1] = P.rimWidth[0] + Math.random() * (P.rimWidth[1] - P.rimWidth[0]);
-        });
-        rim.renderOrder = 106;
-        rim.layers.enable(CAR_LIGHTS_BLOOM_LAYER);
-        G.add(rim);
-        _kPortal.rim = rim;
+        // 5. The rim: a ring of coloured smoke (soft noise sprites at different radii and depths) and glowing particles.
+        {
+          const S = P.smoke;
+          const n = S.count;
+          const quad = new THREE.PlaneGeometry(1, 1);
+          const ig = new THREE.InstancedBufferGeometry().copy(quad);
+          ig.instanceCount = n;
+          const aS = new Float32Array(n * 4), aT = new Float32Array(n * 4), aC = new Float32Array(n * 3);
+          const col = new THREE.Color();
+          for (let i = 0; i < n; i++) {
+            aS[i * 4] = (i / n) * Math.PI * 2 + Math.random() * 0.2; // angle round the ring
+            aS[i * 4 + 1] = Math.random() * 2 - 1; // across it (−1 inner edge … 1 outer)
+            aS[i * 4 + 2] = Math.random() * 2 - 1; // depth
+            aS[i * 4 + 3] = Math.random(); // seed
+            aT[i * 4] = S.size[0] + Math.random() * (S.size[1] - S.size[0]);
+            aT[i * 4 + 1] = 0.75 + Math.random() * 0.5; // its share of the spin
+            aT[i * 4 + 2] = S.billowSpeed[0] + Math.random() * (S.billowSpeed[1] - S.billowSpeed[0]);
+            col.set(TRANSITION_STRIP_COLORS[i % TRANSITION_STRIP_COLORS.length]);
+            aC[i * 3] = col.r;
+            aC[i * 3 + 1] = col.g;
+            aC[i * 3 + 2] = col.b;
+          }
+          ig.setAttribute("aS", new THREE.InstancedBufferAttribute(aS, 4));
+          ig.setAttribute("aT", new THREE.InstancedBufferAttribute(aT, 4));
+          ig.setAttribute("aColor", new THREE.InstancedBufferAttribute(aC, 3));
+          const smokeMat = new THREE.ShaderMaterial({
+            uniforms: {
+              uTime: _kPortal.uniforms.uTime,
+              uRing: _kPortal.uniforms.uRing,
+              uSpin: _kPortal.uniforms.uSpin,
+              uThick: _kPortal.uniforms.uThick,
+              uFloorY: _kPortal.uniforms.uFloorY,
+              uDepthS: { value: S.depth },
+              uBillow: { value: S.billow },
+              uSizeK: { value: 1 },
+              uAlpha: { value: 0 },
+              uGlowS: { value: S.glow },
+              uInner: { value: S.innerGlow },
+              uNoise: { value: new THREE.Vector2(S.noiseScale, S.noiseSpeed) },
+            },
+            vertexShader: `
+              attribute vec4 aS; attribute vec4 aT; attribute vec3 aColor;
+              uniform float uTime; uniform float uRing; uniform float uSpin; uniform float uThick; uniform float uFloorY;
+              uniform float uDepthS; uniform float uBillow; uniform float uSizeK;
+              varying vec2 vUv; varying vec3 vColor; varying float vInner; varying float vSeed; varying float vFloor;
+              void main() {
+                float a = aS.x + uTime * uSpin * aT.y;
+                float billow = 0.5 + 0.5 * sin(uTime * aT.z + aS.w * 6.2832);
+                float r = uRing + aS.y * uThick + billow * uBillow;
+                vec3 c = vec3(cos(a) * r, sin(a) * r, aS.z * uDepthS * 0.5);
+                float size = aT.x * uSizeK * (0.85 + 0.3 * billow);
+                vec4 wp = modelMatrix * vec4(c, 1.0);
+                vec4 mv = viewMatrix * wp;
+                mv.xy += position.xy * size;
+                gl_Position = projectionMatrix * mv;
+                vUv = position.xy + 0.5;
+                vColor = aColor;
+                vInner = clamp(0.5 - aS.y * 0.5, 0.0, 1.0);
+                vSeed = aS.w;
+                vFloor = smoothstep(0.0, size * 0.5, wp.y - uFloorY - size * 0.15); // never below the table
+              }`,
+            fragmentShader: `
+              uniform float uTime; uniform float uAlpha; uniform float uGlowS; uniform float uInner; uniform vec2 uNoise;
+              varying vec2 vUv; varying vec3 vColor; varying float vInner; varying float vSeed; varying float vFloor;
+              float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+              float noise(vec2 p) {
+                vec2 i = floor(p), f = fract(p);
+                f = f * f * (3.0 - 2.0 * f);
+                return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), f.x), mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), f.x), f.y);
+              }
+              float fbm(vec2 p) {
+                float v = 0.0, a = 0.5;
+                for (int i = 0; i < 4; i++) { v += a * noise(p); p *= 2.03; a *= 0.5; }
+                return v;
+              }
+              void main() {
+                vec2 q = vUv - 0.5;
+                float soft = 1.0 - smoothstep(0.15, 0.5, length(q));
+                float n = fbm(vUv * uNoise.x + vec2(vSeed * 17.0, uTime * uNoise.y) + fbm(vUv * 1.7 - uTime * uNoise.y * 0.5));
+                float dens = soft * smoothstep(0.25, 0.85, n);
+                float a = dens * uAlpha * vFloor;
+                vec3 col = vColor * uGlowS * (0.65 + uInner * vInner) + vec3(0.15) * dens * vInner;
+                gl_FragColor = vec4(col, a);
+              }`,
+            transparent: true,
+            depthWrite: false,
+            toneMapped: false,
+          });
+          const smoke = new THREE.Mesh(ig, smokeMat);
+          smoke.frustumCulled = false; // placed in the shader
+          smoke.renderOrder = 106;
+          smoke.userData.skipBloomDarken = true; // its own glow in the bloom mask
+          G.add(smoke);
+          _kPortal.smoke = smoke;
+          // Particles orbiting with the smoke, a share drifting off into the air and fading.
+          const Q = P.rimParticles;
+          const m = Q.count;
+          const pA = new Float32Array(m * 4), pB = new Float32Array(m * 4), pC = new Float32Array(m * 3);
+          for (let i = 0; i < m; i++) {
+            pA[i * 4] = Math.random() * Math.PI * 2;
+            pA[i * 4 + 1] = Math.random() * 2 - 1;
+            pA[i * 4 + 2] = Math.random() * 2 - 1;
+            pA[i * 4 + 3] = Math.random();
+            pB[i * 4] = 0.8 + Math.random() * 0.8;
+            pB[i * 4 + 1] = Math.random() < Q.driftShare ? 1 : 0;
+            pB[i * 4 + 2] = Q.life[0] + Math.random() * (Q.life[1] - Q.life[0]);
+            pB[i * 4 + 3] = Q.size[0] + Math.random() * (Q.size[1] - Q.size[0]);
+            col.set(TRANSITION_STRIP_COLORS[i % TRANSITION_STRIP_COLORS.length]);
+            pC[i * 3] = col.r;
+            pC[i * 3 + 1] = col.g;
+            pC[i * 3 + 2] = col.b;
+          }
+          const pg = new THREE.BufferGeometry();
+          pg.setAttribute("position", new THREE.BufferAttribute(new Float32Array(m * 3), 3));
+          pg.setAttribute("aP", new THREE.BufferAttribute(pA, 4));
+          pg.setAttribute("aQ", new THREE.BufferAttribute(pB, 4));
+          pg.setAttribute("aColor", new THREE.BufferAttribute(pC, 3));
+          const particles = new THREE.Points(
+            pg,
+            new THREE.ShaderMaterial({
+              uniforms: {
+                uTime: _kPortal.uniforms.uTime,
+                uRing: _kPortal.uniforms.uRing,
+                uSpin: _kPortal.uniforms.uSpin,
+                uThick: _kPortal.uniforms.uThick,
+                uFloorY: _kPortal.uniforms.uFloorY,
+                uGlow: _kPortal.uniforms.uGlow,
+                uAlpha: { value: 0 },
+                uDrift: { value: new THREE.Vector2(Q.driftOut, Q.driftForward) },
+                uDepthS: { value: S.depth },
+              },
+              vertexShader: `
+                attribute vec4 aP; attribute vec4 aQ; attribute vec3 aColor;
+                uniform float uTime; uniform float uRing; uniform float uSpin; uniform float uThick; uniform float uFloorY;
+                uniform vec2 uDrift; uniform float uDepthS;
+                varying vec3 vColor; varying float vA;
+                void main() {
+                  float a = aP.x + uTime * uSpin * aQ.x * 1.3;
+                  float out_ = 0.0, fwd = 0.0;
+                  float alpha = 0.65 + 0.35 * sin(uTime * 4.0 + aP.w * 6.2832); // twinkle
+                  if (aQ.y > 0.5) {
+                    float u = fract(uTime / aQ.z + aP.w);
+                    out_ = u * uDrift.x;
+                    fwd = u * uDrift.y;
+                    alpha = sin(3.14159 * u);
+                  }
+                  float r = uRing + aP.y * uThick * 0.9 + out_;
+                  vec3 c = vec3(cos(a) * r, sin(a) * r, aP.z * uDepthS * 0.5 + fwd);
+                  vec4 wp = modelMatrix * vec4(c, 1.0);
+                  vec4 mv = viewMatrix * wp;
+                  gl_Position = projectionMatrix * mv;
+                  gl_PointSize = aQ.w * 30.0 / max(0.2, -mv.z);
+                  vA = alpha * smoothstep(0.0, 0.2, wp.y - uFloorY);
+                  vColor = aColor;
+                }`,
+              fragmentShader: `
+                uniform float uGlow; uniform float uAlpha;
+                varying vec3 vColor; varying float vA;
+                void main() {
+                  vec2 c = gl_PointCoord - 0.5;
+                  float a = exp(-dot(c, c) * 16.0) * vA * uAlpha;
+                  gl_FragColor = vec4((vColor + 0.35) * uGlow * a, a);
+                }`,
+              transparent: true,
+              depthWrite: false,
+              blending: THREE.AdditiveBlending,
+              toneMapped: false,
+            }),
+          );
+          particles.frustumCulled = false;
+          particles.renderOrder = 107;
+          particles.layers.enable(CAR_LIGHTS_BLOOM_LAYER);
+          G.add(particles);
+          _kPortal.rimParticles = particles;
+        }
         // 6. The flash / gathering point and a soft haze at the opening.
         const flash = new THREE.Sprite(
           new THREE.SpriteMaterial({ map: _kPortalGlowTexture(), color: 0xffffff, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, toneMapped: false }),
@@ -6336,6 +6496,9 @@ let _worldSwitched = false;
         const dist = _kPortal.start.distanceTo(_kPortalV.copy(_kPortal.grid).setY(_kPortal.start.y));
         car.position.x = _kPortal.start.x + (_kPortal.grid.x - _kPortal.start.x) * p;
         car.position.z = _kPortal.start.z + (_kPortal.grid.z - _kPortal.start.z) * p;
+        // At the opening's floor in the tunnel, easing down onto the table past it.
+        const past = _kPortalV.copy(car.position).sub(_kPortal.centre).dot(_kPortal.fwd);
+        car.position.y = _kPortal.grid.y + _kPortal.carLift * (1 - _kPortalSmooth(0, P.landDistance, past));
         carState.angle = _kPortal.gridAngle;
         const h = 1 / 60;
         carState.speed = t > P.carFrom && t < P.carTo ? (dist * (_kPortalCarProgress(t + h) - p)) / h : 0; // wheels turn with it
@@ -6389,8 +6552,13 @@ let _worldSwitched = false;
         const rimR = t < P.gatherEnd ? P.radius * P.gatherFrom * (1 - gather * gather) : P.radius * ring;
         _kPortal.uniforms.uRing.value = Math.max(0.001, rimR);
         _kPortal.uniforms.uSpin.value = P.rimSpin * (1 + 3 * close);
-        _kPortal.uniforms.uThick.value = P.rimThickness * (t < P.gatherEnd ? 1 + 2 * (1 - gather) : Math.max(0.2, ring));
-        _kPortal.rim.material.uniforms.uAlpha.value = t < P.gatherEnd ? Math.min(1, gather * 2.2) : Math.min(1, 0.3 + ring);
+        _kPortal.uniforms.uThick.value = P.smoke.thickness * (t < P.gatherEnd ? 1 + 2 * (1 - gather) : Math.max(0.2, ring));
+        // Smoke: gathering in, bursting into the ring, its last wisps fading after the closing flash.
+        const smokeIn = t < P.gatherEnd ? Math.min(1, gather * 1.6) : Math.min(1, 0.35 + ring);
+        const wisps = t >= P.closeTo ? Math.max(0, 1 - (t - P.closeTo) / (P.flashSec * 1.6)) : 1;
+        _kPortal.smoke.material.uniforms.uAlpha.value = P.smoke.alpha * smokeIn * wisps;
+        _kPortal.smoke.material.uniforms.uSizeK.value = t < P.gatherEnd ? 0.6 + 0.4 * gather : Math.max(0.35, Math.min(1.1, ring));
+        _kPortal.rimParticles.material.uniforms.uAlpha.value = smokeIn * wisps;
         // The tunnel: its opening grows with the ring, its depth forms after the burst (and collapses when closing).
         const open = ring > 0.01 && depth > 0.001;
         _kPortal.masked.visible = open;
@@ -6415,7 +6583,7 @@ let _worldSwitched = false;
         _kPortal.flash.visible = point > 0.003;
         _kPortal.flash.material.opacity = point;
         _kPortal.flash.scale.setScalar(P.radius * (0.35 + 1.4 * Math.max(flashOpen, flashClose * 0.6)));
-        _kPortal.haze.scale.setScalar(Math.max(0.001, P.radius * 1.35 * ring));
+        _kPortal.haze.scale.setScalar(Math.max(0.001, P.radius * 1.25 * ring));
         _kPortal.haze.material.opacity = 0.55 * ring;
         _kPortal.light.intensity = P.light.intensity * ring * (0.85 + 0.15 * Math.sin(t * 9)) + P.light.flash * Math.max(flashOpen, flashClose * 0.6);
         _kPortalPlaceCar(t);
@@ -6454,13 +6622,14 @@ let _worldSwitched = false;
           scene.remove(_kPortal.light);
           _kPortal.light.dispose();
         }
-        _kPortal.group = _kPortal.masked = _kPortal.rim = _kPortal.flash = _kPortal.haze = _kPortal.tunnel = _kPortal.unit = null;
+        _kPortal.group = _kPortal.masked = _kPortal.smoke = _kPortal.rimParticles = _kPortal.flash = _kPortal.haze = _kPortal.tunnel = _kPortal.unit = null;
         _kPortal.tunnelOut = _kPortal.wave = _kPortal.sparks = null;
         _kPortal.carCopy = _kPortal.light = null;
         _kPortal.carPairs = [];
         _kPortal.carMats = [];
         if (car) {
           car.position.x = _kPortal.grid.x;
+          car.position.y = _kPortal.grid.y;
           car.position.z = _kPortal.grid.z;
           car.visible = true;
           carState.angle = _kPortal.gridAngle;
@@ -6480,14 +6649,14 @@ let _worldSwitched = false;
         o.pos.copy(_kPortal.centre)
           .addScaledVector(fwd, _kIntroLerp(C.distFrom, C.distTo, e))
           .addScaledVector(R.out, C.side);
-        o.pos.y = R.surf + _kIntroLerp(C.heightFrom, C.heightTo, e);
+        o.pos.y = _kPortal.top + _kIntroLerp(C.heightFrom, C.heightTo, e);
         // Look: at the ring, turning toward the car while it comes out, back to the ring for the closing.
         const carP = _kPortalCarProgress(u * sec);
         _kPortalV.copy(_kPortal.start).lerp(_kPortal.grid, carP);
         const ahead = _kPortalV.clone().sub(_kPortal.centre).dot(fwd);
         const follow = ahead > 0 ? C.follow * Math.sin(Math.PI * Math.min(1, ahead / P.behindGrid * 2)) : 0;
         o.look.copy(_kPortal.centre);
-        o.look.y = R.surf + C.lookHeight;
+        o.look.y = _kPortal.top + C.lookHeight;
         o.look.x += (_kPortalV.x - o.look.x) * follow;
         o.look.z += (_kPortalV.z - o.look.z) * follow;
         o.fov = _kIntroLerp(C.fovFrom, C.fovTo, e);
