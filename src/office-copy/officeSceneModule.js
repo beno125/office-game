@@ -3324,20 +3324,43 @@ let _officeSceneAnimationFrame = 0;
        */
       function drawerRingReach(P) {
         const R = P.radius;
-        const Rmax = 1.1 * R; // its largest size: the build-up's swirl at the start / the burst's overshoot
         const S = P.smoke, Q = P.rimParticles, E = P.escape;
-        const smokeHalf = 0.5 * S.size[1] * 1.1 * 1.15; // a smoke sprite's visible half (size × its largest scale × billow)
-        const thick = 1.8 * S.thickness; // the smoke band's widest (in the build-up)
+        // Its rim over its whole sequence (the ring's own phases: the build-up's swirl, the burst's overshoot, the close):
+        // the smoke's and the rim particles' furthest at any moment, the largest smoke sprite, the opening's largest.
+        const ease = (a, b, x) => {
+          const k = Math.min(1, Math.max(0, (x - a) / (b - a)));
+          return k * k * (3 - 2 * k);
+        };
+        let smoke = 0, orbit = 0, half = 0, ringMax = 0;
+        for (let t = 0; t <= P.closeTo + P.flashSec * 1.6; t += DRAWER_RING_REACH_STEP) {
+          const build = ease(0, P.buildUp, t), gather = ease(P.buildUp, P.gatherEnd, t);
+          const bu = Math.min(1, Math.max(0, (t - P.gatherEnd) / (P.burstEnd - P.gatherEnd)));
+          const burst = bu <= 0 ? 0 : 1 + 2.2 * Math.pow(bu - 1, 3) + 1.2 * Math.pow(bu - 1, 2);
+          const close = ease(P.closeFrom, P.closeTo, t);
+          const ring = burst * (1 - close * close);
+          const rimR = t < P.buildUp ? R * (1.1 - 0.65 * build) : t < P.gatherEnd ? R * 0.45 * (1 - gather * gather) : R * ring;
+          const thick = S.thickness * (t < P.gatherEnd ? 0.6 + 1.2 * (1 - gather) : Math.max(0.2, ring));
+          const sizeK = t < P.gatherEnd ? 0.45 + 0.3 * build + 0.25 * gather : Math.max(0.35, Math.min(1.1, ring));
+          const h = 0.5 * S.size[1] * sizeK * 1.15; // a smoke sprite's half (its largest, fully billowed)
+          smoke = Math.max(smoke, rimR + thick + S.billow + h);
+          orbit = Math.max(orbit, rimR + thick * 0.9);
+          half = Math.max(half, h);
+          ringMax = Math.max(ringMax, ring);
+        }
+        const spread = E.distance * Math.tan((E.spreadDeg[1] * Math.PI) / 180); // the lines' cone, out there
         const side = Math.max(
-          Rmax + thick + S.billow + smokeHalf, // smoke
-          Rmax + thick * 0.9 + DRAWER_RING_GLOW, // rim particles' orbit (+ a point's glow)
-          1.1 * (P.tunnelRadius[1] * R + E.distance * Math.tan((E.spreadDeg[1] * Math.PI) / 180)), // lines out there
-          1.25 * Rmax, // haze
+          smoke, // smoke
+          orbit + DRAWER_RING_GLOW, // rim particles' orbit (+ a point's glow)
+          ringMax * (P.tunnelRadius[1] * R + spread) + DRAWER_RING_GLOW, // lines out there
+          R + spread + DRAWER_RING_GLOW, // the burst wave's lines
+          1.25 * R * ringMax, // haze
           0.5 * 1.75 * R, // flash
         );
-        const body = 0.5 * S.depth + Math.max(smokeHalf, Q.driftForward);
+        const body = 0.5 * S.depth + Math.max(half, Q.driftForward);
         return { side, body };
       }
+      /** drawerRingReach's time step through the sequence (s). */
+      const DRAWER_RING_REACH_STEP = 0.002;
       /** The glow round a spark / rim particle / an arc's half width (world units): kept inside its `maxReach` too. */
       const DRAWER_RING_GLOW = 0.05;
       let _drawerRing = null;
