@@ -21,6 +21,12 @@ export const BLOOM_SETTINGS = { strength: 0.22, radius: 0.55, threshold: 12, sof
  * BASE), so only marked materials are affected.
  */
 export const BLOOM_WEIGHT_ALPHA_BASE = 4;
+/**
+ * Bloom group marker (addBloomGroup): a material of the group writes
+ * GROUP_BASE + weight into the HDR image's alpha. The main bloom ignores these
+ * pixels (alpha at or above it), so the group glows only in its own pass.
+ */
+export const BLOOM_GROUP_ALPHA_BASE = 8;
 /** Emissive intensity for parts that should glow (comfortably above the threshold). */
 export const BLOOM_EMISSIVE = {
   /** The car's light bar (lightBar1 and its copies), in its own red. */
@@ -56,7 +62,9 @@ export function addThresholdBloom({ THREE, composer, afterPass, settings = BLOOM
       float v = max(texel.r, max(texel.g, texel.b));
       float alpha = smoothstep(luminosityThreshold, luminosityThreshold + smoothWidth, v);
       // Marked materials (alpha above the base) add their own share.
-      alpha = max(alpha, clamp(texel.a - ${BLOOM_WEIGHT_ALPHA_BASE.toFixed(1)}, 0.0, 1.0));
+      // (A bloom group's pixels, alpha >= the group base, glow in the group's own pass instead.)
+      float weighted = texel.a < ${BLOOM_GROUP_ALPHA_BASE.toFixed(1)} ? clamp(texel.a - ${BLOOM_WEIGHT_ALPHA_BASE.toFixed(1)}, 0.0, 1.0) : 0.0;
+      alpha = max(alpha, weighted);
       gl_FragColor = mix(vec4(defaultColor.rgb, defaultOpacity), vec4(texel.rgb, 1.0), alpha);
     }
   `;
@@ -71,6 +79,71 @@ export function addThresholdBloom({ THREE, composer, afterPass, settings = BLOOM
     pass,
     setEnabled(on) {
       pass.enabled = !!on;
+    },
+  };
+}
+
+/**
+ * A bloom of its own for a chosen set of materials (selective: nothing else
+ * feeds it), with its own strength, radius and soft threshold. One more
+ * UnrealBloomPass (a 5-level mip chain of separable Gaussian blurs on
+ * linear-filtered half-float targets, at `resolutionScale` of the drawing
+ * buffer, resized with the composer), added after `afterPass`. Mark the
+ * materials with `mark(material, weight)`. Their pixels glow by
+ * weight × smoothstep(threshold, threshold + knee, brightest channel), so the
+ * glow starts softly instead of at a hard cut.
+ * @returns {{ pass: UnrealBloomPass, mark(material, weight?): void, setThreshold(threshold, knee): void }}
+ */
+export function addBloomGroup({ THREE, composer, afterPass, settings }) {
+  const scale = settings.resolutionScale ?? 0.5;
+  const size = new THREE.Vector2();
+  composer.renderer.getDrawingBufferSize(size);
+  const pass = new UnrealBloomPass(
+    new THREE.Vector2(Math.max(2, size.x * scale), Math.max(2, size.y * scale)),
+    settings.strength,
+    settings.radius,
+    settings.threshold,
+  );
+  pass.highPassUniforms.smoothWidth.value = settings.knee ?? 0.5;
+  pass.materialHighPassFilter.fragmentShader = `
+    uniform sampler2D tDiffuse;
+    uniform vec3 defaultColor;
+    uniform float defaultOpacity;
+    uniform float luminosityThreshold;
+    uniform float smoothWidth;
+    varying vec2 vUv;
+    void main() {
+      vec4 texel = texture2D(tDiffuse, vUv);
+      // Only the group's own pixels (alpha at or above the group base).
+      float weight = texel.a >= ${BLOOM_GROUP_ALPHA_BASE.toFixed(1)} ? clamp(texel.a - ${BLOOM_GROUP_ALPHA_BASE.toFixed(1)}, 0.0, 1.0) : 0.0;
+      float v = max(texel.r, max(texel.g, texel.b));
+      float alpha = weight * smoothstep(luminosityThreshold, luminosityThreshold + smoothWidth, v);
+      gl_FragColor = mix(vec4(defaultColor.rgb, defaultOpacity), vec4(texel.rgb, 1.0), alpha);
+    }
+  `;
+  pass.materialHighPassFilter.needsUpdate = true;
+  const setSize = pass.setSize.bind(pass);
+  pass.setSize = (w, h) => setSize(Math.max(2, Math.round(w * scale)), Math.max(2, Math.round(h * scale)));
+  const passes = composer.passes;
+  const at = passes.indexOf(afterPass);
+  composer.insertPass(pass, at >= 0 ? at + 1 : 1);
+  return {
+    pass,
+    mark(material, weight = 1) {
+      if (!material) return;
+      const u = (material.userData.bloomGroupWeight = { value: weight });
+      appendFragment(
+        material,
+        "bloomGroup",
+        "uniform float uBloomGroupWeight;\n",
+        `gl_FragColor.a = ${BLOOM_GROUP_ALPHA_BASE.toFixed(1)} + clamp(uBloomGroupWeight, 0.0, 1.0);`,
+        { uBloomGroupWeight: u },
+      );
+    },
+    setThreshold(threshold, knee) {
+      pass.threshold = threshold;
+      pass.highPassUniforms.luminosityThreshold.value = threshold;
+      pass.highPassUniforms.smoothWidth.value = knee;
     },
   };
 }

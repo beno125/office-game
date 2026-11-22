@@ -32,7 +32,7 @@ import { SCENE_ROUTES, nextLevelPath } from "../game/sceneRoutes.js";
 import { createCinematicIntro, introEase, introEaseSine, introLerp } from "../game/cinematicIntro.js";
 import { startTransitionStrips, TRANSITION_STRIPS, TRANSITION_STRIP_COLORS } from "../game/transitionStrips.js";
 import { createCarLighting } from "../game/carLighting.js";
-import { addThresholdBloom, keepBelowBloomThreshold, setBloomWeight } from "../game/thresholdBloom.js";
+import { addBloomGroup, addThresholdBloom, keepBelowBloomThreshold, setBloomWeight } from "../game/thresholdBloom.js";
 import { createTouchDrive } from "../game/touch/touchDrive.js";
 import { createKitchenFood, trayFromMesh, addTrayShapes, KITCHEN_FOOD } from "./kitchenFood.js";
 import { createCameraDrag } from "../game/cameraDrag.js";
@@ -1340,6 +1340,24 @@ export function isKitchenSceneReady() {
       // Selective bloom by threshold (shared with the office): the cars' light bars
       // (lightBar1 and its copies, emissive 18) are the only parts above it.
       const kitchenBloom = addThresholdBloom({ THREE, composer: finalComposer, afterPass: renderScenePass });
+      /**
+       * A soft glow around the strip lights peselLight1..34 only: a bloom of their own (thresholdBloom.js addBloomGroup),
+       * after the main one, so nothing else glows more.
+       */
+      const PESEL_BLOOM = {
+        /** How strong the glow is (dark mode). */
+        strength: 0.5,
+        /** How far it spreads (0 tight → 1 wide; mixes the blur's mip levels). */
+        radius: 0.4,
+        /** Brightness (brightest colour channel, HDR) where the glow starts, and the soft knee above it (full glow at threshold + knee). */
+        threshold: 0.6,
+        knee: 0.9,
+        /** Bloom resolution vs. the drawing buffer (0.5 = half: smooth, and cheap). */
+        resolutionScale: 0.5,
+        /** Bright mode: the glow × this (the room is lit, the strips are plain white). */
+        brightModeScale: 0.35,
+      };
+      const peselBloom = addBloomGroup({ THREE, composer: finalComposer, afterPass: kitchenBloom.pass, settings: PESEL_BLOOM });
       // Slow-motion vignette (edge darkening): last, off unless a jump is slowed.
       const jumpVignettePass = new ShaderPass({
         uniforms: { tDiffuse: { value: null }, uStrength: { value: 0 } },
@@ -1789,6 +1807,7 @@ export function isKitchenSceneReady() {
             entry.darkIntensity +
             (entry.brightIntensity - entry.darkIntensity) * b;
         }
+        peselBloom.pass.strength = PESEL_BLOOM.strength * (1 + (PESEL_BLOOM.brightModeScale - 1) * b);
         for (let i = 0; i < _shelfDownLights.length; i++) {
           const entry = _shelfDownLights[i];
           if (!entry || !entry.light) continue;
@@ -12677,7 +12696,10 @@ let _worldSwitched = false;
                 const peselMatch = /^peselLight(\d+)$/.exec(n.name);
                 if (peselMatch) {
                   const idx = parseInt(peselMatch[1], 10);
-                  if (idx >= 1 && idx <= 34) _applyPeselStyleLight(n);
+                  if (idx >= 1 && idx <= 34) {
+                    _applyPeselStyleLight(n);
+                    peselBloom.mark(n.material); // their own soft glow (PESEL_BLOOM)
+                  }
                   return;
                 }
                 // A multi-material panel arrives as suffixed meshes (peselPink_1).
