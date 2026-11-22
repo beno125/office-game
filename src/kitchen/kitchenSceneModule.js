@@ -3989,17 +3989,17 @@ let _worldSwitched = false;
       // light for strong hits.
       const RAIL_SPARKS = {
         /** Pool size: the most sparks alive at once (the oldest is reused beyond it). */
-        max: 180,
+        max: 260,
         /** Hit: speed into the wall (units/s) below which nothing sparks, and the speed that gives the full burst. */
         impactThreshold: 1.5,
         impactFull: 12,
         /** Burst size: sparks at the threshold / at full. */
-        burstMin: 3,
-        burstMax: 26,
+        burstMin: 4,
+        burstMax: 32,
         /** Scrape: speed along the wall (units/s) below which nothing sparks, the speed for the full rate, and that rate (sparks/s). */
         scrapeThreshold: 2,
         scrapeFull: 14,
-        scrapeRate: 90,
+        scrapeRate: 110,
         /** Spark speed (units/s): soft / full contact (× a random 0.55–1). */
         speedMin: 1.6,
         speedMax: 6.5,
@@ -4010,18 +4010,28 @@ let _worldSwitched = false;
         spread: 0.55,
         /** Life (s): random within this range. */
         life: [0.18, 0.42],
+        /** Far sparks: this share of them is launched faster (speed × farSpeed, random within) and lives longer
+         *  (life × farLife), so they arc much farther; the rest stay close to the contact. */
+        farShare: 0.2,
+        farSpeed: [1.5, 2.4],
+        farLife: [1.8, 2.8],
+        /** Upward sparks: this share flies up instead, tilted from straight up by upAngle (degrees, random within),
+         *  leaning off the wall and back against the travel, at speed × upSpeed (random within). */
+        upShare: 0.25,
+        upAngle: [8, 40],
+        upSpeed: [0.9, 1.4],
         /** Gravity (units/s²), and the bounce on the table (share of vertical speed kept; sideways × 0.6). */
         gravity: 16,
         bounce: 0.3,
         /** Head size (world units at 1 unit away, perspective) and the streak's length (× velocity, seconds). */
-        size: 0.11,
+        size: 0.125,
         streak: 0.03,
         /** Colours (start → end of life) and brightness (HDR × colour; the streak at a share of it). */
         colorHot: 0xfff6d8,
         colorMid: 0xffc24a,
         colorEnd: 0xff6a1a,
-        brightness: 3.2,
-        streakBrightness: 0.45,
+        brightness: 3.8,
+        streakBrightness: 0.52,
         /** Contact height: this far below the rails' top (where a bumper meets them). */
         below: 0.2,
         /** Flash on strong hits: hit strength (0–1) it starts from, peak intensity, range (units), fade time (s), colour. */
@@ -4099,14 +4109,35 @@ let _worldSwitched = false;
         ensureRailSparks();
         const S = RAIL_SPARKS;
         const speed = S.speedMin + (S.speedMax - S.speedMin) * strength;
+        const rr = (r) => r[0] + (r[1] - r[0]) * Math.random();
         for (let k = 0; k < count; k++) {
           const i = _rsNext;
           _rsNext = (_rsNext + 1) % _rsN;
-          let dx = nx * S.dirWall + bx * S.dirBack + (Math.random() * 2 - 1) * S.spread;
-          let dy = S.dirUp + (Math.random() * 2 - 1) * S.spread * 0.8;
-          let dz = nz * S.dirWall + bz * S.dirBack + (Math.random() * 2 - 1) * S.spread;
+          let dx, dy, dz;
+          let speedMul = 1, lifeMul = 1;
+          const kind = Math.random();
+          if (kind < S.upShare) {
+            // Upward: tilted from straight up, toward off the wall / back against the travel (and a little sideways).
+            const tilt = THREE.MathUtils.degToRad(rr(S.upAngle));
+            let hx = nx * S.dirWall + bx * S.dirBack + (Math.random() * 2 - 1) * S.spread;
+            let hz = nz * S.dirWall + bz * S.dirBack + (Math.random() * 2 - 1) * S.spread;
+            const hl = Math.hypot(hx, hz) || 1;
+            dx = (hx / hl) * Math.sin(tilt);
+            dy = Math.cos(tilt);
+            dz = (hz / hl) * Math.sin(tilt);
+            speedMul = rr(S.upSpeed);
+          } else {
+            dx = nx * S.dirWall + bx * S.dirBack + (Math.random() * 2 - 1) * S.spread;
+            dy = S.dirUp + (Math.random() * 2 - 1) * S.spread * 0.8;
+            dz = nz * S.dirWall + bz * S.dirBack + (Math.random() * 2 - 1) * S.spread;
+          }
+          if (Math.random() < S.farShare) {
+            // A far one: faster and longer lived (it arcs much farther).
+            speedMul *= rr(S.farSpeed);
+            lifeMul = rr(S.farLife);
+          }
           const l = Math.hypot(dx, dy, dz) || 1;
-          const v = speed * (0.55 + 0.45 * Math.random()) / l;
+          const v = speed * speedMul * (0.55 + 0.45 * Math.random()) / l;
           _rsPos[i * 3] = x;
           _rsPos[i * 3 + 1] = y;
           _rsPos[i * 3 + 2] = z;
@@ -4114,7 +4145,7 @@ let _worldSwitched = false;
           _rsVel[i * 3 + 1] = dy * v;
           _rsVel[i * 3 + 2] = dz * v;
           _rsAge[i] = 0;
-          _rsLife[i] = S.life[0] + (S.life[1] - S.life[0]) * Math.random();
+          _rsLife[i] = (S.life[0] + (S.life[1] - S.life[0]) * Math.random()) * lifeMul;
         }
       }
 
