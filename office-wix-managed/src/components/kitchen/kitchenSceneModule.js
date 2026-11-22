@@ -8172,6 +8172,10 @@ let _worldSwitched = false;
       const TRASH_FX_Y_OFFSET = -1.25;
       /** The glow sits this far above the plane's top surface (+ polygonOffset), so it never z-fights. */
       const TRASH_FX_SURFACE_LIFT = 0.004;
+      /** Draw order for the fire parts that sit behind the bin signs (translucent, renderOrder 2, no depth writes):
+       *  drawn before a sign, the sign tints them. The rest of the fire draws after the signs (TRASH_FX_FRONT_ORDER). */
+      const TRASH_FX_BEHIND_ORDER = 1.5;
+      const TRASH_FX_FRONT_ORDER = 6;
       const TRASH_FX = {
         /** Particles per hole (at full strength): flames + embers (a share of them), spawned over this part of the floor (× the smaller half size). */
         count: 520,
@@ -8262,13 +8266,15 @@ let _worldSwitched = false;
       // The particles arrive placed (CPU simulation): the shader sizes and colours them.
       const _trashFxVertex = `
         attribute vec4 aInfo; // life (0 → 1, < 0 = not alive), ember, size, seed
+        attribute float aBehind; // 1 = behind a bin sign from the camera
+        uniform float uPass; // which particles this copy draws: 1 = behind a sign, 0 = the rest
         uniform float uSize;
         uniform float uHeat;
         varying float vLife;
         varying float vHeat;
         varying float vEmber;
         void main() {
-          float life = aInfo.x;
+          float life = abs(aBehind - uPass) < 0.5 ? aInfo.x : -1.0; // the other copy draws it
           float ember = aInfo.y;
           vec4 mv = modelViewMatrix * vec4(position, 1.0);
           gl_Position = projectionMatrix * mv;
@@ -8349,6 +8355,7 @@ let _worldSwitched = false;
           seed: new Float32Array(n),
         };
         const info = new Float32Array(n * 4); // life, ember, size, seed
+        const behind = new Float32Array(n); // 1 = behind a bin sign from the camera
         for (let i = 0; i < n; i++) {
           const ember = Math.random() < TRASH_FX.emberShare;
           const [sMin, sMax] = ember ? TRASH_FX.emberSizeRange : TRASH_FX.flameSizeRange;
@@ -8365,33 +8372,43 @@ let _worldSwitched = false;
         const infoAttr = new THREE.BufferAttribute(info, 4).setUsage(THREE.DynamicDrawUsage);
         geo.setAttribute("position", posAttr);
         geo.setAttribute("aInfo", infoAttr);
+        const behindAttr = new THREE.BufferAttribute(behind, 1).setUsage(THREE.DynamicDrawUsage);
+        geo.setAttribute("aBehind", behindAttr);
         const cars = Array.from({ length: TRASH_FX_MAX_CARS }, () => new THREE.Vector4()); // x, z, strength, radius (floor glow)
         const uCars = { value: cars };
-        const mat = new THREE.ShaderMaterial({
-          transparent: true,
-          depthWrite: false,
-          depthTest: true,
-          blending: THREE.AdditiveBlending,
-          toneMapped: false,
-          uniforms: {
-            uScale: _trashFxShared.uScale,
-            uSize: { value: TRASH_FX.flameSize },
-            uHeat: { value: TRASH_FX.idleHeat },
-            uCore: { value: new THREE.Color(colors.core) },
-            uMid: { value: new THREE.Color(colors.mid) },
-            uTip: { value: new THREE.Color(colors.tip) },
-            uGlowFx: { value: new THREE.Vector2(TRASH_FX.glowStrength, TRASH_FX.hotCore) },
-          },
-          vertexShader: _trashFxVertex,
-          fragmentShader: _trashFxFragment,
-        });
-        const points = new THREE.Points(geo, mat);
-        points.name = "trashFxFire";
-        points.visible = false;
-        points.frustumCulled = false; // particles fly after the cars: no fixed bounds
-        points.renderOrder = 6;
-        points.layers.enable(CAR_LIGHTS_BLOOM_LAYER);
-        scene.add(points);
+        const uniforms = {
+          uScale: _trashFxShared.uScale,
+          uSize: { value: TRASH_FX.flameSize },
+          uHeat: { value: TRASH_FX.idleHeat },
+          uCore: { value: new THREE.Color(colors.core) },
+          uMid: { value: new THREE.Color(colors.mid) },
+          uTip: { value: new THREE.Color(colors.tip) },
+          uGlowFx: { value: new THREE.Vector2(TRASH_FX.glowStrength, TRASH_FX.hotCore) },
+        };
+        // Two copies of the particles (one geometry, shared uniforms): the ones behind a bin sign draw before it, the rest after.
+        const makePoints = (pass, order, name) => {
+          const m = new THREE.ShaderMaterial({
+            transparent: true,
+            depthWrite: false,
+            depthTest: true,
+            blending: THREE.AdditiveBlending,
+            toneMapped: false,
+            uniforms: { ...uniforms, uPass: { value: pass } },
+            vertexShader: _trashFxVertex,
+            fragmentShader: _trashFxFragment,
+          });
+          const pts = new THREE.Points(geo, m);
+          pts.name = name;
+          pts.visible = false;
+          pts.frustumCulled = false; // particles fly after the cars: no fixed bounds
+          pts.renderOrder = order;
+          pts.layers.enable(CAR_LIGHTS_BLOOM_LAYER);
+          scene.add(pts);
+          return pts;
+        };
+        const points = makePoints(0, TRASH_FX_FRONT_ORDER, "trashFxFire");
+        const pointsBehind = makePoints(1, TRASH_FX_BEHIND_ORDER, "trashFxFireBehind");
+        const mat = points.material; // (uniforms shared with pointsBehind)
 
         // The glow on the floor (under the flames, soft edges).
         const glowMat = new THREE.ShaderMaterial({
@@ -8419,14 +8436,14 @@ let _worldSwitched = false;
         const glow = new THREE.Mesh(_trashFxGlowGeo, glowMat);
         glow.name = "trashFxGlow";
         glow.visible = false;
-        glow.renderOrder = 5;
+        glow.renderOrder = TRASH_FX_BEHIND_ORDER; // in the hole, under the table top: always behind a sign, so before it
         glow.layers.enable(CAR_LIGHTS_BLOOM_LAYER);
         scene.add(glow);
         // Always in the scene (intensity 0 when off), so the light count never changes (no shader recompiles).
         const light = new THREE.PointLight(colors.mid, 0, TRASH_FX.lightRange, TRASH_FX.lightDecay);
         scene.add(light);
         const fx = {
-          points, glow, light, mat, glowMat, cars, sim, info, posAttr, infoAttr,
+          points, pointsBehind, glow, light, mat, glowMat, cars, sim, info, posAttr, infoAttr, behind, behindAttr,
           carState: new Map(),
           plane: null,
           radius: 1,
@@ -8504,17 +8521,116 @@ let _worldSwitched = false;
         for (const fx of _trashFxList) {
           const show = on && !!fx.plane;
           fx.points.visible = show;
+          fx.pointsBehind.visible = show;
           fx.glow.visible = show;
           if (!show) fx.light.intensity = 0;
         }
       }
 
-      /** Forget the placed holes (the level is being torn down). */
+      // The bin signs: translucent and knockable (they move). Each frame the line from the camera to each particle is
+      // tested against their triangles (in the sign's own space), to know which particles they hide.
+      const _trashFxOccluders = []; // { mesh, tris (local, 9 floats each), box (local), inv, cam (local) }
+      function addTrashFxOccluder(mesh) {
+        const g = mesh.geometry;
+        if (!g || !g.attributes.position || _trashFxOccluders.some((o) => o.mesh === mesh)) return;
+        if (!g.boundingBox) g.computeBoundingBox();
+        const pos = g.attributes.position;
+        const idx = g.index;
+        const triCount = idx ? idx.count / 3 : pos.count / 3;
+        const tris = new Float32Array(triCount * 9);
+        for (let t = 0; t < triCount; t++) {
+          for (let v = 0; v < 3; v++) {
+            const k = idx ? idx.getX(t * 3 + v) : t * 3 + v;
+            tris[t * 9 + v * 3] = pos.getX(k);
+            tris[t * 9 + v * 3 + 1] = pos.getY(k);
+            tris[t * 9 + v * 3 + 2] = pos.getZ(k);
+          }
+        }
+        _trashFxOccluders.push({ mesh, tris, box: g.boundingBox.clone(), inv: new THREE.Matrix4(), cam: new THREE.Vector3(), on: false });
+      }
+      /** Once a frame: each sign's inverse matrix and the camera in its space. */
+      function prepareTrashFxOccluders() {
+        const cx = camera.matrixWorld.elements[12];
+        const cy = camera.matrixWorld.elements[13];
+        const cz = camera.matrixWorld.elements[14];
+        for (const o of _trashFxOccluders) {
+          o.on = o.mesh.visible && !!o.mesh.parent;
+          if (!o.on) continue;
+          o.inv.copy(o.mesh.matrixWorld).invert();
+          o.cam.set(cx, cy, cz).applyMatrix4(o.inv);
+        }
+      }
+      const _trashFxSlab = new Float32Array(2); // the segment's [enter, exit] inside a box (0 → 1)
+      /** Clips the segment's range to one axis of a box; false once it misses. */
+      function trashFxSlab(orig, dir, mn, mx) {
+        if (Math.abs(dir) < 1e-9) return orig >= mn && orig <= mx;
+        let ta = (mn - orig) / dir;
+        let tb = (mx - orig) / dir;
+        if (ta > tb) {
+          const tmp = ta;
+          ta = tb;
+          tb = tmp;
+        }
+        if (ta > _trashFxSlab[0]) _trashFxSlab[0] = ta;
+        if (tb < _trashFxSlab[1]) _trashFxSlab[1] = tb;
+        return _trashFxSlab[0] <= _trashFxSlab[1];
+      }
+      /** Is the world point (x, y, z) hidden from the camera by a bin sign? */
+      function trashFxBehindSign(x, y, z) {
+        for (let n = 0; n < _trashFxOccluders.length; n++) {
+          const o = _trashFxOccluders[n];
+          if (!o.on) continue;
+          const e = o.inv.elements;
+          // The point in the sign's space; the segment camera → point.
+          const px = e[0] * x + e[4] * y + e[8] * z + e[12];
+          const py = e[1] * x + e[5] * y + e[9] * z + e[13];
+          const pz = e[2] * x + e[6] * y + e[10] * z + e[14];
+          const ox = o.cam.x;
+          const oy = o.cam.y;
+          const oz = o.cam.z;
+          const dx = px - ox;
+          const dy = py - oy;
+          const dz = pz - oz;
+          // Quick reject: does the segment reach the sign's bounding box at all?
+          const b = o.box;
+          _trashFxSlab[0] = 0;
+          _trashFxSlab[1] = 1;
+          if (
+            !trashFxSlab(ox, dx, b.min.x, b.max.x) ||
+            !trashFxSlab(oy, dy, b.min.y, b.max.y) ||
+            !trashFxSlab(oz, dz, b.min.z, b.max.z)
+          )
+            continue;
+          // Segment vs each triangle (Möller–Trumbore), a hit strictly between the camera and the point.
+          const tr = o.tris;
+          for (let t = 0; t < tr.length; t += 9) {
+            const ax = tr[t], ay = tr[t + 1], az = tr[t + 2];
+            const e1x = tr[t + 3] - ax, e1y = tr[t + 4] - ay, e1z = tr[t + 5] - az;
+            const e2x = tr[t + 6] - ax, e2y = tr[t + 7] - ay, e2z = tr[t + 8] - az;
+            const hx = dy * e2z - dz * e2y, hy = dz * e2x - dx * e2z, hz = dx * e2y - dy * e2x;
+            const det = e1x * hx + e1y * hy + e1z * hz;
+            if (Math.abs(det) < 1e-12) continue;
+            const inv = 1 / det;
+            const sx = ox - ax, sy = oy - ay, sz = oz - az;
+            const u = (sx * hx + sy * hy + sz * hz) * inv;
+            if (u < 0 || u > 1) continue;
+            const qx = sy * e1z - sz * e1y, qy = sz * e1x - sx * e1z, qz = sx * e1y - sy * e1x;
+            const v = (dx * qx + dy * qy + dz * qz) * inv;
+            if (v < 0 || u + v > 1) continue;
+            const hit = (e2x * qx + e2y * qy + e2z * qz) * inv;
+            if (hit > 0.001 && hit < 0.999) return true;
+          }
+        }
+        return false;
+      }
+
+      /** Forget the placed holes and the signs (the level is being torn down). */
       function resetTrashFx() {
         for (const fx of _trashFxList) {
           fx.plane = null;
           fx.carState.clear();
         }
+        _trashFxOccluders.length = 0;
         setTrashFxVisible(false);
       }
 
@@ -8820,12 +8936,14 @@ let _worldSwitched = false;
           s.pos[i3 + 1] = py + s.vel[i3 + 1] * dt;
           s.pos[i3 + 2] = pz + (s.vel[i3 + 2] + Math.cos(t * (2.3 + seed) + seed * 3) * sway) * dt;
           fx.info[i4] = life01;
+          fx.behind[i] = trashFxBehindSign(s.pos[i3], s.pos[i3 + 1], s.pos[i3 + 2]) ? 1 : 0;
           sumX += s.pos[i3];
           sumZ += s.pos[i3 + 2];
           alive++;
         }
         fx.posAttr.needsUpdate = true;
         fx.infoAttr.needsUpdate = true;
+        fx.behindAttr.needsUpdate = true;
         // The light follows the particles' centre (a share of its offset, clamped).
         let lx = 0;
         let lz = 0;
@@ -8864,6 +8982,7 @@ let _worldSwitched = false;
           _trashFxCarPts[carCount * 3 + 2] = p.z;
           carCount++;
         }
+        prepareTrashFxOccluders();
         for (let f = 0; f < _trashFxList.length; f++) {
           const fx = _trashFxList[f];
           const plane = fx.plane;
@@ -11933,6 +12052,7 @@ let _worldSwitched = false;
                   n.material = _binSign1PlasticMat;
                 }
                 n.renderOrder = 2;
+                addTrashFxOccluder(n); // the trash fires draw the parts behind it before it
                 return;
               }
               if (n.name === "coffeeScreen") {
