@@ -24,7 +24,7 @@ import { createCameraDrag } from "../game/cameraDrag.js";
 import { createCarLighting } from "../game/carLighting.js";
 import { createTouchDrive } from "../game/touch/touchDrive.js";
 import { addThresholdBloom, BLOOM_EMISSIVE, setBloomWeight } from "../game/thresholdBloom.js";
-import { createSubDimensionPortal, SUB_DIMENSION_LOOK } from "../game/subDimensionPortal.js";
+import { createPortalRing, PORTAL_RING_DEFAULTS } from "../game/portalRing.js";
 
 const _OFFICE_BASE = `${import.meta.env.BASE_URL}office-scene-optimized/`;
 function officeAsset(relativePath) {
@@ -3275,71 +3275,24 @@ let _officeSceneAnimationFrame = 0;
       let _drawerEffectMesh = null;
       const DRAWER_PORTAL_HEIGHT = 3;
       /**
-       * The drawer's gateway to the Kitchen: the Kitchen intro portal's sub-dimensional look (subDimensionPortal.js,
-       * shared with that shot) as an opening in the drawer's floor, shaped like it (a rounded rectangle inset from
-       * its inner walls), its tunnel going down through the desk, its streaks / sparks / smoke rising out of it.
-       * It follows the drawer's own sequence: it opens as the drawer finishes opening (openTime) and collapses as it
-       * closes (the drawer's 0.22 s fade).
+       * The drawer's ring: the Kitchen intro's portal ring (portalRing.js, the same source and settings as that
+       * shot), lying in the drawer facing up, with its lines flowing the other way (flow −1: sucked into the ring
+       * instead of flying out of it). Its sequence starts when the drawer is open (the Kitchen's times: the air
+       * charges, gathers, the flash, the burst, the tunnel); while the drawer stays open it holds at `openHold`
+       * (open, after the burst); as the drawer closes, its collapse and closing flash play within the drawer's
+       * slide (`closeTime`), so they finish before the drawer is shut.
        */
-      const DRAWER_GATEWAY = {
-        /** Colours and glow: the Kitchen portal's (tunnel near / deep / core, light colour, streak palette); override here. */
-        look: { ...SUB_DIMENSION_LOOK },
-        /** Overall intensity (× glow, smoke, flash, haze) and animation speed (× time: streaks, smoke, spin, bands). */
-        intensity: 1,
-        speed: 1,
-        /** Distortion: the walls' turning bands (0 = none, Kitchen 0.15), and the smoke's noise / billow (in `smoke`). */
-        wallBands: 0.15,
-        /** Opening: inset from the drawer's inner walls (world units), squareness (2 = ellipse, higher = squarer). */
-        inset: 0.55,
-        squareness: 4,
-        /** Seconds for it to open (its tunnel deepens, the smoke and streaks come in), from when the drawer is open. */
-        openTime: 1.2,
-        /** The opening's flash as it opens (× intensity). */
-        flash: 0.9,
-        stencilBit: 2,
-        /** The tunnel (world units): depth; streaks: count, share of the opening, length / width, speed (units/s). */
-        tunnelDepth: 14,
-        tunnelStreaks: 150,
-        tunnelRadius: [0.15, 0.92],
-        tunnelLen: [0.6, 1.8],
-        tunnelWidth: [0.018, 0.04],
-        tunnelSpeed: [7, 13],
-        rimSpin: 0.55,
-        /** The rim of coloured smoke (the Kitchen's): its noiseScale / noiseSpeed / billow are the "distortion". */
-        smoke: { count: 150, size: [0.55, 0.95], thickness: 0.24, depth: 0.42, billow: 0.12, billowSpeed: [0.6, 1.4], alpha: 0.5, noiseScale: 2.6, noiseSpeed: 0.35, glow: 1.15, innerGlow: 0.9 },
-        rimParticles: { count: 120, driftShare: 0.35, size: [2.5, 6], life: [0.9, 1.8], driftOut: 0.9, driftForward: 0.5 },
-        /** Streaks that carry on up out of the opening (world units, cone, share of lines while open, from when). */
-        escape: { distance: 6, spreadDeg: [1.5, 9], decel: 0.06, fadeStart: 0.45, steady: 0.3, burst: 1, burstWidth: 0.2, from: 0.3 },
-        /** The opening's burst wave (count, speed), at this time (s). */
-        wave: { count: 70, speed: [6, 11] },
-        waveAt: 0.35,
-        sparks: { count: 70, life: [0.7, 1.4], speedOut: [1.2, 2.8], speedSide: [0.2, 1.0], size: [3, 7] },
+      const DRAWER_RING = {
+        ...PORTAL_RING_DEFAULTS,
+        flow: -1,
+        /** Kept from the drawer's inner walls (beyond the smoke's outer edge), and the opening's height above its floor. */
+        margin: 0.12,
+        lift: 0.6,
+        openHold: 2.6,
+        closeTime: 0.5,
       };
-      let _drawerGateway = null;
+      let _drawerRing = null;
       let _drawerPortalPointLight = null;
-      const DRAWER_PORTAL_BOLT_COUNT = 14;
-      const DRAWER_PORTAL_BOLT_SEGMENTS = 10;
-      const DRAWER_PORTAL_ELECTRIC_HEIGHT = 8;
-      const _drawerPortalBoltAngles = new Float32Array(
-        DRAWER_PORTAL_BOLT_COUNT,
-      );
-      const _drawerPortalBoltStartY = new Float32Array(
-        DRAWER_PORTAL_BOLT_COUNT,
-      );
-      const _drawerPortalBoltLengths = new Float32Array(
-        DRAWER_PORTAL_BOLT_COUNT,
-      );
-      const _drawerPortalBoltRadii = new Float32Array(
-        DRAWER_PORTAL_BOLT_COUNT,
-      );
-      const _drawerPortalBoltNextFlash = new Float32Array(
-        DRAWER_PORTAL_BOLT_COUNT,
-      );
-      const _drawerPortalBoltActive = new Uint8Array(
-        DRAWER_PORTAL_BOLT_COUNT,
-      );
-      let _drawerPortalElectricity = null;
-      let _drawerPortalElectricGlow = null;
       let _drawerPortalArrow = null;
       const _drawerPortalArrowMaterials = [];
       let _drawerPortalStartMs = 0;
@@ -7653,138 +7606,9 @@ let _officeSceneAnimationFrame = 0;
       }
 
       function setupDrawerPortalEffect() {
-        if (!_drawerEffectMesh || _drawerGateway) return;
+        if (!_drawerEffectMesh || _drawerRing) return;
         _drawerEffectMesh.position.z += 0.6;
 
-        _drawerPortalPointLight = new THREE.PointLight(
-          DRAWER_GATEWAY.look.lightColor, // the portal's violet (the Kitchen portal's light)
-          0,
-          52,
-          1.65,
-        );
-        _drawerPortalPointLight.name = "drawerPortalPointLight";
-        _drawerPortalPointLight.position.set(0, 4.5, 0);
-        _drawerPortalPointLight.castShadow = false;
-        _drawerEffectMesh.add(_drawerPortalPointLight);
-
-        const boltPositions = new Float32Array(
-          DRAWER_PORTAL_BOLT_COUNT *
-            DRAWER_PORTAL_BOLT_SEGMENTS *
-            2 *
-            3,
-        );
-        const boltColors = new Float32Array(boltPositions.length);
-        // The Kitchen portal's arcs: a white-hot blue and the transition palette.
-        const electricityColors = [
-          new THREE.Color(DRAWER_GATEWAY.look.arcLightColor),
-          ...DRAWER_GATEWAY.look.palette.map((c) => new THREE.Color(c)),
-        ];
-        let boltVertex = 0;
-        for (let bolt = 0; bolt < DRAWER_PORTAL_BOLT_COUNT; bolt++) {
-          _drawerPortalBoltAngles[bolt] = Math.random() * Math.PI * 2;
-          _drawerPortalBoltStartY[bolt] =
-            Math.random() * DRAWER_PORTAL_ELECTRIC_HEIGHT;
-          _drawerPortalBoltLengths[bolt] = 0.35 + Math.random() * 1.55;
-          _drawerPortalBoltRadii[bolt] = 1 + Math.random() * 1.3;
-          _drawerPortalBoltNextFlash[bolt] = Math.random() * 0.5;
-          _drawerPortalBoltActive[bolt] = 0;
-          const color = electricityColors[
-            bolt % electricityColors.length
-          ].clone();
-          color.multiplyScalar(1.8);
-          for (
-            let segment = 0;
-            segment < DRAWER_PORTAL_BOLT_SEGMENTS;
-            segment++
-          ) {
-            for (let end = 0; end < 2; end++) {
-              boltColors[boltVertex * 3] = color.r;
-              boltColors[boltVertex * 3 + 1] = color.g;
-              boltColors[boltVertex * 3 + 2] = color.b;
-              boltVertex++;
-            }
-          }
-        }
-        const boltGeometry = new THREE.BufferGeometry();
-        boltGeometry.setAttribute(
-          "position",
-          new THREE.BufferAttribute(boltPositions, 3),
-        );
-        boltGeometry.setAttribute(
-          "color",
-          new THREE.BufferAttribute(boltColors, 3),
-        );
-        const boltMaterial = new THREE.LineBasicMaterial({
-          vertexColors: true,
-          transparent: true,
-          opacity: 0,
-          blending: THREE.AdditiveBlending,
-          depthWrite: false,
-          depthTest: true,
-          toneMapped: false,
-        });
-        _drawerPortalElectricity = new THREE.LineSegments(
-          boltGeometry,
-          boltMaterial,
-        );
-        _drawerPortalElectricity.name = "drawerPortalElectricity";
-        _drawerPortalElectricity.frustumCulled = false;
-        _drawerPortalElectricity.renderOrder = 100;
-        _drawerPortalElectricity.layers.enable(CAR_LIGHTS_BLOOM_LAYER);
-        _drawerEffectMesh.add(_drawerPortalElectricity);
-
-        const electricGlowMaterial = new THREE.ShaderMaterial({
-          uniforms: {
-            uOpacity: { value: 0 },
-            uSize: { value: 270 },
-          },
-          vertexShader: `
-            attribute vec3 color;
-            varying vec3 vColor;
-            uniform float uSize;
-            void main() {
-              vColor = color;
-              vec4 mv = modelViewMatrix * vec4(position, 1.0);
-              gl_Position = projectionMatrix * mv;
-              gl_PointSize = min(
-                uSize / max(0.1, -mv.z),
-                110.0
-              );
-            }
-          `,
-          fragmentShader: `
-            precision highp float;
-            varying vec3 vColor;
-            uniform float uOpacity;
-            void main() {
-              vec2 p = gl_PointCoord - 0.5;
-              float d = length(p) * 2.0;
-              float core = exp(-d * d * 18.0);
-              float glow = exp(-d * d * 2.1);
-              float wideGlow = exp(-d * d * 0.72);
-              float alpha =
-                (core * 0.7 + glow * 0.22 + wideGlow * 0.075) * uOpacity;
-              alpha *= 1.0 - smoothstep(0.82, 1.0, d);
-              if (alpha < 0.006) discard;
-              vec3 electricBlue = mix(vColor, vec3(0.12, 0.32, 1.0), core);
-              gl_FragColor = vec4(electricBlue * (0.8 + core * 1.6), alpha);
-            }
-          `,
-          transparent: true,
-          blending: THREE.AdditiveBlending,
-          depthWrite: false,
-          depthTest: true,
-          toneMapped: false,
-        });
-        _drawerPortalElectricGlow = new THREE.Points(
-          boltGeometry,
-          electricGlowMaterial,
-        );
-        _drawerPortalElectricGlow.name = "drawerPortalElectricGlow";
-        _drawerPortalElectricGlow.frustumCulled = false;
-        _drawerPortalElectricGlow.renderOrder = 101;
-        _drawerPortalElectricGlow.layers.enable(CAR_LIGHTS_BLOOM_LAYER);
-        _drawerEffectMesh.add(_drawerPortalElectricGlow);
 
         _drawerPortalArrow = new THREE.Group();
         _drawerPortalArrow.name = "drawerPortalDownArrow";
@@ -7892,9 +7716,9 @@ let _officeSceneAnimationFrame = 0;
         });
         _drawerEffectMesh.add(_drawerPortalArrow);
 
-        // The gateway: an opening in the drawer's floor, fitted to its inside (found from the drawer's own mesh).
+        // The ring: lying in the drawer facing up, fitted to its inside (found from the drawer's own mesh).
         {
-          const G = DRAWER_GATEWAY;
+          const R = DRAWER_RING;
           const drawer = drawerGroup && drawerGroup.getObjectByName("drawer");
           const box = new THREE.Box3().setFromObject(drawer || _drawerEffectMesh);
           const c = box.getCenter(new THREE.Vector3());
@@ -7911,17 +7735,42 @@ let _officeSceneAnimationFrame = 0;
           const xr = cast(mid, new THREE.Vector3(1, 0, 0), (box.max.x - box.min.x) / 2);
           const zb = cast(mid, new THREE.Vector3(0, 0, -1), (box.max.z - box.min.z) / 2);
           const zf = cast(mid, new THREE.Vector3(0, 0, 1), (box.max.z - box.min.z) / 2);
-          const centre = new THREE.Vector3(c.x + (xr - xl) / 2, floorY + 0.015, c.z + (zf - zb) / 2);
-          _drawerGateway = createSubDimensionPortal(THREE, {
-            ...G,
-            halfX: Math.max(0.5, (xl + xr) / 2 - G.inset),
-            halfY: Math.max(0.5, (zb + zf) / 2 - G.inset),
-          });
-          const gate = _drawerGateway.group;
+          // Its radius: the smoke's outer edge (ring + thickness + billow + half a sprite) inside the inner walls.
+          const S = R.smoke;
+          const radius = Math.max(0.6, Math.min((xl + xr) / 2, (zb + zf) / 2) - (S.thickness + S.billow + S.size[1] * 0.5) - R.margin);
+          const centre = new THREE.Vector3(c.x + (xr - xl) / 2, floorY + R.lift, c.z + (zf - zb) / 2);
           _drawerEffectMesh.updateMatrixWorld(true);
-          gate.position.copy(_drawerEffectMesh.worldToLocal(centre));
-          gate.rotation.x = -Math.PI / 2; // its out (local +z) is up
-          _drawerEffectMesh.add(gate);
+          const local = _drawerEffectMesh.worldToLocal(centre.clone());
+          const ringGroupWorld = new THREE.Vector3();
+          const ringQuat = new THREE.Quaternion();
+          _drawerRing = createPortalRing(THREE, {
+            P: { ...R, radius },
+            scene,
+            parent: _drawerEffectMesh, // it moves with the drawer
+            localCentre: local,
+            localFwd: new THREE.Vector3(0, 1, 0), // facing up
+            centre,
+            fwd: new THREE.Vector3(0, 1, 0),
+            floorY,
+            stencilBit: 2,
+            flow: R.flow,
+            getCamera: () => camera,
+            // Its arcs follow the ring as the drawer slides: centre, out axis and in-plane axes in world space.
+            getFrame: (cOut, fOut, uOut, vOut) => {
+              const g = _drawerRing.group;
+              g.updateWorldMatrix(true, false);
+              g.getWorldPosition(ringGroupWorld);
+              g.getWorldQuaternion(ringQuat);
+              cOut.copy(ringGroupWorld);
+              fOut.set(0, 0, 1).applyQuaternion(ringQuat);
+              uOut.set(1, 0, 0).applyQuaternion(ringQuat);
+              vOut.set(0, 1, 0).applyQuaternion(ringQuat);
+            },
+          });
+          // Its light is the drawer's portal light (kept on the drawer: the scene's light count never changes).
+          _drawerPortalPointLight = _drawerRing.light;
+          _drawerPortalPointLight.name = "drawerPortalPointLight";
+          _drawerRing.arcs.mesh.visible = false;
         }
         // The drawer's own effect plane only carries the effect now (not drawn itself).
         _drawerEffectMesh.material = new THREE.MeshBasicMaterial({ visible: false });
@@ -7947,17 +7796,10 @@ let _officeSceneAnimationFrame = 0;
         }
         _drawerEffectMesh.visible = true;
         _drawerPortalStartMs = performance.now();
-        if (_drawerGateway) _drawerGateway.update({ time: 0, open: 0, close: 0 });
-        if (_drawerPortalPointLight) {
-          _drawerPortalPointLight.intensity = 0;
-        }
-        if (_drawerPortalElectricity) {
-          _drawerPortalElectricity.material.opacity = 0;
-          _drawerPortalElectricGlow.material.uniforms.uOpacity.value = 0;
-          for (let bolt = 0; bolt < DRAWER_PORTAL_BOLT_COUNT; bolt++) {
-            _drawerPortalBoltActive[bolt] = 0;
-            _drawerPortalBoltNextFlash[bolt] = Math.random() * 0.45;
-          }
+        if (_drawerRing) {
+          _drawerRing.reset();
+          _drawerRing.arcs.mesh.visible = true;
+          _drawerRing.tick(0);
         }
         for (let i = 0; i < _drawerPortalArrowMaterials.length; i++) {
           _drawerPortalArrowMaterials[i].opacity = 0;
@@ -7975,123 +7817,15 @@ let _officeSceneAnimationFrame = 0;
         const fadeOutTime =
           (performance.now() - _drawerPortalFadeOutStartMs) / 1000;
         const isFadingOut = _drawerState === "closing";
-        // The gateway: opens over openTime once the drawer is open, collapses over the drawer's 0.22 s fade as it closes.
-        if (_drawerGateway) {
-          _drawerGateway.update({
-            time: portalTime,
-            open: THREE.MathUtils.smoothstep(portalTime, 0, DRAWER_GATEWAY.openTime),
-            close: isFadingOut ? THREE.MathUtils.smoothstep(fadeOutTime, 0, 0.22) : 0,
-          });
-        }
-        if (_drawerPortalPointLight) {
-          const lightFade = isFadingOut
-            ? 1 - THREE.MathUtils.smoothstep(fadeOutTime, 0, 0.22)
-            : THREE.MathUtils.smoothstep(portalTime, 0.05, 0.9);
-          const lightPulse =
-            0.88 +
-            Math.sin(portalTime * 3.4) * 0.08 +
-            Math.sin(portalTime * 8.7) * 0.04;
-          _drawerPortalPointLight.intensity =
-            lightFade * lightPulse * 82;
-        }
-        if (_drawerPortalElectricity) {
-          const electricityFade = isFadingOut
-            ? 1 - THREE.MathUtils.smoothstep(fadeOutTime, 0, 0.2)
-            : THREE.MathUtils.smoothstep(portalTime, 0.18, 0.72);
-          const flicker =
-            0.72 +
-            Math.sin(portalTime * 43) * 0.1 +
-            Math.sin(portalTime * 97) * 0.07;
-          _drawerPortalElectricity.material.opacity =
-            electricityFade * THREE.MathUtils.clamp(flicker, 0.45, 0.9);
-          _drawerPortalElectricGlow.material.uniforms.uOpacity.value =
-            electricityFade *
-            THREE.MathUtils.clamp(flicker * 1.35, 0.65, 1.25);
-          const boltPositionAttribute =
-            _drawerPortalElectricity.geometry.attributes.position;
-          const boltPositions = boltPositionAttribute.array;
-          const sparkFrame = Math.floor(portalTime * 22);
-          let vertex = 0;
-          for (let bolt = 0; bolt < DRAWER_PORTAL_BOLT_COUNT; bolt++) {
-            if (portalTime >= _drawerPortalBoltNextFlash[bolt]) {
-              if (_drawerPortalBoltActive[bolt]) {
-                _drawerPortalBoltActive[bolt] = 0;
-                _drawerPortalBoltNextFlash[bolt] =
-                  portalTime + 0.045 + Math.random() * 0.28;
-              } else {
-                _drawerPortalBoltActive[bolt] = 1;
-                _drawerPortalBoltLengths[bolt] =
-                  0.35 + Math.random() * 1.55;
-                _drawerPortalBoltStartY[bolt] =
-                  Math.random() *
-                  Math.max(
-                    0.01,
-                    DRAWER_PORTAL_ELECTRIC_HEIGHT -
-                      _drawerPortalBoltLengths[bolt],
-                  );
-                _drawerPortalBoltRadii[bolt] =
-                  1 + Math.random() * 1.3;
-                _drawerPortalBoltAngles[bolt] =
-                  Math.random() * Math.PI * 2;
-                _drawerPortalBoltNextFlash[bolt] =
-                  portalTime + 0.035 + Math.random() * 0.12;
-              }
-            }
-            const startY = _drawerPortalBoltStartY[bolt];
-            const boltHeight = _drawerPortalBoltLengths[bolt];
-            const baseRadius = _drawerPortalBoltRadii[bolt];
-            for (
-              let segment = 0;
-              segment < DRAWER_PORTAL_BOLT_SEGMENTS;
-              segment++
-            ) {
-              for (let end = 0; end < 2; end++) {
-                const step = segment + end;
-                if (!_drawerPortalBoltActive[bolt]) {
-                  boltPositions[vertex * 3] = 0;
-                  boltPositions[vertex * 3 + 1] = -1000;
-                  boltPositions[vertex * 3 + 2] = 0;
-                  vertex++;
-                  continue;
-                }
-                const heightProgress =
-                  step / DRAWER_PORTAL_BOLT_SEGMENTS;
-                const randomSeed =
-                  Math.sin(
-                    bolt * 91.73 +
-                      step * 37.11 +
-                      sparkFrame * 17.17,
-                  ) * 43758.5453;
-                const randomValue =
-                  randomSeed - Math.floor(randomSeed) - 0.5;
-                const secondSeed =
-                  Math.sin(
-                    bolt * 41.19 +
-                      step * 83.67 +
-                      sparkFrame * 29.31,
-                  ) * 24634.6345;
-                const secondRandom =
-                  secondSeed - Math.floor(secondSeed) - 0.5;
-                const angle =
-                  _drawerPortalBoltAngles[bolt] +
-                  heightProgress * (0.16 + (bolt % 3) * 0.08) +
-                  Math.sin(portalTime * 5.2 + bolt) * 0.12 +
-                  randomValue * 0.5;
-                const radius =
-                  baseRadius +
-                  secondRandom * 0.42 +
-                  Math.sin(portalTime * 9 + bolt) * 0.035;
-                boltPositions[vertex * 3] = Math.cos(angle) * radius;
-                boltPositions[vertex * 3 + 1] =
-                  startY +
-                  heightProgress * boltHeight +
-                  randomValue * 0.065;
-                boltPositions[vertex * 3 + 2] = Math.sin(angle) * radius;
-                vertex++;
-              }
-            }
-          }
-          boltPositionAttribute.needsUpdate = true;
+        // The ring: its sequence from when the drawer is open, held open at openHold while the drawer stays open;
+        // as it closes, its collapse and closing flash within the drawer's slide (closeTime).
+        if (_drawerRing) {
+          const R = DRAWER_RING;
+          const closeSpan = R.closeTo - R.closeFrom + R.flashSec;
+          const phaseT = isFadingOut
+            ? R.closeFrom + Math.min(1, fadeOutTime / R.closeTime) * closeSpan
+            : Math.min(portalTime, R.openHold);
+          _drawerRing.tick(phaseT, portalTime);
         }
         if (_drawerPortalArrow) {
           const arrowReveal = isFadingOut
@@ -8168,6 +7902,10 @@ let _officeSceneAnimationFrame = 0;
             _drawerState = "closed";
             if (_drawerEffectMesh) _drawerEffectMesh.visible = false;
             if (_drawerPortalPointLight) _drawerPortalPointLight.intensity = 0;
+            if (_drawerRing) {
+              _drawerRing.arcs.mesh.visible = false;
+              _drawerRing.arcs.light.intensity = 0;
+            }
           }
         }
       }
