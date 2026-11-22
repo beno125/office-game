@@ -24,9 +24,16 @@
  * kitchen model, steers away from what it is heading into and never moves
  * through it.
  *
- * Landing: a ray straight down finds a surface within reach (an up-facing
- * face: counter, shelf, appliance, table, floor) while it is coming down;
- * there it lands. Its resting pose is flat (its yaw kept); one ray straight
+ * Landing: a ray straight down finds a surface within reach while it is
+ * coming down. It lands only on a simple, level, allowed surface (counters,
+ * tabletops, shelves, appliance tops, the floor): the surface faces up within
+ * maxSurfaceAngle, a 3 × 3 grid of rays across the middle (flatArea) of the
+ * sheet all hit such a surface within flatTolerance of the landing height, it
+ * is not one of the moving objects (cars, food, milk cartons, Mister Spot:
+ * getMovers) or a noLandNames object, nothing rises through the sheet's area
+ * and enough of the sheet is supported. Else it lifts off gently, heads
+ * somewhere else and tries again later; it never sinks into what it refused.
+ * The moving objects are obstacles to the rays too (never flown through). Its resting pose is flat (its yaw kept); one ray straight
  * down per sheet vertex gives the surface under each, the supports are spread
  * one cell (so the sheet never cuts a ledge's edge between two vertices) and
  * limited in slope (a soft drape), the sheet's plane sits at the highest
@@ -37,8 +44,12 @@
  *
  * Look: a thin square sheet (a subdivided plane), off-white, matte,
  * double-sided, with an embossed quilted pattern (colour + bump map from one
- * small canvas) and a soft light of its own on both faces (a hint of
- * translucency). It flutters in the vertex shader while flying: ripples
+ * small canvas). A lit material: the scene's lights shade it like any matte
+ * surface. On top, it picks up the light around it on both faces (thin paper
+ * lets it through): each napkin, every frame, sums the scene's point lights
+ * (the room's, the trash fires', the sparks' flash) and the strip lights
+ * (peselLight1..34: glowing meshes, not light sources) by distance, capped at
+ * lightPickMax, and adds it in the paper's colour; a faint glow of its own. It flutters in the vertex shader while flying: ripples
  * crossing the sheet, edges waving more than the middle, and a slow fold, all
  * per napkin (seeded), with normals from the same function.
  *
@@ -93,6 +104,16 @@ export const KITCHEN_NAPKINS = {
   restFlutter: 0,
   /** Landing: the steepest surface it lands on (its normal's up part), the settle time (s), the drape (most a vertex hangs, × the size), its softness (max drop per cell, × the cell), and the gap kept above the surface. */
   landNormal: 0.6,
+  /** Landing areas: the steepest surface it may rest on (degrees from flat), how level the area under it must be
+   *  (the highest / lowest of a 3 × 3 grid of rays across `flatArea` of the sheet, world units), and objects it never
+   *  lands on (name contains one of these; the cars, food, milk cartons and Mister Spot are never landed on either). */
+  maxSurfaceAngle: 12,
+  flatTolerance: 0.06,
+  flatArea: 0.7,
+  noLandNames: ["fruitPlate", "cup", "binSign", "greyBox", "salBase", "salHange", "trash", "raceBoundaries", "ramp", "lamp", "Lamp"],
+  /** A refused spot: it lifts off gently (units/s upward) and tries elsewhere after this long (s). */
+  refuseLift: 0.35,
+  refuseWait: 0.8,
   /** Share of the sheet's vertices that must find the surface (from above) at the landing height, or it doesn't land there. */
   landSupport: 0.15,
   /** Clear space needed above a landing spot: nothing within this height over any part of the sheet (else it flies on). */
@@ -120,8 +141,14 @@ export const KITCHEN_NAPKINS = {
   /** Look: colour, roughness, its own soft light (both faces), bump strength. */
   color: 0xf6f3ec,
   roughness: 0.95,
-  glow: 0.12,
+  glow: 0.06,
   bump: 0.012,
+  /** Light it picks up from what is near it (both faces: thin paper lets it through): strength (0 = none), the most
+   *  it picks up, and the strip lights (peselLight1..34, glowing but not light sources) as small emitters: strength, reach. */
+  lightResponse: 1.5,
+  lightPickMax: 0.35,
+  stripLight: 2.2,
+  stripReach: 7,
 };
 
 // ---- Smooth noise (layered sines; cheap and continuous) ----
@@ -230,10 +257,10 @@ function makePaperTexture(THREE) {
 }
 
 /**
- * @param {{ THREE, scene, root: THREE.Object3D, dispenser: THREE.Mesh }} o
+ * @param {{ THREE, scene, root: THREE.Object3D, dispenser: THREE.Mesh, getMovers?: () => THREE.Object3D[] }} o
  * @returns {{ update(dt: number): void, dispose(): void, slot, room, pool, active, resting } | null}
  */
-export function createKitchenNapkins({ THREE, scene, root, dispenser }) {
+export function createKitchenNapkins({ THREE, scene, root, dispenser, getMovers = null }) {
   const N = KITCHEN_NAPKINS;
   root.updateMatrixWorld(true);
   // Collision meshes: every visible mesh of the kitchen model (the walls, floor and furniture alike).
@@ -285,6 +312,8 @@ export function createKitchenNapkins({ THREE, scene, root, dispenser }) {
   const aRest = new THREE.InstancedBufferAttribute(new Float32Array(N.maxActive * 2), 2).setUsage(THREE.DynamicDrawUsage);
   geo.setAttribute("aNap", aNap); // seed, flutter (× half size), opacity, own time
   geo.setAttribute("aRest", aRest); // drape blend (0 flying … 1 resting), drape row
+  const aTint = new THREE.InstancedBufferAttribute(new Float32Array(N.maxActive * 3), 3).setUsage(THREE.DynamicDrawUsage);
+  geo.setAttribute("aTint", aTint); // light picked up from nearby lights / strip lights (both faces)
   const drapeData = new Float32Array(GRID * GRID * N.maxActive);
   const drapeTex = new THREE.DataTexture(drapeData, GRID * GRID, N.maxActive, THREE.RedFormat, THREE.FloatType);
   drapeTex.minFilter = drapeTex.magFilter = THREE.NearestFilter;
@@ -316,6 +345,8 @@ export function createKitchenNapkins({ THREE, scene, root, dispenser }) {
     shader.vertexShader =
       `attribute vec4 aNap;
       attribute vec2 aRest;
+      attribute vec3 aTint;
+      varying vec3 vNapTint;
       uniform float uHalf;
       uniform float uFreq;
       uniform float uSpeed;
@@ -365,13 +396,16 @@ export function createKitchenNapkins({ THREE, scene, root, dispenser }) {
       .replace(
         "#include <begin_vertex>",
         `vec3 transformed = vec3(position.xy, position.z + h);
-        vNapAlpha = aNap.z;`,
+        vNapAlpha = aNap.z;
+        vNapTint = aTint;`,
       );
     shader.fragmentShader = shader.fragmentShader
-      .replace("void main() {", "varying float vNapAlpha;\nvoid main() {")
-      .replace("#include <alphamap_fragment>", "#include <alphamap_fragment>\ndiffuseColor.a *= vNapAlpha;");
+      .replace("void main() {", "varying float vNapAlpha;\nvarying vec3 vNapTint;\nvoid main() {")
+      .replace("#include <alphamap_fragment>", "#include <alphamap_fragment>\ndiffuseColor.a *= vNapAlpha;")
+      // The light it picks up from around it, on both faces (it shines through the thin paper), in the paper's colour.
+      .replace("#include <emissivemap_fragment>", "#include <emissivemap_fragment>\ntotalEmissiveRadiance += vNapTint * diffuseColor.rgb;");
   };
-  mat.customProgramCacheKey = () => "kitchenNapkin2";
+  mat.customProgramCacheKey = () => "kitchenNapkin3";
   const mesh = new THREE.InstancedMesh(geo, mat, N.maxActive);
   mesh.name = "kitchenNapkins";
   mesh.count = 0;
@@ -489,20 +523,138 @@ export function createKitchenNapkins({ THREE, scene, root, dispenser }) {
   const _v = new THREE.Vector3();
 
   /** The nearest hit of a ray against the kitchen's meshes (with a world-space face normal), or null. */
+  // The moving objects (cars, food, milk cartons, Mister Spot): their visible meshes, refreshed now and then.
+  const movers = [];
+  const moverSet = new Set();
+  function refreshMovers() {
+    movers.length = 0;
+    moverSet.clear();
+    const roots = getMovers ? getMovers() : [];
+    for (const r of roots) {
+      if (!r) continue;
+      r.traverse((o) => {
+        if (!o.isMesh || !o.visible || o === mesh) return;
+        if (/Physic$/.test(o.name)) return;
+        movers.push(o);
+        moverSet.add(o);
+      });
+    }
+  }
+  const _hits = [];
+  /** The nearest hit of a ray against the kitchen's meshes and the moving objects (world-space face normal), or null. */
   function castRay(origin, dir, far) {
     ray.set(origin, dir);
     ray.near = 0;
     ray.far = far;
-    const hits = ray.intersectObjects(solids, false);
-    if (!hits.length) return null;
-    const h = hits[0];
+    _hits.length = 0;
+    ray.intersectObjects(solids, false, _hits);
+    if (movers.length) ray.intersectObjects(movers, false, _hits);
+    if (!_hits.length) return null;
+    let h = _hits[0];
+    for (const x of _hits) if (x.distance < h.distance) h = x;
     if (h.face) {
       _n.copy(h.face.normal).transformDirection(h.object.matrixWorld);
       if (_n.dot(dir) > 0) _n.negate(); // facing the ray (double-sided surfaces)
     } else {
       _n.copy(dir).negate();
     }
-    return { point: h.point, distance: h.distance, normal: _n };
+    return { point: h.point, distance: h.distance, normal: _n, object: h.object };
+  }
+
+  // Light around the napkins: the scene's point lights (refreshed now and then: the trash fires', the sparks'
+  // flash, the room's own) and the strip lights (glowing meshes, not light sources) as small emitters.
+  const pointLights = [];
+  function refreshLights() {
+    pointLights.length = 0;
+    scene.traverse((o) => {
+      if (o.isPointLight) pointLights.push(o);
+    });
+  }
+  const strips = [];
+  root.traverse((o) => {
+    if (o.isMesh && /^peselLight\d+$/.test(o.name)) {
+      const c = new THREE.Box3().setFromObject(o).getCenter(new THREE.Vector3());
+      strips.push({ pos: c, mesh: o });
+    }
+  });
+  const _lp = new THREE.Vector3();
+  /** The light napkin position `pos` picks up (subtle; lightPickMax at most), into `out`. */
+  function pickLight(pos, out) {
+    out.set(0, 0, 0);
+    const k = 0.015 * N.lightResponse;
+    for (const L of pointLights) {
+      if (!L.visible || !(L.intensity > 0)) continue;
+      L.getWorldPosition(_lp);
+      const d = _lp.distanceTo(pos);
+      if (L.distance > 0 && d >= L.distance) continue;
+      let f = L.intensity / Math.max(Math.pow(d, L.decay || 2), 0.5);
+      if (L.distance > 0) {
+        const r = d / L.distance;
+        const cut = Math.max(0, 1 - r * r * r * r);
+        f *= cut * cut;
+      }
+      out.r += L.color.r * f * k;
+      out.g += L.color.g * f * k;
+      out.b += L.color.b * f * k;
+    }
+    const ks = 0.05 * N.lightResponse * N.stripLight;
+    for (const st of strips) {
+      const d = st.pos.distanceTo(pos);
+      if (d > N.stripReach * 2) continue;
+      const m = st.mesh.material;
+      const e = (m && m.emissive) || null;
+      const lvl = ((m && m.emissiveIntensity) || 1) * ks / (1 + 4 * (d / N.stripReach) * (d / N.stripReach));
+      out.r += (e ? e.r : 1) * lvl;
+      out.g += (e ? e.g : 1) * lvl;
+      out.b += (e ? e.b : 1) * lvl;
+    }
+    const mx = Math.max(out.r, out.g, out.b);
+    if (mx > N.lightPickMax) out.multiplyScalar(N.lightPickMax / mx);
+    return out;
+  }
+  const _tint = new THREE.Color();
+
+  const cosMax = () => Math.cos(THREE.MathUtils.degToRad(N.maxSurfaceAngle));
+  /** Never landed on: the moving objects, and anything whose name (or a parent's) contains a noLandNames entry. */
+  function noLand(obj) {
+    if (!obj) return true;
+    if (moverSet.has(obj)) return true;
+    for (let o = obj; o && o !== root; o = o.parent) {
+      const name = o.name || "";
+      for (const part of N.noLandNames) if (name.includes(part)) return true;
+    }
+    return false;
+  }
+  /** Could it rest on this hit (an allowed object, facing up within maxSurfaceAngle)? */
+  const landable = (hit) => !!hit && hit.normal.y >= cosMax() && !noLand(hit.object);
+
+  /** A refused landing spot: lift off gently, head somewhere else, try again later. */
+  function refuse(p) {
+    p.noLandFor = N.refuseWait;
+    p.vel.y = Math.max(p.vel.y, N.refuseLift);
+    pickTarget(p);
+    return false;
+  }
+
+  /**
+   * Is the area under the sheet (its resting pose at p.pos) a simple, level surface? A 3 × 3 grid of rays straight
+   * down across flatArea of the sheet: each must hit an allowed, up-facing surface within flatTolerance of the
+   * landing height.
+   */
+  function flatEnough(p, surfaceY) {
+    const top = surfaceY + N.landClear;
+    const half = (N.size * N.flatArea) / 2;
+    const c = cosMax();
+    for (let j = -1; j <= 1; j++) {
+      for (let i = -1; i <= 1; i++) {
+        _v.set(i * half, j * half, 0).applyQuaternion(p.restQuat);
+        _o.set(p.pos.x + _v.x, top, p.pos.z + _v.z);
+        const hit = castRay(_o, _down, top - room.min.y + 0.5);
+        if (!hit || hit.normal.y < c || noLand(hit.object)) return false;
+        if (Math.abs(hit.point.y - surfaceY) > N.flatTolerance) return false;
+      }
+    }
+    return true;
   }
 
   /**
@@ -514,6 +666,11 @@ export function createKitchenNapkins({ THREE, scene, root, dispenser }) {
   function land(p, surfaceY) {
     const prevRest = p.restQuat.clone();
     p.restQuat.setFromEuler(_e.set(-Math.PI / 2, p.yaw, 0, "YXZ"));
+    // Only a simple, level, allowed surface under the whole middle of the sheet.
+    if (!flatEnough(p, surfaceY)) {
+      p.restQuat.copy(prevRest);
+      return refuse(p);
+    }
     const top = surfaceY + N.landClear; // rays start this high (above the sheet), straight down
     const maxHang = N.drape * N.size;
     const sup = new Float32Array(GRID * GRID);
@@ -527,8 +684,12 @@ export function createKitchenNapkins({ THREE, scene, root, dispenser }) {
         if (hit && hit.point.y > surfaceY + 0.3) {
           // Something rises through where the sheet would lie (or hangs just above it): not here.
           p.restQuat.copy(prevRest);
-          p.noLandFor = 0.6;
-          return false;
+          return refuse(p);
+        }
+        if (hit && noLand(hit.object) && hit.point.y > surfaceY - maxHang) {
+          // Some of the sheet would lie (or drape) on an object it never lands on: not here.
+          p.restQuat.copy(prevRest);
+          return refuse(p);
         }
         sup[j * GRID + i] = hit ? hit.point.y : -Infinity;
       }
@@ -539,8 +700,7 @@ export function createKitchenNapkins({ THREE, scene, root, dispenser }) {
     for (const y of sup) if (y > surfaceY - 0.08 && y < surfaceY + 0.3) held++;
     if (held < sup.length * N.landSupport) {
       p.restQuat.copy(prevRest);
-      p.noLandFor = 0.6;
-      return false;
+      return refuse(p);
     }
     // Spread each support one cell around (a ledge holds the sheet up to the next vertex past it).
     const spread = new Float32Array(GRID * GRID);
@@ -608,7 +768,7 @@ export function createKitchenNapkins({ THREE, scene, root, dispenser }) {
       _dir.copy(p.vel).multiplyScalar(1 / sp);
       const look = sp * N.avoidLookAhead + radius * 0.6;
       const hit = castRay(p.pos, _dir, look);
-      if (hit && !(hit.normal.y > N.landNormal && p.vel.y < 0)) {
+      if (hit && !(landable(hit) && p.vel.y < 0 && !(p.noLandFor > 0))) {
         // Steer away (more the closer it is), and no motion into it once close.
         const near = 1 - hit.distance / look;
         p.vel.addScaledVector(hit.normal, N.floatSpeed * N.avoidSteer * near * dt);
@@ -619,18 +779,31 @@ export function createKitchenNapkins({ THREE, scene, root, dispenser }) {
       }
     }
     if (p.noLandFor > 0) p.noLandFor -= dt;
-    else if (p.vel.y <= 0.05) {
+    if (p.vel.y <= 0.05) {
       const reachDown = radius * 0.55 + Math.max(0, -p.vel.y) * dt + 0.05;
       const hit = castRay(p.pos, _down, reachDown);
-      if (hit && hit.normal.y > N.landNormal && land(p, hit.point.y)) return true;
+      if (hit) {
+        if (!(p.noLandFor > 0) && landable(hit) && land(p, hit.point.y)) return true;
+        // Not a place to rest (or not yet): never sink into it; drift up and away from it.
+        if (p.vel.y < 0) p.vel.y = 0;
+        p.vel.y = Math.max(p.vel.y, N.refuseLift * 0.5);
+      }
     }
     return false;
   }
 
+  let refreshIn = 0;
   function update(dt) {
     if (dt <= 0) return;
     dt = Math.min(dt, 0.05);
     clock += dt;
+    // The moving objects and the lights, now and then (cars / food / cartons appear, lights come and go).
+    refreshIn -= dt;
+    if (refreshIn <= 0) {
+      refreshMovers();
+      refreshLights();
+      refreshIn = 2;
+    }
     // Batches.
     timer -= dt;
     if (timer <= 0) {
@@ -719,6 +892,8 @@ export function createKitchenNapkins({ THREE, scene, root, dispenser }) {
       mesh.setMatrixAt(k, _m);
       const alpha = Math.min(1, p.age / N.fadeIn) * Math.max(0, Math.min(1, p.fade));
       aNap.setXYZW(k, p.seed, flutterAmp, alpha, t);
+      pickLight(p.pos, _tint);
+      aTint.setXYZ(k, _tint.r, _tint.g, _tint.b);
       // This draw slot: its drape row, and how far the drape is in (0 flying … 1 resting).
       aRest.setY(k, p.row);
       aRest.setX(k, p.state === "rest" ? 1 : p.state === "settle" ? 1 - Math.pow(1 - p.settleT, 3) : 0);
@@ -733,6 +908,7 @@ export function createKitchenNapkins({ THREE, scene, root, dispenser }) {
     mesh.instanceMatrix.needsUpdate = true;
     aNap.needsUpdate = true;
     aRest.needsUpdate = true;
+    aTint.needsUpdate = true;
   }
 
   return {

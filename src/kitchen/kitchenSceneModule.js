@@ -13042,7 +13042,22 @@ let _worldSwitched = false;
               try {
                 const dispenser = kmodel.getObjectByName("paperDispencer");
                 if (dispenser && dispenser.isMesh) {
-                  _kitchenNapkins = createKitchenNapkins({ THREE, scene, root: kmodel, dispenser });
+                  _kitchenNapkins = createKitchenNapkins({
+                    THREE,
+                    scene,
+                    root: kmodel,
+                    dispenser,
+                    // Moving objects the napkins must not fly through and never land on.
+                    getMovers: () => {
+                      const list = [];
+                      if (car) list.push(car);
+                      for (const rc of _raceCars) if (rc.root) list.push(rc.root);
+                      if (_misterSpot && _misterSpot.object) list.push(_misterSpot.object);
+                      if (_milkCartons) list.push(..._milkCartons.meshes);
+                      for (const o of scene.children) if (o.name === "kitchenFood") list.push(o);
+                      return list;
+                    },
+                  });
                   if (!_kitchenNapkins) console.warn("Napkins: no recess found in paperDispencer");
                 }
               } catch (e) {
