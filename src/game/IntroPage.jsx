@@ -45,7 +45,7 @@ export default function IntroPage({ onStartPlay }) {
           </Title>
         </Snap>
         <p className="wx-text wx-rise wx-start-sub" style={{ "--wx-delay": `${at(0)}ms` }}>
-          Drive around the desk, explore the office, and find your way to the next level.
+          Drive a tiny car through the Wix campus. Make a mess on the office desk, race other cars across the kitchen, and smash into rivals in the meeting room.
         </p>
         <div className="wx-rise wx-start-actions" style={{ "--wx-delay": `${at(1)}ms` }}>
           <Button size="lg" iconEnd="arrowRight" frameTag="Button" onClick={() => onStartPlay?.()}>
