@@ -5026,6 +5026,7 @@ let _worldSwitched = false;
         resetKitchenRace();
         _racePhase = "countdown";
         _raceTimer = RACE_COUNTDOWN_SEC;
+        _ccam.enterFull = false; // no intro: the countdown camera eases in
         setupKitchenGameplayCamera();
       }
 
@@ -5130,6 +5131,7 @@ let _worldSwitched = false;
           if (_raceTimer <= 0) {
             _racePhase = "countdown";
             _raceTimer = RACE_COUNTDOWN_SEC;
+            _ccam.enterFull = false;
           }
         } else if (_racePhase === "countdown") {
           _raceTimer -= dt;
@@ -6072,13 +6074,19 @@ let _worldSwitched = false;
        * 4. Arrival: from the run's last pose up over the infield (height first,
        * clear of the props and cars) onto the live gameplay camera.
        */
+      const _kIntroArrivePos = new THREE.Vector3();
+      const _kIntroArriveLook = new THREE.Vector3();
+      const _kIntroArriveQuat = new THREE.Quaternion();
       function _kIntroArrivalPose(u, from, o) {
         const e = _kIntroEaseSine(u);
         const eUp = Math.sin((Math.PI / 2) * Math.min(1, u * 1.4));
-        o.pos.x = _kIntroLerp(from.pos.x, camera.position.x, e);
-        o.pos.z = _kIntroLerp(from.pos.z, camera.position.z, e);
-        o.pos.y = _kIntroLerp(from.pos.y, camera.position.y, eUp);
-        o.look.lerpVectors(from.look, controls.target, e);
+        // The end point: the countdown camera's framing (its own pose function, full weight, from the race camera now),
+        // so the countdown carries on from here with no cut. The race camera's fov (the countdown keeps it).
+        kitchenCountdownCamPose(camera.position, camera.quaternion, 1, _kIntroArrivePos, _kIntroArriveQuat, _kIntroArriveLook);
+        o.pos.x = _kIntroLerp(from.pos.x, _kIntroArrivePos.x, e);
+        o.pos.z = _kIntroLerp(from.pos.z, _kIntroArrivePos.z, e);
+        o.pos.y = _kIntroLerp(from.pos.y, _kIntroArrivePos.y, eUp);
+        o.look.lerpVectors(from.look, _kIntroArriveLook, e);
         o.fov = _kIntroLerp(from.fov, camera.fov, e);
         o.roll = _kIntroLerp(from.roll, 0, e);
         return o;
@@ -6805,6 +6813,7 @@ let _worldSwitched = false;
         if (_racePhase === "intro") {
           _racePhase = "countdown";
           _raceTimer = RACE_COUNTDOWN_SEC;
+          _ccam.enterFull = true; // the intro ended on the countdown framing
           if (_raceHud) _raceHud.setVisible(true);
         }
         setupKitchenGameplayCamera(); // first call: remembers this pose, changes nothing
@@ -7226,54 +7235,63 @@ let _worldSwitched = false;
       // frame with the cars, and eases back from GO. Drawn on top of the race camera at render time (applied before
       // the render, restored right after), so the camera's own state, follow and behaviour are never touched: once the
       // swing reaches 0 nothing is applied and the frame is exactly the normal one. Timed by raceTimeFromGo(), the
-      // same clock as the countdown HUD and the start lights' green.
+      // same clock as the countdown HUD and the start lights' green. The intro's arrival ends on this framing
+      // (kitchenCountdownCamPose at full weight), so the first countdown starts already swung.
       // ---------------------------------------------------------------------------
+      /** Smootherstep: ease in-out with no speed and no acceleration at either end. */
+      const smootherstep = (t) => t * t * t * (t * (6 * t - 15) + 10);
       const KITCHEN_COUNTDOWN_CAM = {
         yawDeg: -60, // swing round the car about the vertical (degrees; negative = to the left, toward the start lights)
         lookShift: 0.68, // aim this share of the way from the car toward the start lights (both framed)
         distance: 0.5, // the camera's distance from the car × this (closer: the lights read larger)
-        enterSec: 0.7, // easing in as the countdown starts (no snap at the intro's hand-off / "Race again")
-        returnSec: 0.85, // back to the normal camera from GO
-        ease: introEaseSine, // ease in-out (sine) for both moves
+        enterSec: 0.7, // easing in as a countdown starts without the intro ("Race again")
+        enterEase: introEaseSine,
+        returnSec: 1.25, // back to the normal camera from GO
+        returnEase: smootherstep, // gentle in-out: no jolt as it leaves the countdown view or lands on the race camera
         clearance: 0.5, // kept between the camera and anything between it and the car
       };
       const _ccam = {
         overriding: false,
+        enterFull: false, // this countdown came from the intro, which ended on the countdown framing: no ease in
         savedPos: new THREE.Vector3(),
         savedQuat: new THREE.Quaternion(),
         look: new THREE.Vector3(),
+        aim0: new THREE.Vector3(),
+        aim1: new THREE.Vector3(),
         aim: new THREE.Vector3(),
         off: new THREE.Vector3(),
         q: new THREE.Quaternion(),
+        q0: new THREE.Quaternion(),
+        dev: new THREE.Quaternion(),
+        id: new THREE.Quaternion(),
         m: new THREE.Matrix4(),
         ray: new THREE.Raycaster(),
         dir: new THREE.Vector3(),
+        pos: new THREE.Vector3(),
       };
-      /** The swing's weight now (0..1): eased in from the countdown's start, out from GO; 0 outside. */
+      /** The swing's weight now (0..1): eased in from the countdown's start (full from the intro), out from GO; 0 outside. */
       function kitchenCountdownCamWeight() {
         const C = KITCHEN_COUNTDOWN_CAM;
         const t = raceTimeFromGo();
         if (t == null) return 0;
-        if (t < 0) return C.ease(Math.min(1, (t + RACE_COUNTDOWN_SEC) / C.enterSec));
-        return t >= C.returnSec ? 0 : 1 - C.ease(t / C.returnSec);
+        if (t < 0) return _ccam.enterFull ? 1 : C.enterEase(Math.min(1, (t + RACE_COUNTDOWN_SEC) / C.enterSec));
+        return t >= C.returnSec ? 0 : 1 - C.returnEase(t / C.returnSec);
       }
-      function applyKitchenCountdownCamera() {
+      /**
+       * The countdown camera at weight w from the race camera's pose (basePos / baseQuat), into outPos / outQuat;
+       * outAim: the point it looks at. Position: the race camera's offset from the car turned by yawDeg × w and scaled
+       * toward `distance`, kept clear of anything between. Rotation: looking at a point moving from where the race
+       * camera looks to the countdown's aim, so turning and travelling stay together (no wobble); at w = 0 exactly the
+       * race camera's rotation, at w = 1 exactly the countdown framing.
+       */
+      function kitchenCountdownCamPose(basePos, baseQuat, w, outPos, outQuat, outAim) {
         const C = KITCHEN_COUNTDOWN_CAM;
         const K = _ccam;
-        if (!car || camera !== carCamera || _kIntro.state !== "done" || _kIntro.overriding || _jumpFx.overriding) return;
-        const w = kitchenCountdownCamWeight();
-        if (w <= 0) return;
-        K.savedPos.copy(camera.position);
-        K.savedQuat.copy(camera.quaternion);
-        K.overriding = true;
         getCarCameraLookAtPoint(K.look);
-        // Round the car: the camera's offset from it turned about the vertical.
-        K.off
-          .copy(camera.position)
-          .sub(K.look)
-          .applyAxisAngle(THREE.Object3D.DEFAULT_UP, THREE.MathUtils.degToRad(C.yawDeg) * w)
-          .multiplyScalar(1 + (C.distance - 1) * w);
-        camera.position.copy(K.look).add(K.off);
+        K.off.copy(basePos).sub(K.look);
+        const baseDist = K.off.length();
+        K.off.applyAxisAngle(THREE.Object3D.DEFAULT_UP, THREE.MathUtils.degToRad(C.yawDeg) * w).multiplyScalar(1 + (C.distance - 1) * w);
+        outPos.copy(K.look).add(K.off);
         // Nothing between the car and the camera: pulled in front of the first hit.
         const dist = K.off.length();
         if (_kitchenDragRoot && dist > 1e-3) {
@@ -7290,16 +7308,33 @@ let _worldSwitched = false;
             let own = false;
             for (let x = h.object; x; x = x.parent) if (x === car) own = true;
             if (own) continue;
-            camera.position.copy(K.look).addScaledVector(K.dir, Math.max(0, h.distance - C.clearance));
+            outPos.copy(K.look).addScaledVector(K.dir, Math.max(0, h.distance - C.clearance));
             break;
           }
         }
-        // Aim between the car and the start lights, blended from the normal view by the same weight.
-        K.aim.copy(K.look);
-        if (_startLights && _startLights.center) K.aim.lerp(_startLights.center, C.lookShift);
-        K.m.lookAt(camera.position, K.aim, camera.up);
+        // Where the race camera looks (at the car's distance), and the countdown's aim (toward the start lights).
+        K.aim0.set(0, 0, -1).applyQuaternion(baseQuat).multiplyScalar(baseDist).add(basePos);
+        K.aim1.copy(K.look);
+        if (_startLights && _startLights.center) K.aim1.lerp(_startLights.center, C.lookShift);
+        K.aim.lerpVectors(K.aim0, K.aim1, w);
+        if (outAim) outAim.copy(K.aim);
+        K.m.lookAt(outPos, K.aim, THREE.Object3D.DEFAULT_UP);
         K.q.setFromRotationMatrix(K.m);
-        camera.quaternion.copy(K.savedQuat).slerp(K.q, w);
+        // The race camera's own deviation from a plain look-at (a shake, a roll), faded out with the swing.
+        K.m.lookAt(basePos, K.aim0, THREE.Object3D.DEFAULT_UP);
+        K.q0.setFromRotationMatrix(K.m);
+        K.dev.copy(baseQuat).multiply(K.q0.invert());
+        outQuat.copy(K.id.identity().slerp(K.dev, 1 - w)).multiply(K.q);
+      }
+      function applyKitchenCountdownCamera() {
+        const K = _ccam;
+        if (!car || camera !== carCamera || _kIntro.state !== "done" || _kIntro.overriding || _jumpFx.overriding) return;
+        const w = kitchenCountdownCamWeight();
+        if (w <= 0) return;
+        K.savedPos.copy(camera.position);
+        K.savedQuat.copy(camera.quaternion);
+        K.overriding = true;
+        kitchenCountdownCamPose(K.savedPos, K.savedQuat, w, camera.position, camera.quaternion, null);
         camera.updateMatrixWorld();
       }
       function restoreKitchenCountdownCamera() {
