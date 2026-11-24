@@ -23,7 +23,7 @@ import {
 import { createCameraDrag } from "../game/cameraDrag.js";
 import { createCarLighting } from "../game/carLighting.js";
 import { createTouchDrive } from "../game/touch/touchDrive.js";
-import { addThresholdBloom, BLOOM_EMISSIVE, setBloomWeight } from "../game/thresholdBloom.js";
+import { addThresholdBloom, BLOOM_EMISSIVE, BLOOM_WEIGHT_ALPHA_BASE, setBloomWeight } from "../game/thresholdBloom.js";
 import { createPortalRing, PORTAL_RING_DEFAULTS } from "../game/portalRing.js";
 
 const _OFFICE_BASE = `${import.meta.env.BASE_URL}office-scene-optimized/`;
@@ -8106,6 +8106,7 @@ let _officeSceneAnimationFrame = 0;
           cueTarget > _drawerCupCue
             ? cueTarget
             : Math.max(cueTarget, _drawerCupCue - realDt / DRAWER_CUP_CUE_FADE_SEC);
+        updatePhoneChargerGlow(_drawerCupCue);
         if (!_drawerCupBoundsReady) return;
         const k = _drawerCupCue;
         if (k === 0 && phoneChargerCupMaterial.emissiveIntensity === 0) return;
@@ -9676,6 +9677,126 @@ let _officeSceneAnimationFrame = 0;
             node.position.y += 0.08;
           }
         });
+        patchPhoneChargerLightGlow(phoneChargerLightMaterial);
+        patchPhoneChargerCupGlow(phoneChargerCupMaterial);
+      }
+
+      /**
+       * The charger's light hints "drive onto me": a slow breathing pulse, a little
+       * bloom, and soft edges (its glow fades toward the disc's rim instead of
+       * stopping at a hard edge). While the car is on the cup (the cue), the pulse
+       * holds at full.
+       * The light sits inside the charger, under the frosted cup (88% opaque), so
+       * on its own it barely shows: the cup above it glows too, like a diffuser,
+       * in the light's own colour (blue with the cue), round its centre and
+       * fading out softly, with the same pulse and its own bloom.
+       */
+      const PHONE_CHARGER_GLOW = {
+        periodSec: 2.6, // one slow breath
+        low: 0.35, // the glow at the pulse's low (× full)
+        bloomWeight: 0.55, // bloom at full glow (0..1, thresholdBloom.js weight)
+        edgeInner: 0.35, // the glow is full inside this share of the disc's radius…
+        edgeOuter: 1.0, // …and fades out to here (the rim)
+        edgeFloor: 0.15, // what's left of the glow at the rim
+        cup: {
+          strength: 1.1, // the cup's glow at its centre (emissive, × the light's colour)
+          innerShare: 0.2, // full inside this × the light's radius…
+          outerShare: 1.9, // …fading out to zero here (soft, past the light's own rim)
+          bloomWeight: 0.6, // bloom of the cup's glow at full (× the glow's falloff)
+        },
+      };
+      const _phoneChargerGlowUniform = { value: 1 };
+      function patchPhoneChargerLightGlow(mat) {
+        if (mat.userData.chargerGlow) return;
+        mat.userData.chargerGlow = _phoneChargerGlowUniform;
+        const G = PHONE_CHARGER_GLOW;
+        const prev = mat.onBeforeCompile;
+        const prevKey = mat.customProgramCacheKey;
+        mat.onBeforeCompile = function (shader, r) {
+          if (prev) prev.call(this, shader, r);
+          shader.uniforms.uChargerGlow = _phoneChargerGlowUniform;
+          shader.vertexShader = shader.vertexShader
+            .replace("#include <common>", "#include <common>\nvarying float vChargerR;")
+            .replace("#include <begin_vertex>", "#include <begin_vertex>\nvChargerR = length(position.xz); // 0 centre .. 1 rim (the disc's local units)");
+          shader.fragmentShader = shader.fragmentShader
+            .replace("#include <common>", "#include <common>\nvarying float vChargerR;\nuniform float uChargerGlow;")
+            .replace(
+              "#include <emissivemap_fragment>",
+              `#include <emissivemap_fragment>
+              float chargerEdge = mix(1.0, ${G.edgeFloor.toFixed(3)}, smoothstep(${G.edgeInner.toFixed(3)}, ${G.edgeOuter.toFixed(3)}, vChargerR));
+              totalEmissiveRadiance *= uChargerGlow * chargerEdge;`,
+            );
+        };
+        mat.customProgramCacheKey = function () {
+          return (prevKey ? prevKey.call(this) : "") + "|chargerGlow";
+        };
+        setBloomWeight(mat, G.bloomWeight);
+        mat.needsUpdate = true;
+      }
+      /** The cup's glow: the light's centre and radius (world), its colour, and the patch. */
+      const _cupGlowUniforms = {
+        uCupGlowCenter: { value: new THREE.Vector3() },
+        uCupGlowRadius: { value: 1 },
+        uCupGlowColor: { value: phoneChargerLightMaterial.emissive }, // the light's own (lerped to blue with the cue)
+        uCupGlow: _phoneChargerGlowUniform,
+      };
+      let _cupGlowPlaced = false;
+      function patchPhoneChargerCupGlow(mat) {
+        if (mat.userData.cupGlow) return;
+        mat.userData.cupGlow = true;
+        const C = PHONE_CHARGER_GLOW.cup;
+        const prev = mat.onBeforeCompile;
+        const prevKey = mat.customProgramCacheKey;
+        mat.onBeforeCompile = function (shader, r) {
+          if (prev) prev.call(this, shader, r);
+          Object.assign(shader.uniforms, _cupGlowUniforms);
+          shader.vertexShader = shader.vertexShader
+            .replace("#include <common>", "#include <common>\nvarying vec3 vCupGlowWorld;")
+            .replace("#include <begin_vertex>", "#include <begin_vertex>\nvCupGlowWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;");
+          shader.fragmentShader = shader.fragmentShader
+            .replace(
+              "#include <common>",
+              "#include <common>\nvarying vec3 vCupGlowWorld;\nuniform vec3 uCupGlowCenter, uCupGlowColor;\nuniform float uCupGlowRadius, uCupGlow;\nfloat cupGlowFall = 0.0;",
+            )
+            .replace(
+              "#include <emissivemap_fragment>",
+              `#include <emissivemap_fragment>
+              float cupGlowD = length(vCupGlowWorld.xz - uCupGlowCenter.xz) / uCupGlowRadius;
+              cupGlowFall = 1.0 - smoothstep(${C.innerShare.toFixed(3)}, ${C.outerShare.toFixed(3)}, cupGlowD);
+              cupGlowFall *= cupGlowFall; // softer toward the edge
+              totalEmissiveRadiance += uCupGlowColor * (${C.strength.toFixed(3)} * uCupGlow * cupGlowFall);`,
+            )
+            // Bloom marker (thresholdBloom.js): BASE + weight in alpha, the glow's share only.
+            .replace(/}\s*$/, `gl_FragColor.a = ${BLOOM_WEIGHT_ALPHA_BASE.toFixed(1)} + clamp(${C.bloomWeight.toFixed(3)} * uCupGlow * cupGlowFall, 0.0, 1.0);\n}`);
+        };
+        mat.customProgramCacheKey = function () {
+          return (prevKey ? prevKey.call(this) : "") + "|cupGlow";
+        };
+        // The alpha now carries the bloom marker, so the cup's see-through blend uses
+        // its opacity as a constant instead (the same colour as before: 0.88 cup + 0.12 behind).
+        mat.blending = THREE.CustomBlending;
+        mat.blendEquation = THREE.AddEquation;
+        mat.blendSrc = THREE.ConstantAlphaFactor;
+        mat.blendDst = THREE.OneMinusConstantAlphaFactor;
+        mat.blendAlpha = mat.opacity;
+        mat.blendSrcAlpha = THREE.OneFactor;
+        mat.blendDstAlpha = THREE.ZeroFactor;
+        mat.needsUpdate = true;
+      }
+      /** Per frame: the pulse (held full while the cue is on). */
+      function updatePhoneChargerGlow(cue) {
+        const G = PHONE_CHARGER_GLOW;
+        const wave = 0.5 - 0.5 * Math.cos((performance.now() / 1000) * ((2 * Math.PI) / G.periodSec)); // 0..1
+        const pulse = G.low + (1 - G.low) * wave;
+        const k = pulse + (1 - pulse) * cue;
+        _phoneChargerGlowUniform.value = k;
+        setBloomWeight(phoneChargerLightMaterial, G.bloomWeight * k);
+        if (!_cupGlowPlaced && phoneChargerLightMesh) {
+          const b = new THREE.Box3().setFromObject(phoneChargerLightMesh);
+          b.getCenter(_cupGlowUniforms.uCupGlowCenter.value);
+          _cupGlowUniforms.uCupGlowRadius.value = Math.max(1e-4, (b.max.x - b.min.x + b.max.z - b.min.z) / 4);
+          _cupGlowPlaced = true;
+        }
       }
 
       const screenLightMaterial = new THREE.MeshStandardMaterial({
