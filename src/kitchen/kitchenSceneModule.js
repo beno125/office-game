@@ -27,7 +27,7 @@ import {
   raceAiMaxOutward,
 } from "./kitchenRace.js";
 import { SCENE_ROUTES, nextLevelPath } from "../game/sceneRoutes.js";
-import { createCinematicIntro, introEaseSine, introLerp } from "../game/cinematicIntro.js";
+import { createCinematicIntro, introEase, introEaseSine, introLerp } from "../game/cinematicIntro.js";
 import { createPortalRing, portalGlowTexture } from "../game/portalRing.js";
 import { createCarLighting } from "../game/carLighting.js";
 import { addBloomGroup, addThresholdBloom, keepBelowBloomThreshold, setBloomWeight } from "../game/thresholdBloom.js";
@@ -1694,6 +1694,15 @@ export function isKitchenSceneReady() {
         warmKey: { color: 0xfff0dd, intensity: 0.6 },
         warmFill: { color: 0xffe8cc, intensity: 0.35 },
       };
+      /**
+       * mainTableSidePlane in bright mode: white. Not metallic (metal only tinted its reflections: it read grey),
+       * and a little white self-light, as the end panel faces away from the bright mode's lights (it read grey
+       * too). Dark mode keeps its own colour / glow / metalness (set where its material is made); the light blend
+       * goes between the two.
+       */
+      const KITCHEN_TABLE_SIDE_BRIGHT = { color: 0xffffff, emissive: 0xffffff, emissiveIntensity: 0.32, metalness: 0 };
+      const _tableSideBrightColor = new THREE.Color(KITCHEN_TABLE_SIDE_BRIGHT.color);
+      const _tableSideBrightEmissive = new THREE.Color(KITCHEN_TABLE_SIDE_BRIGHT.emissive);
       let lightBlend = 0;
       let lightBlendTarget = 0;
       const LIGHT_FADE_DURATION = 0.2;
@@ -1835,6 +1844,16 @@ export function isKitchenSceneReady() {
               entry.darkPenumbra +
               (entry.brightPenumbra - entry.darkPenumbra) * b;
           }
+        }
+        const sideMat = _kitchenTableCoverSideMat;
+        if (sideMat && sideMat.userData.darkColor) {
+          sideMat.color.lerpColors(sideMat.userData.darkColor, _tableSideBrightColor, b);
+          sideMat.emissive.lerpColors(sideMat.userData.darkEmissive, _tableSideBrightEmissive, b);
+          sideMat.emissiveIntensity =
+            sideMat.userData.darkEmissiveIntensity +
+            (KITCHEN_TABLE_SIDE_BRIGHT.emissiveIntensity - sideMat.userData.darkEmissiveIntensity) * b;
+          sideMat.metalness =
+            sideMat.userData.darkMetalness + (KITCHEN_TABLE_SIDE_BRIGHT.metalness - sideMat.userData.darkMetalness) * b;
         }
         for (const m of _kitchenPastelMats) {
           m.emissiveIntensity =
@@ -5687,7 +5706,9 @@ let _worldSwitched = false;
       }
 
       // ---------------------------------------------------------------------------
-      // Cinematic intro (dark mode), letterboxed:
+      // Cinematic intro, letterboxed:
+      //   0. room reveal — a high, wide sweep across the kitchen gliding down onto the portal shot's first pose,
+      //      the room going from bright mode to dark mode meanwhile (dark mode from the portal on)
       //   1. table overview — a slow glide along the table, descending toward the track
       //   2. car beauty shot — (cut) a slow, low front-three-quarter orbit of the player's car
       //   3. Mister Spot — (cut) a low three-quarter push-in on the robot firing
@@ -5704,7 +5725,25 @@ let _worldSwitched = false;
        * end of the previous shot, the camera moves while the screen is black, in
        * at the start of this one). The arrival is one continuous move.
        */
+      /**
+       * 0. Room reveal (the intro's first shot): starts in bright mode, high and wide in the room's front-right
+       * corner looking across the kitchen, and sweeps round the portal's spot in a descending arc (a slight bank
+       * mid-move), landing at rest exactly on the portal shot's first pose (position, aim, fov), which is left as
+       * it was. The lights go from bright mode to dark mode over `lights` (seconds into the shot; the existing
+       * light blend, Key P / Key O: lights, colours, emissive, bloom, background), done before the shot ends.
+       */
+      const KITCHEN_INTRO_REVEAL = {
+        sec: 7.0, // the shot's length
+        lights: { fromSec: 1.4, toSec: 5.8 }, // bright → dark (eased in and out)
+        startPos: { x: 44, y: 36, z: 40 }, // camera start (world): high, front-right of the room
+        lookFrom: { x: 0, y: 20, z: -16 }, // where it looks first (the back wall's closets / counter)…
+        lookSettle: 0.8, // …turning onto the portal's spot by this share of the shot (then held)
+        heightLag: 1.35, // > 1: it stays high a little longer, then glides down low
+        fovFrom: 60, // wide, narrowing to the portal shot's own fov
+        bankDeg: 3, // the slight bank mid-sweep (0 at both ends)
+      };
       const KITCHEN_INTRO_SHOTS = [
+        { name: "roomReveal", sec: KITCHEN_INTRO_REVEAL.sec, blendIn: 0 }, // ends on the portal shot's first pose (no cut)
         { name: "portal", sec: 5.6, blendIn: 0 }, // a build-up, the portal opens, the car drives out of it, it closes (was 4.6)
         { name: "overview", sec: 3.6, blendIn: 0, fade: true },
         { name: "carBeauty", sec: 3.6, blendIn: 0, fade: true },
@@ -5830,6 +5869,7 @@ let _worldSwitched = false;
           spotPose: null, // Mister Spot's place / path state for the shot (taken at KITCHEN_INTRO_SPOT.poseAtSec)
           spotStarted: false,
           spotEnded: false,
+          revealDone: false, // the room reveal's lights handed over to dark mode
         },
       );
       const _kIntroPose = { pos: new THREE.Vector3(), look: new THREE.Vector3(), fov: 50, roll: 0 };
@@ -5908,7 +5948,9 @@ let _worldSwitched = false;
       function _kIntroShotPose(i, u, o) {
         const R = _kIntro.rig;
         const name = KITCHEN_INTRO_SHOTS[i].name;
-        if (name === "portal") {
+        if (name === "roomReveal") {
+          _kIntroRevealPose(u, o);
+        } else if (name === "portal") {
           _kIntroPortalCamPose(u, o);
         } else if (name === "overview") {
           const V = KITCHEN_INTRO_OVERVIEW;
@@ -5938,7 +5980,7 @@ let _worldSwitched = false;
           o.roll = 0;
         } else if (name === "misterSpot") {
           const P = _kIntro.spot;
-          if (!P) return _kIntroShotPose(0, 1, o); // no robot: hold the overview's last pose
+          if (!P) return _kIntroShotPose(KITCHEN_INTRO_SHOTS.findIndex((sh) => sh.name === "portal"), 1, o); // no robot: hold the portal shot's last pose (shot 0 before the reveal)
           const S = KITCHEN_INTRO_SPOT;
           const e = _kIntroEaseSine(u);
           _kIntroSpotCamPos(P, e, o.pos);
@@ -6715,6 +6757,90 @@ let _worldSwitched = false;
         return o;
       }
 
+      // ── Intro shot 0: the room reveal (bright → dark) ────────────────────────
+      const _kRevealEnd = { pos: new THREE.Vector3(), look: new THREE.Vector3(), fov: 50, roll: 0 };
+      const _kRevealLook = new THREE.Vector3();
+      /** The reveal's pose at u (0..1): a descending arc round the portal's centre, ending on the portal shot's first pose. */
+      function _kIntroRevealPose(u, o) {
+        const V = KITCHEN_INTRO_REVEAL;
+        // The portal is built here as the portal shot did (under the loader): its camera angle is chosen then.
+        if (!_kPortal.active && !_kPortal.done) _kIntroPortalBegin();
+        _kIntroPortalCamPose(0, _kRevealEnd); // the portal shot's first pose (no shake at its start)
+        if (u >= 1) {
+          o.pos.copy(_kRevealEnd.pos);
+          o.look.copy(_kRevealEnd.look);
+          o.fov = _kRevealEnd.fov;
+          o.roll = _kRevealEnd.roll;
+          return o;
+        }
+        const c = _kRevealEnd.look; // the portal's centre: the arc's pivot
+        const sx = V.startPos.x - c.x, sz = V.startPos.z - c.z;
+        const ex = _kRevealEnd.pos.x - c.x, ez = _kRevealEnd.pos.z - c.z;
+        const aS = Math.atan2(sz, sx);
+        let da = Math.atan2(ez, ex) - aS;
+        da = Math.atan2(Math.sin(da), Math.cos(da)); // the short way round
+        const e = _kIntroEaseSine(u);
+        const eH = _kIntroEaseSine(Math.pow(u, V.heightLag));
+        const a = aS + da * e;
+        const r = _kIntroLerp(Math.hypot(sx, sz), Math.hypot(ex, ez), e);
+        o.pos.set(c.x + Math.cos(a) * r, _kIntroLerp(V.startPos.y, _kRevealEnd.pos.y, eH), c.z + Math.sin(a) * r);
+        _kRevealLook.set(V.lookFrom.x, V.lookFrom.y, V.lookFrom.z);
+        o.look.lerpVectors(_kRevealLook, c, _kIntroEaseSine(Math.min(1, u / V.lookSettle)));
+        o.fov = _kIntroLerp(V.fovFrom, _kRevealEnd.fov, e);
+        o.roll = V.bankDeg * _kIntroDeg * Math.sin(Math.PI * u) * Math.sign(da) + _kRevealEnd.roll * e;
+        return o;
+      }
+
+      /**
+       * Lights only one of the modes uses (visible in one, hidden in the other). During the reveal they're all on
+       * (the off ones at intensity 0), so the light set never changes mid-shot (a change rebuilds every visible
+       * material's shader); its shaders are compiled in the warm-up (runKitchenWarmup).
+       */
+      let _kRevealLights = null;
+      function _kRevealLightSet() {
+        if (_kRevealLights) return _kRevealLights;
+        const b0 = lightBlend;
+        const vis = [new Set(), new Set()];
+        for (const b of [0, 1]) {
+          applyLightBlend(b);
+          scene.traverse((o) => o.isLight && o.visible && vis[b].add(o));
+        }
+        applyLightBlend(b0);
+        _kRevealLights = [...vis[0], ...vis[1]].filter((l) => !(vis[0].has(l) && vis[1].has(l)));
+        return _kRevealLights;
+      }
+      /** The light blend for the reveal (b: 1 bright → 0 dark), every mode's lights kept on. */
+      function _kRevealApplyLights(b) {
+        lightBlend = lightBlendTarget = b;
+        applyLightBlend(b);
+        for (const l of _kRevealLightSet()) l.visible = true;
+      }
+      /** The portal's ring hidden during the reveal (it's built under the loader; it appears with its own shot). */
+      function _kRevealShowPortal(show) {
+        if (_kPortal.group) _kPortal.group.visible = show;
+        if (_kPortal.arcs && _kPortal.arcs.mesh) _kPortal.arcs.mesh.visible = show;
+      }
+      /** Per frame of the intro: the reveal's lights (bright → dark) until the portal shot starts. */
+      function _kIntroRevealTick(t) {
+        const V = KITCHEN_INTRO_REVEAL;
+        if (_kIntro.revealDone) return;
+        if (t >= _kIntro.shotStart("portal")) {
+          _kIntroRevealEnd();
+          return;
+        }
+        const k = Math.min(1, Math.max(0, (t - V.lights.fromSec) / (V.lights.toSec - V.lights.fromSec)));
+        _kRevealApplyLights(1 - introEase(k));
+        _kRevealShowPortal(false);
+      }
+      /** The reveal over (or skipped): dark mode exactly as before, the usual light set, the portal shown. */
+      function _kIntroRevealEnd() {
+        if (_kIntro.revealDone) return;
+        _kIntro.revealDone = true;
+        lightBlend = lightBlendTarget = 0;
+        applyLightBlend(0);
+        _kRevealShowPortal(true);
+      }
+
       /** Called when the loader starts fading out: the intro begins. */
       function startKitchenIntroPlayback() {
         if (_kIntro.state !== "pending") return;
@@ -6735,6 +6861,7 @@ let _worldSwitched = false;
         _kReleasePortalLightSlots(); // skipped before the portal began: the placeholders go now
         const wasPlaying = _kIntro.state === "playing";
         _kIntro.state = "done";
+        if (wasPlaying) _kIntroRevealEnd(); // dark mode (if it ended mid-reveal)
         _kIntroPortalEnd(); // the portal gone, the car on its grid spot
         // Mister Spot back to its normal path if the intro ends mid-shot.
         if (_kIntro.spotStarted && !_kIntro.spotEnded) {
@@ -6804,7 +6931,10 @@ let _worldSwitched = false;
         }
         if (_kIntro.state === "playing") {
           _kIntro.t += dt;
-          _kIntroPortalTick(_kIntro.t);
+          _kIntroRevealTick(_kIntro.t);
+          // The portal's sequence on its own shot's clock (it was the first shot).
+          const tPortal = _kIntro.t - _kIntro.shotStart("portal");
+          if (tPortal >= 0) _kIntroPortalTick(tPortal);
           _kIntroWaves(_kIntro.t);
           _kIntroSpotTick(_kIntro.t);
           if (_kIntro.t >= KITCHEN_INTRO_TOTAL_SEC) {
@@ -8915,6 +9045,20 @@ let _worldSwitched = false;
         mesh.material = mat;
       }
 
+      /**
+       * The iced coffee in iceCoffeeTank (sRGB hex): creamy coffee with milk, light-to-medium brown. Unlit (the
+       * same in both light modes). Tank: the liquid's body (hot = its glow low in the middle, low → body → upper
+       * by height, edge = darker toward the sides). Surface: its moving top (deep troughs → mid → lift on the crests).
+       */
+      const KITCHEN_ICE_COFFEE_COLORS = {
+        tank: { hot: 0xc8915e, low: 0xb9844f, body: 0xa9784c, upper: 0xc9a27a, edge: 0x7a5234 },
+        surface: { deep: 0x8c6440, mid: 0xc39b72, lift: 0xe2c7a6 },
+      };
+      /** A colour as a GLSL vec3 (linear, as the shader writes it). */
+      function _iceCoffeeVec3(hex) {
+        const c = new THREE.Color(hex);
+        return `vec3(${c.r.toFixed(4)}, ${c.g.toFixed(4)}, ${c.b.toFixed(4)})`;
+      }
       let _iceCoffeeTankMat = null;
       let _iceCoffeeSurfaceMat = null;
       function updateIceCoffeeTank(dt) {
@@ -9723,6 +9867,11 @@ let _worldSwitched = false;
         sideMat.color.set(0x647bb8);
         sideMat.emissive.setHex(0x0d1d50);
         sideMat.emissiveIntensity = 0.2;
+        // Its dark-mode look (bright mode: KITCHEN_TABLE_SIDE_BRIGHT, from the light blend).
+        sideMat.userData.darkColor = sideMat.color.clone();
+        sideMat.userData.darkEmissive = sideMat.emissive.clone();
+        sideMat.userData.darkEmissiveIntensity = sideMat.emissiveIntensity;
+        sideMat.userData.darkMetalness = sideMat.metalness;
         baseMat.color.set(0x302544);
         baseMat.emissive.setHex(0x160a2d);
         baseMat.emissiveIntensity = 0.12;
@@ -11608,11 +11757,11 @@ let _worldSwitched = false;
                   vec2 xz = vLocal.xz / vec2(0.793, 1.648);
                   float radial = clamp(length(xz), 0.0, 1.0);
                   float core = exp(-dot(xz, xz) * 2.2) * pow(1.0 - h, 1.2);
-                  vec3 hot = vec3(0.95, 0.0, 0.38);
-                  vec3 low = vec3(0.86, 0.0, 0.32);
-                  vec3 body = vec3(0.78, 0.0, 0.28);
-                  vec3 upper = vec3(0.84, 0.0, 0.34);
-                  vec3 edge = vec3(0.52, 0.0, 0.2);
+                  vec3 hot = ${_iceCoffeeVec3(KITCHEN_ICE_COFFEE_COLORS.tank.hot)};
+                  vec3 low = ${_iceCoffeeVec3(KITCHEN_ICE_COFFEE_COLORS.tank.low)};
+                  vec3 body = ${_iceCoffeeVec3(KITCHEN_ICE_COFFEE_COLORS.tank.body)};
+                  vec3 upper = ${_iceCoffeeVec3(KITCHEN_ICE_COFFEE_COLORS.tank.upper)};
+                  vec3 edge = ${_iceCoffeeVec3(KITCHEN_ICE_COFFEE_COLORS.tank.edge)};
                   vec3 col = mix(hot, low, smoothstep(0.0, 0.18, h));
                   col = mix(col, body, smoothstep(0.12, 0.5, h));
                   col = mix(col, upper, smoothstep(0.55, 1.0, h));
@@ -11656,9 +11805,9 @@ let _worldSwitched = false;
                 varying float vChop;
                 void main() {
                   float crest = smoothstep(-0.35, 0.55, vWave);
-                  vec3 deep = vec3(0.42, 0.0, 0.16);
-                  vec3 mid = vec3(0.92, 0.0, 0.34);
-                  vec3 lift = vec3(1.0, 0.0, 0.4);
+                  vec3 deep = ${_iceCoffeeVec3(KITCHEN_ICE_COFFEE_COLORS.surface.deep)};
+                  vec3 mid = ${_iceCoffeeVec3(KITCHEN_ICE_COFFEE_COLORS.surface.mid)};
+                  vec3 lift = ${_iceCoffeeVec3(KITCHEN_ICE_COFFEE_COLORS.surface.lift)};
                   vec3 col = mix(deep, mid, clamp(vChop, 0.0, 1.0));
                   col = mix(col, lift, crest * 0.85);
                   gl_FragColor = vec4(col, 1.0);
@@ -13223,6 +13372,7 @@ let _worldSwitched = false;
               _tableCoverLampMat = topMat;
               _kitchenTableCoverLampMat = topMat;
               _kitchenTableCoverSideMat = sideMat;
+              if (lightBlend > 0) applyLightBlend(lightBlend); // already (partly) bright: its bright colour now
               if (!_worldSwitched || loadToken !== _kitchenLoadToken) return;
               _finishKitchenWorldSetup();
               if (baseMat && mainTableBaseMesh) {
@@ -14192,6 +14342,22 @@ let _worldSwitched = false;
             const compiling = renderer.compileAsync(scene, camera).catch(() => {});
             renderer.setRenderTarget(prevTarget);
             await Promise.race([compiling, new Promise((resolve) => setTimeout(resolve, KITCHEN_WARMUP.maxWaitMs))]);
+            // The intro's room reveal (bright → dark): every mode's lights on at once (_kRevealLightSet), compiled
+            // here too, so the reveal doesn't freeze as it starts or as it hands over to dark mode.
+            // As it plays: the car hidden (in the portal's tunnel, with its own lights).
+            const b0 = lightBlend;
+            const target0 = lightBlendTarget;
+            const carWasVisible = car.visible;
+            car.visible = false;
+            _kRevealApplyLights(1);
+            renderer.setRenderTarget(finalComposer.readBuffer);
+            const compilingReveal = renderer.compileAsync(scene, camera).catch(() => {});
+            renderer.setRenderTarget(prevTarget);
+            car.visible = carWasVisible;
+            lightBlend = b0;
+            lightBlendTarget = target0;
+            applyLightBlend(b0);
+            await Promise.race([compilingReveal, new Promise((resolve) => setTimeout(resolve, KITCHEN_WARMUP.maxWaitMs))]);
           }
 
         } catch (e) {
