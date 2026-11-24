@@ -8,10 +8,12 @@
  *   B: glassPotBigCup1 + glassPotBig1   on shelf3, the bay right of the middle post
  *   C: glassPotBigCup2 + glassPotBig2   on shelf4 (the right closet)
  *
- * Each group fills its bay in one row along the shelf (x), evenly: copies
- * `spacing` apart (gap between neighbours), the row centred in the bay, as many
- * as fit. Every copy stands exactly on the shelf's top surface (from the shelf
- * mesh's bounds); depth (z) as modelled. The model's own pair is replaced by
+ * Each group fills its bay in one row along the shelf (x): as many copies as
+ * fit `spacing` apart, less `fewerThanFit`, spread with equal gaps between them
+ * and at both ends. Each copy (the whole group) gets a tiny seeded nudge along /
+ * across the shelf and a turn of a degree or two (`jitter`), so the row looks
+ * placed by hand but still neat. Every copy stands exactly on the shelf's top
+ * surface (from the shelf mesh's bounds). The model's own pair is replaced by
  * the row (it floated 0.007 / 0.023 above the shelf).
  *
  * Bays (x): between the inner faces of the metal frame's posts at shelf height
@@ -19,16 +21,33 @@
  * the shelf's front / back edges, outside its depth, so these are the usable
  * lengths: shelf3 -15.732..1.500 and 1.725..18.958, shelf4 27.514..41.807.
  *
+ * Glass: physical glass, double-sided (the far wall shows through the near
+ * one), reflecting `envMap` with the shader's own Fresnel (edges reflect more
+ * than the middle), a clear coat, a very faint tint and a Fresnel rim so the
+ * outline reads against the wall. Lit by the scene's lights like any surface.
+ *
  * Cost: one InstancedMesh per mesh (6 draw calls for all copies), one geometry
  * and one material per kind. The glass uses physical transmission on the high /
  * ultra tiers (three renders the opaque scene once more per frame for it,
- * whatever the number of copies; transmissive objects aren't alpha-blended, so
- * no sorting issues). Lower tiers get a cheap alpha-blended glass instead
- * (setHighQuality(false)): no extra pass, depthWrite off.
+ * whatever the number of copies). Transmissive glass writes depth, so copies
+ * and other objects occlude it correctly; its refraction shows only opaque
+ * things, so glass seen through another glass (along the row, at a steep angle)
+ * shows the wall behind instead. Lower tiers get a cheap alpha-blended glass
+ * (setHighQuality(false)): no extra pass, depthWrite off, its copies drawn back
+ * to front by update(camera).
  */
 export const KITCHEN_SHELF_JARS = {
-  spacing: 0.6, // gap between neighbouring copies along the shelf (model units; a small jar is 1.78 wide, a big 1.47)
+  spacing: 0.6, // minimum gap between neighbouring copies: sets how many fit (model units; a small jar is 1.78 wide, a big 1.47)
+  fewerThanFit: 1, // copies left out of each row (of as many as fit), the rest spread over the bay
   endClearance: 0.1, // at least this much between the row's ends and the bay's ends
+  // A whole group (lid + pot) is nudged as one, from a fixed seed (the same every load). 1 unit ≈ 5.6 cm (the small
+  // jar is ~10 cm across), so 0.05 ≈ 3 mm.
+  jitter: {
+    along: 0.05, // ± along the shelf (x)
+    across: 0.05, // ± across the shelf (z)
+    yawDeg: 2, // ± turn about the vertical axis (degrees)
+    seed: 20261124,
+  },
   groups: [
     { name: "A", parts: ["glassPotCup1", "glassPot1"], shelf: "shelf3", bay: [-15.732, 1.5] },
     { name: "B", parts: ["glassPotBigCup1", "glassPotBig1"], shelf: "shelf3", bay: [1.725, 18.958] },
@@ -37,14 +56,24 @@ export const KITCHEN_SHELF_JARS = {
   glassNames: ["glassPot1", "glassPotBig1", "glassPotBig2"],
   glass: {
     color: 0xffffff,
-    roughness: 0.04, // near-polished: sharp, faint reflections
-    metalness: 0,
-    transmission: 1, // fully see-through (refracts what's behind it)
+    reflection: 0.7, // environment reflection strength (envMapIntensity; more is too bright in the dim kitchen); the physical shader's Fresnel makes edges reflect more
+    roughness: 0.02, // polished: sharp reflections
     ior: 1.5, // glass
-    thickness: 0.12, // wall thickness for the refraction (model units): a slight bend of what's behind
+    thickness: 0.35, // refraction depth (model units): what's behind visibly bends
+    metalness: 0,
+    transmission: 1, // fully see-through
     specularIntensity: 1,
-    envMapIntensity: 0.8, // subtle reflections of the neutral environment
-    cheapOpacity: 0.22, // lower tiers (no transmission): how much the glass tints what's behind it
+    clearcoat: 0.25, // an extra polished layer: more shine
+    clearcoatRoughness: 0.03,
+    tint: 0xe9f6f1, // a very faint green-blue (attenuation colour)
+    tintDistance: 8, // how far light travels in the glass before taking the tint (model units): faint
+    rim: {
+      color: 0xd8e8ff, // the pot's outline: a faint bright edge where the surface turns away from the camera
+      strength: 0.32,
+      power: 3, // higher = thinner edge
+    },
+    cheapOpacity: 0.35, // lower tiers (no transmission): how much of the glass's own shading covers what's behind it
+    cheapColor: 0x1a1e22, // lower tiers: a dark base, so mostly its reflections show (white read as frosted plastic)
   },
   lid: {
     color: 0x5c3a22, // dark brown (a darker one reads black in the kitchen's dim light)
@@ -54,16 +83,30 @@ export const KITCHEN_SHELF_JARS = {
   },
 };
 
+/** Seeded random in [0, 1) (mulberry32). */
+function seededRandom(seed) {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
 /**
  * @param {object} o
  * @param {typeof import("three")} o.THREE
  * @param {import("three").Object3D} o.root   the kitchen model (its meshes by name)
- * @param {import("three").Texture|null} o.envMap  reflections for the glass (a PMREM texture)
- * @param {boolean} [o.ownsEnvMap]  dispose envMap with the jars
+ * @param {import("three").Texture|null} o.envMap  the glass's reflections (a PMREM texture)
+ * @param {import("three").Texture|null} [o.lidEnvMap]  the lids' reflections (default envMap)
+ * @param {boolean} [o.ownsEnvMap]  dispose envMap / lidEnvMap with the jars
  * @param {boolean} o.highQuality  transmission glass (else the cheap alpha glass)
  */
-export function createShelfJars({ THREE, root, envMap, ownsEnvMap = false, highQuality }) {
+export function createShelfJars({ THREE, root, envMap, lidEnvMap = envMap, ownsEnvMap = false, highQuality }) {
   const C = KITCHEN_SHELF_JARS;
+  const G = C.glass;
   root.updateMatrixWorld(true);
   const byName = (n) => {
     const m = root.getObjectByName(n);
@@ -74,28 +117,58 @@ export function createShelfJars({ THREE, root, envMap, ownsEnvMap = false, highQ
   if (missing.length) throw new Error("Shelf jars: missing in the model: " + missing.join(", "));
 
   const glassMat = new THREE.MeshPhysicalMaterial({
-    color: C.glass.color,
-    roughness: C.glass.roughness,
-    metalness: C.glass.metalness,
-    ior: C.glass.ior,
-    thickness: C.glass.thickness,
-    specularIntensity: C.glass.specularIntensity,
-    envMapIntensity: C.glass.envMapIntensity,
+    color: G.color,
+    roughness: G.roughness,
+    metalness: G.metalness,
+    ior: G.ior,
+    thickness: G.thickness,
+    specularIntensity: G.specularIntensity,
+    envMapIntensity: G.reflection,
+    clearcoat: G.clearcoat,
+    clearcoatRoughness: G.clearcoatRoughness,
+    attenuationColor: new THREE.Color(G.tint),
+    attenuationDistance: G.tintDistance,
+    side: THREE.DoubleSide,
     envMap,
   });
+  // The rim: a Fresnel edge added to the lit colour (and, for the cheap glass, to its opacity), so the pot's shape
+  // stands out against the dark wall.
+  const rimUniforms = {
+    uRimColor: { value: new THREE.Color(G.rim.color) },
+    uRimStrength: { value: G.rim.strength },
+    uRimPower: { value: G.rim.power },
+  };
+  glassMat.onBeforeCompile = (shader) => {
+    Object.assign(shader.uniforms, rimUniforms);
+    shader.fragmentShader = shader.fragmentShader
+      .replace("void main() {", "uniform vec3 uRimColor;\nuniform float uRimStrength;\nuniform float uRimPower;\nvoid main() {")
+      .replace(
+        "#include <opaque_fragment>",
+        `{
+          float rimF = pow(1.0 - clamp(abs(dot(normalize(normal), normalize(vViewPosition))), 0.0, 1.0), uRimPower);
+          outgoingLight += uRimColor * (uRimStrength * rimF);
+          diffuseColor.a = max(diffuseColor.a, min(1.0, uRimStrength * rimF * 2.0));
+        }
+        #include <opaque_fragment>`,
+      );
+  };
+  glassMat.customProgramCacheKey = () => "kitchenShelfJarGlassRim";
   const lidMat = new THREE.MeshStandardMaterial({
     color: C.lid.color,
     roughness: C.lid.roughness,
     metalness: C.lid.metalness,
     envMapIntensity: C.lid.envMapIntensity,
-    envMap,
+    envMap: lidEnvMap,
   });
 
+  let transparentGlass = false;
   /** Glass quality: transmission (high) or plain alpha blending (cheap). */
   function setHighQuality(on) {
-    glassMat.transmission = on ? C.glass.transmission : 0;
+    transparentGlass = !on;
+    glassMat.transmission = on ? G.transmission : 0;
     glassMat.transparent = !on;
-    glassMat.opacity = on ? 1 : C.glass.cheapOpacity;
+    glassMat.opacity = on ? 1 : G.cheapOpacity;
+    glassMat.color.set(on ? G.color : G.cheapColor);
     glassMat.depthWrite = on;
     glassMat.needsUpdate = true;
   }
@@ -104,21 +177,34 @@ export function createShelfJars({ THREE, root, envMap, ownsEnvMap = false, highQ
   const box = new THREE.Box3();
   const tmp = new THREE.Box3();
   const meshes = [];
-  const rows = []; // per group: { name, shelf, bay, count, offsets: [Vector3], parts }
+  const glassRows = []; // { inst, mats: [Matrix4], centres: [Vector3] }: for the back-to-front sort
+  const rows = []; // per group: { name, shelf, bay, count, groupMats: [Matrix4], parts, shelfTop }
+  const rand = seededRandom(C.jitter.seed);
+  const rad = THREE.MathUtils.degToRad;
   for (const g of C.groups) {
     const parts = g.parts.map(byName);
     box.makeEmpty();
     for (const p of parts) box.union(tmp.setFromObject(p));
     const shelfTop = tmp.setFromObject(byName(g.shelf)).max.y;
     const w = box.max.x - box.min.x;
-    const len = g.bay[1] - g.bay[0] - 2 * C.endClearance;
-    const count = Math.max(1, Math.floor((len + C.spacing) / (w + C.spacing)));
-    const rowW = count * w + (count - 1) * C.spacing;
-    const x0 = (g.bay[0] + g.bay[1]) / 2 - rowW / 2; // the row centred in the bay
-    const dy = shelfTop - box.min.y; // stand on the shelf
-    const offsets = [];
-    for (let i = 0; i < count; i++) offsets.push(new THREE.Vector3(x0 + i * (w + C.spacing) - box.min.x, dy, 0));
-    rows.push({ name: g.name, shelf: g.shelf, bay: g.bay, count, width: w, offsets, parts, shelfTop });
+    const L = g.bay[1] - g.bay[0];
+    const fit = Math.floor((L - 2 * C.endClearance + C.spacing) / (w + C.spacing));
+    const count = Math.max(1, fit - C.fewerThanFit);
+    const gap = (L - count * w) / (count + 1); // the same gap between copies and at both ends
+    const cx = (box.min.x + box.max.x) / 2;
+    const cz = (box.min.z + box.max.z) / 2;
+    const dy = shelfTop - box.min.y; // stand on the shelf (a turn about the vertical keeps the bottom's height)
+    const groupMats = [];
+    const toC = new THREE.Matrix4().makeTranslation(-cx, 0, -cz);
+    for (let i = 0; i < count; i++) {
+      const x = g.bay[0] + gap + w / 2 + i * (w + gap) + (rand() * 2 - 1) * C.jitter.along;
+      const z = cz + (rand() * 2 - 1) * C.jitter.across;
+      const yaw = rad((rand() * 2 - 1) * C.jitter.yawDeg);
+      const m = new THREE.Matrix4().makeRotationY(yaw).multiply(toC);
+      m.premultiply(new THREE.Matrix4().makeTranslation(x, dy, z));
+      groupMats.push(m); // the whole group's move: about its own centre, then to its place
+    }
+    rows.push({ name: g.name, shelf: g.shelf, bay: g.bay, count, groupMats, parts, shelfTop });
 
     for (const p of parts) {
       const isGlass = C.glassNames.includes(p.name);
@@ -127,12 +213,8 @@ export function createShelfJars({ THREE, root, envMap, ownsEnvMap = false, highQ
       inst.castShadow = isGlass ? false : p.castShadow; // clear glass casts no solid shadow
       inst.receiveShadow = p.receiveShadow;
       inst.renderOrder = p.renderOrder;
-      const m = new THREE.Matrix4();
-      const t = new THREE.Matrix4();
-      for (let i = 0; i < count; i++) {
-        t.makeTranslation(offsets[i].x, offsets[i].y, offsets[i].z);
-        inst.setMatrixAt(i, m.multiplyMatrices(t, p.matrixWorld));
-      }
+      const mats = groupMats.map((gm) => new THREE.Matrix4().multiplyMatrices(gm, p.matrixWorld));
+      mats.forEach((m, i) => inst.setMatrixAt(i, m));
       inst.instanceMatrix.needsUpdate = true;
       inst.computeBoundingBox();
       inst.computeBoundingSphere();
@@ -142,6 +224,38 @@ export function createShelfJars({ THREE, root, envMap, ownsEnvMap = false, highQ
       inst.updateMatrixWorld(true);
       p.visible = false; // the row replaces the model's own copy
       meshes.push(inst);
+      if (isGlass) glassRows.push({ inst, mats, centres: mats.map((m) => new THREE.Vector3().setFromMatrixPosition(m)), order: mats.map((_, i) => i) });
+    }
+  }
+
+  /** The copy's world box from its parts' vertices (exact, after the turn). */
+  const _v = new THREE.Vector3();
+  function copyBox(r, i, target) {
+    target.makeEmpty();
+    for (const p of r.parts) {
+      const pos = p.geometry.attributes.position;
+      const m = new THREE.Matrix4().multiplyMatrices(r.groupMats[i], p.matrixWorld);
+      for (let k = 0; k < pos.count; k++) target.expandByPoint(_v.fromBufferAttribute(pos, k).applyMatrix4(m));
+    }
+    return target;
+  }
+
+  /**
+   * The cheap (alpha-blended) glass: draw each row's copies back to front from the camera, so nearer glass blends
+   * over farther glass. (Rows themselves are sorted by three, by their bounds' centre; the transmission glass writes
+   * depth and needs no sort.) Call before rendering.
+   */
+  const _camPos = new THREE.Vector3();
+  function update(camera) {
+    if (!transparentGlass || !camera) return;
+    camera.getWorldPosition(_camPos);
+    for (const gr of glassRows) {
+      const d = gr.centres.map((c) => c.distanceToSquared(_camPos));
+      const order = gr.order.slice().sort((a, b) => d[b] - d[a]);
+      if (order.every((v, k) => v === gr.order[k])) continue;
+      gr.order = order;
+      order.forEach((src, k) => gr.inst.setMatrixAt(k, gr.mats[src]));
+      gr.inst.instanceMatrix.needsUpdate = true;
     }
   }
 
@@ -158,8 +272,7 @@ export function createShelfJars({ THREE, root, envMap, ownsEnvMap = false, highQ
     const copies = [];
     for (const r of rows) {
       for (let i = 0; i < r.count; i++) {
-        const b = new THREE.Box3();
-        for (const p of r.parts) b.union(tmp.setFromObject(p).translate(r.offsets[i]));
+        const b = copyBox(r, i, new THREE.Box3());
         copies.push({ group: r.name, i, box: b });
         if (Math.abs(b.min.y - r.shelfTop) > 1e-4) issues.push(`${r.name}#${i}: bottom ${b.min.y} not on shelf top ${r.shelfTop}`);
         if (b.min.x < r.bay[0] || b.max.x > r.bay[1]) issues.push(`${r.name}#${i}: outside its bay`);
@@ -209,11 +322,12 @@ export function createShelfJars({ THREE, root, envMap, ownsEnvMap = false, highQ
     glassMat.dispose();
     lidMat.dispose();
     if (ownsEnvMap && envMap) envMap.dispose();
+    if (ownsEnvMap && lidEnvMap && lidEnvMap !== envMap) lidEnvMap.dispose();
     for (const g of C.groups) for (const n of g.parts) {
       const p = root.getObjectByName(n);
       if (p) p.visible = true;
     }
   }
 
-  return { meshes, rows, check, setHighQuality, dispose };
+  return { meshes, rows, check, update, setHighQuality, dispose };
 }

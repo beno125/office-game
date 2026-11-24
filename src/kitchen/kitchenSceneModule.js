@@ -13,6 +13,7 @@
       import { RGBELoader } from "three/addons/loaders/RGBELoader.js";
       import { DecalGeometry } from "three/addons/geometries/DecalGeometry.js";
       import { RectAreaLightUniformsLib } from "three/addons/lights/RectAreaLightUniformsLib.js";
+      import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
 import { getKitchenSceneMount } from "./kitchenSceneMount.js";
 import { emitKitchenSceneEvent } from "../game/kitchenSceneEvents.js";
 import {
@@ -12341,13 +12342,31 @@ let _worldSwitched = false;
                 let env = scene.environment;
                 let ownEnv = false;
                 if (!env) {
-                  // No quality tier builds one: their own from the kitchen's neutral gradient (as coffeeGrill).
-                  const src = buildNeutralEnvironmentTexture();
-                  env = pmremGenerator.fromEquirectangular(src).texture;
-                  src.dispose();
+                  // No quality tier builds one: their own, a soft-boxed room (three's RoomEnvironment), so the glass
+                  // has bright windows and panels to reflect (the neutral gradient left it nearly invisible).
+                  const room = new RoomEnvironment();
+                  env = pmremGenerator.fromScene(room, 0.04).texture;
+                  room.traverse((o) => {
+                    if (o.geometry) o.geometry.dispose();
+                    if (o.material) o.material.dispose();
+                  });
                   ownEnv = true;
                 }
-                _shelfJars = createShelfJars({ THREE, root: kmodel, envMap: env, ownsEnvMap: ownEnv, highQuality: useVisualParity() });
+                // The lids keep their reflection from the kitchen's neutral gradient (as before the glass changed).
+                let lidEnv = scene.environment;
+                if (!lidEnv) {
+                  const src = buildNeutralEnvironmentTexture();
+                  lidEnv = pmremGenerator.fromEquirectangular(src).texture;
+                  src.dispose();
+                }
+                _shelfJars = createShelfJars({
+                  THREE,
+                  root: kmodel,
+                  envMap: env,
+                  lidEnvMap: lidEnv,
+                  ownsEnvMap: ownEnv,
+                  highQuality: useVisualParity(),
+                });
                 const report = _shelfJars.check();
                 if (report.issues.length) console.warn("Shelf jars:", report.issues);
               } catch (e) {
@@ -14277,6 +14296,7 @@ let _worldSwitched = false;
           updateMisterSpot(dt);
           updateMisterSpotTrail(dt);
           updateTableLightReflections();
+          if (_shelfJars) _shelfJars.update(camera); // the cheap glass's copies back to front
           finalComposer.render();
           restoreKitchenJumpCamera();
           restoreKitchenIntroCamera();
