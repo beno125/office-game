@@ -56,21 +56,21 @@ export const KITCHEN_SHELF_JARS = {
   glassNames: ["glassPot1", "glassPotBig1", "glassPotBig2"],
   glass: {
     color: 0xffffff,
-    reflection: 0.07, // environment reflection strength (envMapIntensity; 0.7, 0.3 and 0.15 were too strong); the physical shader's Fresnel makes edges reflect more
-    roughness: 0.05, // polished, the reflections a little soft
+    reflection: 0.04, // environment reflection strength (envMapIntensity): faint, the body comes from refraction, tint and rim; the physical shader's Fresnel makes edges reflect more
+    roughness: 0.08, // polished, the highlights soft (no hard spots)
     ior: 1.5, // glass
-    thickness: 0.08, // refraction depth (model units): what's behind bends very slightly
+    thickness: 0.4, // refraction depth (model units): what's behind visibly bends, so the glass has body
     metalness: 0,
     transmission: 1, // fully see-through
-    specularIntensity: 1,
+    specularIntensity: 0.35, // the lights' highlights: small and quiet
     clearcoat: 0, // an extra polished layer for more shine (off: too much)
     clearcoatRoughness: 0.03,
     tint: 0xe9f6f1, // a very faint green-blue (attenuation colour)
-    tintDistance: 8, // how far light travels in the glass before taking the tint (model units): faint
+    tintDistance: 2.5, // how far light travels in the glass before taking the tint (model units): a faint body colour
     rim: {
       color: 0xd8e8ff, // the pot's outline: a faint bright edge where the surface turns away from the camera
-      strength: 0.03,
-      power: 3, // higher = thinner edge
+      strength: 0.16,
+      power: 2, // higher = thinner edge
     },
     cheapOpacity: 0.35, // lower tiers (no transmission): how much of the glass's own shading covers what's behind it
     cheapColor: 0x1a1e22, // lower tiers: a dark base, so mostly its reflections show (white read as frosted plastic)
