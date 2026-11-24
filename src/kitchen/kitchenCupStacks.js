@@ -28,9 +28,10 @@ export const KITCHEN_CUP_STACKS = {
   shelf: "shelf2",
   bay: [-38.358, -24.12], // usable length (x): between the frame's end members at shelf height
   cupsPerStack: { 3: 0.7, 2: 0.2, 1: 0.1 }, // how many cups a stack has (weights)
-  spacing: 1.6, // minimum gap between neighbouring stacks (sets how many fit; model units; a cup is 1.13 across)
+  spacing: 0.35, // gap between neighbouring stacks (model units; a cup is 1.13 across)
+  maxCols: 5, // stacks per row at most (the group from the shelf's left end)
   maxRows: 2, // rows at most (the shelf could take 3)
-  rowSpacing: 0.6, // gap between rows
+  rowSpacing: 0.35, // gap between rows
   backClearance: 0.08, // from the shelf's back edge
   edgeClearance: 0.08, // from the bay's ends and the shelf's front edge
   nestClearance: 0.006, // between a cup's outside and the inside of the cup below
@@ -156,12 +157,12 @@ export function createCupStacks({ THREE, root, envMap = null }) {
   const shelfTop = shelfBox.max.y;
   const L = C.bay[1] - C.bay[0] - 2 * C.edgeClearance;
   const D = shelfBox.max.z - shelfBox.min.z - C.backClearance - C.edgeClearance;
-  const cols = Math.max(1, Math.floor((L + C.spacing) / (cupD + C.spacing)));
+  const cols = Math.max(1, Math.min(C.maxCols, Math.floor((L + C.spacing) / (cupD + C.spacing))));
   const rows = Math.max(1, Math.min(C.maxRows, Math.floor((D + C.rowSpacing) / (cupD + C.rowSpacing))));
-  const gapX = (L - cols * cupD) / Math.max(1, cols - 1); // even, filling the bay
+  const gapX = C.spacing;
   const rowW = rows * cupD + (rows - 1) * C.rowSpacing;
   const z0 = shelfBox.min.z + C.backClearance + (D - rowW) / 2 + cupD / 2;
-  const x0 = C.bay[0] + C.edgeClearance + cupD / 2;
+  const x0 = C.bay[0] + C.edgeClearance + cupD / 2; // the group from the shelf's left end
 
   // Colours: weighted, never more than maxRun in a row (in placing order).
   const totalW = C.colors.reduce((a, c) => a + c.weight, 0);
