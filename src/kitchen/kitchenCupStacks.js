@@ -29,7 +29,7 @@ export const KITCHEN_CUP_STACKS = {
   bay: [-38.358, -24.12], // usable length (x): between the frame's end members at shelf height
   cupsPerStack: { 3: 0.7, 2: 0.2, 1: 0.1 }, // how many cups a stack has (weights)
   spacing: 0.35, // gap between neighbouring stacks (model units; a cup is 1.13 across)
-  maxCols: 5, // stacks per row at most (the group from the shelf's left end)
+  maxCols: 8, // stacks per row at most (the group from the shelf's left end)
   maxRows: 2, // rows at most (the shelf could take 3)
   rowSpacing: 0.35, // gap between rows
   backClearance: 0.08, // from the shelf's back edge
