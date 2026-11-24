@@ -9820,6 +9820,8 @@ let _worldSwitched = false;
           depthWrite: false,
         });
         _kitchenCoverTopMesh = planeInfo.topPlane || null;
+        // The start lights' reflections are part of the table top's own surface (kitchenStartLights.js).
+        if (_startLights && _kitchenCoverTopMesh) _startLights.attachTableReflection(_kitchenCoverTopMesh.material);
       }
 
       function removeKitchenTableTopLampOverlay() {
@@ -12551,7 +12553,10 @@ let _worldSwitched = false;
             // The start lights on the table (see kitchenStartLights.js): materials, lit by the countdown.
             if (!_startLights) {
               try {
-                _startLights = createStartLights({ THREE, root: kmodel, getTableY: () => getTablePlaySurfaceY() });
+                _startLights = createStartLights({ THREE, root: kmodel });
+                // The lamps' reflections are part of the table top's own surface (its material's shader); attached
+                // here, or when the table top is set up if that comes later.
+                if (_kitchenCoverTopMesh) _startLights.attachTableReflection(_kitchenCoverTopMesh.material);
               } catch (e) {
                 console.warn("Failed to set up the start lights:", e);
               }
