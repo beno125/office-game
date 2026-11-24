@@ -40,6 +40,7 @@ import { createKitchenFood, trayFromMesh, addTrayShapes, KITCHEN_FOOD } from "./
 import { createMilkCartons } from "./kitchenMilkCartons.js";
 import { createShelfJars } from "./kitchenShelfJars.js";
 import { createStartLights } from "./kitchenStartLights.js";
+import { createCounterScreen } from "./kitchenCounterScreen.js";
 import { createKitchenNapkins } from "./kitchenNapkins.js";
 import { createCameraDrag } from "../game/cameraDrag.js";
 import {
@@ -703,6 +704,7 @@ export function isKitchenSceneReady() {
       const VISUAL_PARITY_TIER = 2;
       let _shelfJars = null; // kitchenShelfJars.js (declared early: applyPerformanceSettings reads it)
       let _startLights = null; // kitchenStartLights.js
+      let _counterScreen = null; // kitchenCounterScreen.js
 
       function getScreenPixelCount() {
         const dpr = window.devicePixelRatio || 1;
@@ -5116,6 +5118,18 @@ let _worldSwitched = false;
         return null;
       }
 
+      /**
+       * The race time for the LED board: 0 until GO, then the race clock (_raceElapsed, the clock raceTimeFromGo and
+       * the finish times use), stopped at the player's own finish time once they finish, and where the clock stops
+       * when the results open.
+       */
+      function raceClockSec() {
+        if (_racePhase !== "racing" && _racePhase !== "finishing" && _racePhase !== "finished") return 0;
+        const player = _raceCars.find((c) => c.isPlayer);
+        if (player && player.finishOrder) return player.finishTime;
+        return _raceElapsed;
+      }
+
       /** Per frame: race phases, laps, HUD, AI car visuals. */
       function updateKitchenRace(dt) {
         if (!_raceTrack) {
@@ -9280,6 +9294,10 @@ let _worldSwitched = false;
           _startLights.dispose();
           _startLights = null;
         }
+        if (_counterScreen) {
+          _counterScreen.dispose();
+          _counterScreen = null;
+        }
         if (_kitchenNapkins) {
           _kitchenNapkins.dispose();
           _kitchenNapkins = null;
@@ -12522,6 +12540,17 @@ let _worldSwitched = false;
                 console.warn("Failed to set up the start lights:", e);
               }
             }
+            // The race-time LED board on the start lights (see kitchenCounterScreen.js).
+            if (!_counterScreen) {
+              const screen = kmodel.getObjectByName("counterScreen");
+              if (screen && screen.isMesh) {
+                try {
+                  _counterScreen = createCounterScreen({ THREE, mesh: screen });
+                } catch (e) {
+                  console.warn("Failed to set up the race-time screen:", e);
+                }
+              } else console.warn("Race-time screen: counterScreen not found");
+            }
             // Paper napkins flying out of the paper dispenser (see kitchenNapkins.js).
             if (!_kitchenNapkins) {
               try {
@@ -14118,6 +14147,7 @@ let _worldSwitched = false;
           }
           updateKitchenRace(dt);
           if (_startLights) _startLights.update(raceTimeFromGo());
+          if (_counterScreen) _counterScreen.set(raceClockSec());
           updateKitchenRaceArrows(dt);
           if (_carLandShakePending && camera === carCamera) {
             triggerCarCam1LandingShake(
