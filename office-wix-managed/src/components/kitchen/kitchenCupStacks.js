@@ -14,9 +14,9 @@
  * overlap (+ a small clearance), and its bottom above that cup's inner floor:
  * each cup rests in the one below like real nested cups.
  *
- * Shelf: the stacks fill shelf2 between the metal frame's end members, in as
- * many rows as its depth allows, evenly spaced and centred, all the same way
- * round, each stack nudged and turned very slightly (seeded). Every stack
+ * Shelf: the stacks stand on shelf2 from its left end (between the metal
+ * frame's end members), in rows, evenly spaced, the taller stacks in the back
+ * row, all the same way round, each stack nudged and turned very slightly (seeded). Every stack
  * stands exactly on the shelf's top surface.
  *
  * Colours (the reference photo's pastels): per cup, weighted, never more than
@@ -190,9 +190,21 @@ export function createCupStacks({ THREE, root, envMap = null }) {
   const cups = []; // { m: Matrix4, color, stack, level }
   const stacks = [];
   const base = new THREE.Matrix4().makeTranslation(-axis.x, -bottomY, -axis.z); // the cup to its axis / bottom
+  // Stack heights: drawn for the whole shelf, the tallest to the back rows (row 0 is at the back), shuffled within
+  // each row.
+  const heights = Array.from({ length: rows * cols }, pickCount).sort((a, b) => b - a);
+  const rowHeights = [];
+  for (let r = 0; r < rows; r++) {
+    const row = heights.slice(r * cols, (r + 1) * cols);
+    for (let i = row.length - 1; i > 0; i--) {
+      const j = Math.floor(rand() * (i + 1));
+      [row[i], row[j]] = [row[j], row[i]];
+    }
+    rowHeights.push(row);
+  }
   for (let r = 0; r < rows; r++)
     for (let c = 0; c < cols; c++) {
-      const n = pickCount();
+      const n = rowHeights[r][c];
       const sx = x0 + c * (cupD + gapX) + (rand() * 2 - 1) * C.jitter.along * R;
       const sz = z0 + r * (cupD + C.rowSpacing) + (rand() * 2 - 1) * C.jitter.across * R;
       const yaw = THREE.MathUtils.degToRad((rand() * 2 - 1) * C.jitter.yawDeg * R);
