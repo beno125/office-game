@@ -8,8 +8,10 @@
  * floor's extent (the next upward level down), at the rim's height.
  *
  * Stems: grown step by step from points inside that opening (a little below the
- * rim, biased toward the front): first up and out, then curling over the front
- * edge and hanging down under a growing pull, with a gentle seeded wander, each
+ * rim), spread over the whole face: hanging stems spill over the front, left or
+ * right edge (edgeShares; front ones start anywhere along it, side ones from
+ * their end), first up and out, then curling over the edge and hanging down
+ * under a growing pull; short bushy stems on a jittered grid fill the crown, with a gentle seeded wander, each
  * its own length, start and curl. Every step is a ray against the scenery near
  * the planter (the planter, shelves, frames, walls, jars...): on a hit the stem
  * slides along the surface it met (bent off it); if it can't, it stops there
@@ -28,16 +30,19 @@ import { LEAF_ASPECT, createLeafMaterial, loadLeafTexture } from "../game/plantL
 
 export const KITCHEN_TRAILING_PLANTS = {
   bases: ["topPlantBaseLeft", "topPlantBaseRight"],
-  stemsPerBase: 11, // number of stems per planter
+  stemsPerBase: 30, // hanging stems per planter
+  edgeShares: { front: 0.5, left: 0.25, right: 0.25 }, // which edge they spill over (shares of stemsPerBase)
   stemLength: [3.5, 9], // range (model units; a planter is 14.8 long, 2.9 tall)
+  bushyPerBase: 14, // short stems on top (a full, bushy crown where the plant grows out)
+  bushyLength: [0.9, 2.3],
   randomness: 1, // 0 = tidy, 1 = natural (wander, start spread, size and angle variation)
   seed: 4242,
   // Growth
   step: 0.22, // stem segment length
   startDepth: 0.35, // the stems start this far below the rim (out of the inside)
-  frontBias: 0.65, // share of the opening's depth (from the front) where stems start
+  sideReach: 0.32, // left / right stems start within this share of the opening's length from their end
   rise: [0.35, 0.8], // how much a stem rises out of the planter before curling over (initial up share)
-  outward: 0.9, // push toward the front (into the room) while above / near the planter
+  outward: 0.9, // push toward its edge (front: into the room; left / right) while above / near the planter
   pull: [0.18, 0.42], // downward pull per unit of length (range: tighter or looser curls)
   wander: 0.25, // sideways wander per unit of length
   clearance: 0.05, // kept from surfaces
@@ -181,56 +186,116 @@ export function createTrailingPlants({ THREE, root, leafUrl }) {
   }
 
   // ── Stems ──────────────────────────────────────────────────────────────
-  const stems = []; // { pts: [Vector3], radius(t) }
+  // Hanging stems spill over the front, left or right edge (by edgeShares); each starts from its own place in the
+  // opening (stratified along the edge with jitter, so the whole face is covered), side stems from their end of it.
+  // Short bushy stems on a jittered grid over the whole opening fill the crown.
+  const stems = []; // { pts: [Vector3], length, plant, out: Vector3 }
   const down = new THREE.Vector3(0, -1, 0);
+  const EDGE = {
+    front: new THREE.Vector3(0, 0, 1), // into the room (the back wall is at -z)
+    left: new THREE.Vector3(-1, 0, 0),
+    right: new THREE.Vector3(1, 0, 0),
+  };
+  /** How far p is past the planter's edge toward `out` (negative: still over it). */
+  const pastEdge = (T, p, out) =>
+    out.z > 0 ? p.z - T.outer.max.z : out.x < 0 ? T.outer.min.x - p.x : p.x - T.outer.max.x;
+  /**
+   * Grows a stem; a hanging one stopped by something before it cleared its edge (pointing up into the air) is grown
+   * again, turned toward the front: 45°, then fully.
+   */
+  function grow(P, start, out, length, rise, pull, lean, bushy = false) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const turn = attempt === 0 || out.z > 0.5 ? out : out.clone().lerp(EDGE.front, attempt === 1 ? 0.5 : 1).normalize();
+      const S = growOnce(P, start, turn, length, rise, pull, lean, bushy);
+      if (!S) return;
+      if (bushy || S.cleared || attempt === 2) {
+        stems.push(S);
+        return;
+      }
+    }
+  }
+  function growOnce(P, start, out, length, rise, pull, lean, bushy) {
+    const T = P.top;
+    const p = start.clone();
+    const sideAxis = new THREE.Vector3().crossVectors(out, down).normalize(); // along the edge
+    const dir = new THREE.Vector3().copy(out).multiplyScalar(1 - rise).addScaledVector(sideAxis, lean);
+    dir.y = rise;
+    dir.normalize();
+    const pts = [p.clone()];
+    let grown = 0;
+    let cleared = false; // over its edge and hanging below the rim
+    let wa = (rand() - 0.5) * R, wb = (rand() - 0.5) * R;
+    while (grown < length) {
+      const t = grown / length;
+      // Out while over / near the planter, then down: the pull grows as it clears the edge.
+      const overPlanter = pastEdge(T, p, out) < 0.4 && p.y > T.rimY - 1;
+      if (overPlanter) dir.addScaledVector(out, C.outward * C.step);
+      dir.addScaledVector(down, pull * C.step * (overPlanter ? 0.6 : 1.6 + t));
+      wa = (wa + (rand() - 0.5) * 0.6) * 0.85;
+      wb = (wb + (rand() - 0.5) * 0.6) * 0.85;
+      dir.addScaledVector(sideAxis, wa * C.wander * C.step * R);
+      dir.addScaledVector(out, wb * C.wander * C.step * R * 0.5);
+      dir.normalize();
+      // Collide: slide along what's in the way, else stop here.
+      let ok = false;
+      for (let k = 0; k < 5; k++) {
+        const hit = cast(p, dir, C.step + C.clearance + 0.06);
+        if (!hit) {
+          ok = true;
+          break;
+        }
+        dir.addScaledVector(hit.normal, -dir.dot(hit.normal) + 0.35).normalize();
+      }
+      if (!ok) break;
+      p.addScaledVector(dir, C.step);
+      pts.push(p.clone());
+      grown += C.step;
+      if (pastEdge(T, p, out) > 0.3 && p.y < T.rimY) cleared = true;
+      if (p.y < T.rimY - C.stemLength[1] - 2) break;
+    }
+    if (pts.length < 4) return null;
+    return { pts, length: grown, plant: P, out: out.clone(), bushy, cleared };
+  }
+  const startY = (T) => T.rimY - C.startDepth;
   for (const P of plants) {
     const T = P.top;
-    const front = new THREE.Vector3(0, 0, 1); // into the room (the back wall is at -z)
-    for (let s = 0; s < C.stemsPerBase; s++) {
-      // Start: spread along the opening (even, jittered), toward its front.
-      const u = (s + 0.5 + (rand() - 0.5) * 0.8 * R) / C.stemsPerBase;
-      const x = lerp(T.inner.minX + 0.3, T.inner.maxX - 0.3, u);
-      const depthShare = Math.min(0.95, Math.max(0.05, C.frontBias + (rand() - 0.5) * 0.5 * R));
-      const z = lerp(T.inner.minZ + 0.25, T.inner.maxZ - 0.25, depthShare);
-      const p = new THREE.Vector3(x, T.rimY - C.startDepth, z);
-      const length = range(C.stemLength);
-      const rise = range(C.rise);
-      const pull = range(C.pull);
-      const side = (rand() - 0.5) * 0.6 * R; // a sideways lean
-      const dir = new THREE.Vector3(side, rise, 1 - rise).normalize();
-      const pts = [p.clone()];
-      let grown = 0;
-      let wanderX = (rand() - 0.5) * R, wanderZ = (rand() - 0.5) * R;
-      while (grown < length) {
-        const t = grown / length;
-        // Out while over / near the planter, then down: the pull grows as it clears the edge.
-        const overPlanter = p.z < T.outer.max.z + 0.4 && p.y > T.rimY - 1;
-        if (overPlanter) dir.addScaledVector(front, C.outward * C.step);
-        dir.addScaledVector(down, pull * C.step * (overPlanter ? 0.6 : 1.6 + t));
-        wanderX += (rand() - 0.5) * 0.6;
-        wanderZ += (rand() - 0.5) * 0.6;
-        wanderX *= 0.85;
-        wanderZ *= 0.85;
-        dir.x += wanderX * C.wander * C.step * R;
-        dir.z += wanderZ * C.wander * C.step * R * 0.5;
-        dir.normalize();
-        // Collide: slide along what's in the way, else stop here.
-        let ok = false;
-        for (let k = 0; k < 5; k++) {
-          const hit = cast(p, dir, C.step + C.clearance + 0.06);
-          if (!hit) {
-            ok = true;
-            break;
-          }
-          dir.addScaledVector(hit.normal, -dir.dot(hit.normal) + 0.35).normalize();
-        }
-        if (!ok) break;
-        p.addScaledVector(dir, C.step);
-        pts.push(p.clone());
-        grown += C.step;
-        if (p.y < T.rimY - C.stemLength[1] - 2) break;
+    const I = T.inner;
+    const inset = 0.25;
+    const x0 = I.minX + inset, x1 = I.maxX - inset, z0 = I.minZ + inset, z1 = I.maxZ - inset;
+    const shares = C.edgeShares;
+    const total = shares.front + shares.left + shares.right || 1;
+    const counts = {
+      front: Math.round((C.stemsPerBase * shares.front) / total),
+      left: Math.round((C.stemsPerBase * shares.left) / total),
+    };
+    counts.right = Math.max(0, C.stemsPerBase - counts.front - counts.left);
+    const jit = (k, n) => (k + 0.5 + (rand() - 0.5) * 0.9 * R) / n; // stratified, jittered 0..1
+    // Front: along the whole length, anywhere in the front two thirds of the depth.
+    for (let k = 0; k < counts.front; k++) {
+      const x = lerp(x0, x1, jit(k, counts.front));
+      const z = lerp(z0, z1, 0.33 + rand() * 0.67);
+      grow(P, new THREE.Vector3(x, startY(T), z), EDGE.front, range(C.stemLength), range(C.rise), range(C.pull), (rand() - 0.5) * 0.6 * R);
+    }
+    // Left / right: from their end of the opening, across its whole depth.
+    for (const side of ["left", "right"]) {
+      const n = counts[side];
+      for (let k = 0; k < n; k++) {
+        const z = lerp(z0, z1, jit(k, n));
+        const reach = rand() * C.sideReach * (x1 - x0);
+        const x = side === "left" ? x0 + reach : x1 - reach;
+        grow(P, new THREE.Vector3(x, startY(T), z), EDGE[side], range(C.stemLength), range(C.rise), range(C.pull), (rand() - 0.5) * 0.6 * R);
       }
-      if (pts.length >= 4) stems.push({ pts, length: grown, plant: P });
+    }
+    // Bushy crown: short stems on a jittered grid over the whole opening, arching up and flopping toward the nearest edge.
+    const rows = 2;
+    const cols = Math.max(1, Math.ceil(C.bushyPerBase / rows));
+    for (let k = 0; k < C.bushyPerBase; k++) {
+      const c = k % cols, r = Math.floor(k / cols);
+      const x = lerp(x0, x1, jit(c, cols));
+      const z = lerp(z0, z1, jit(r, rows));
+      const dl = x - I.minX, dr = I.maxX - x, df = I.maxZ - z;
+      const out = df < Math.min(dl, dr) * 0.6 || (dl > 3 && dr > 3) ? EDGE.front : dl < dr ? EDGE.left : EDGE.right;
+      grow(P, new THREE.Vector3(x, startY(T), z), out, range(C.bushyLength), 0.75 + rand() * 0.2, range(C.pull) * 0.7, (rand() - 0.5) * 1.2 * R, true);
     }
   }
 
@@ -289,6 +354,7 @@ export function createTrailingPlants({ THREE, root, leafUrl }) {
   const face = new THREE.Vector3(), blade = new THREE.Vector3(), sideV = new THREE.Vector3();
   const centre = new THREE.Vector3(), tip = new THREE.Vector3(), edgeA = new THREE.Vector3(), edgeB = new THREE.Vector3();
   const m4 = new THREE.Matrix4();
+  const _room = new THREE.Vector3(0, 0.35, 0.6);
   for (const S of stems) {
     const n = S.pts.length;
     const count = Math.max(1, Math.floor((S.length - C.leafStart) * C.leafDensity));
@@ -311,7 +377,8 @@ export function createTrailingPlants({ THREE, root, leafUrl }) {
         if (attempt === 2) size *= 0.6;
         blade.copy(sideV).multiplyScalar(0.75 * sgn).addScaledVector(down, 0.55).addScaledVector(tan, 0.25).normalize();
         blade.applyAxisAngle(tan, ang);
-        face.set(0, 0.35, 1).addScaledVector(sideV, 0.25 * sgn).normalize();
+        // Facing out of its edge and toward the room, a little up.
+        face.copy(S.out).multiplyScalar(0.7).add(_room).addScaledVector(sideV, 0.25 * sgn).normalize();
         Y.copy(blade).negate(); // the image's up (tip → notch) points back to the stem
         X.crossVectors(Y, face);
         if (X.lengthSq() < 1e-4) X.set(1, 0, 0);
@@ -368,7 +435,21 @@ export function createTrailingPlants({ THREE, root, leafUrl }) {
   }
 
   const report = {
-    plants: plants.map((P) => ({ base: P.base.name, rimY: +P.top.rimY.toFixed(3), opening: P.top.inner })),
+    plants: plants.map((P) => {
+      const own = stems.filter((S) => S.plant === P);
+      const hanging = own.filter((S) => !S.bushy);
+      return {
+        base: P.base.name,
+        rimY: +P.top.rimY.toFixed(3),
+        stems: own.length,
+        hanging: {
+          front: hanging.filter((S) => S.out.z > 0.5).length,
+          left: hanging.filter((S) => S.out.x < -0.5).length,
+          right: hanging.filter((S) => S.out.x > 0.5).length,
+        },
+        bushy: own.length - hanging.length,
+      };
+    }),
     stems: stems.length,
     stemTriangles: indices.length / 3,
     leaves: leafPlacements.length,
