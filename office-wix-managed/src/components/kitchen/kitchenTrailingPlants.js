@@ -40,7 +40,10 @@ export const KITCHEN_TRAILING_PLANTS = {
   // Growth
   step: 0.22, // stem segment length
   startDepth: 0.35, // the stems start this far below the rim (out of the inside)
-  sideReach: 0.32, // left / right stems start within this share of the opening's length from their end
+  sideReach: 0.32, // left / right stems start within this share of the opening's length from their end…
+  sideWallGap: 0.6, // …but at least this far from its end wall (room to rise out)
+  climb: 1.4, // inside the planter: how hard a stem climbs (per unit of length) until it's above the rim…
+  climbClear: 0.2, // …by this much
   rise: [0.35, 0.8], // how much a stem rises out of the planter before curling over (initial up share)
   outward: 0.9, // push toward its edge (front: into the room; left / right) while above / near the planter
   pull: [0.35, 0.75], // downward pull per unit of length over the edge (range: tighter or looser curls)
@@ -238,8 +241,13 @@ export function createTrailingPlants({ THREE, root, leafUrl }) {
     while (grown < length) {
       const t = grown / length;
       // Out while over / near the planter, then down: the pull grows as it clears the edge.
-      const overPlanter = pastEdge(T, p, out) < 0.4 && p.y > T.rimY - 1;
-      if (overPlanter) {
+      // Inside the planter's footprint: keep climbing up and out over its wall (never hanging inside it).
+      const insideXZ = p.x > T.outer.min.x && p.x < T.outer.max.x && p.z > T.outer.min.z && p.z < T.outer.max.z;
+      const overPlanter = insideXZ || (pastEdge(T, p, out) < 0.4 && p.y > T.rimY - 1);
+      if (insideXZ && p.y < T.rimY + C.climbClear) {
+        dir.addScaledVector(out, C.outward * C.step);
+        dir.y += C.climb * C.step;
+      } else if (overPlanter) {
         dir.addScaledVector(out, C.outward * C.step);
         dir.addScaledVector(down, pull * C.step * 0.6);
       } else {
@@ -298,7 +306,7 @@ export function createTrailingPlants({ THREE, root, leafUrl }) {
       const n = counts[side];
       for (let k = 0; k < n; k++) {
         const z = lerp(z0, z1, jit(k, n));
-        const reach = rand() * C.sideReach * (x1 - x0);
+        const reach = C.sideWallGap + rand() * Math.max(0, C.sideReach * (x1 - x0) - C.sideWallGap);
         const x = side === "left" ? x0 + reach : x1 - reach;
         grow(P, new THREE.Vector3(x, startY(T), z), EDGE[side], range(C.stemLength), range(C.rise), range(C.pull), (rand() - 0.5) * 0.6 * R);
       }
