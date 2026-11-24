@@ -4058,6 +4058,13 @@ let _officeSceneAnimationFrame = 0;
       const rightScreenVideoTop = 0;
       const rightScreenVideoBottom = 0;
 
+      /**
+       * The window glass refracts what's behind it (three's transmission). That
+       * draws the whole room a second time each frame into a full-size buffer
+       * (~37 ms of a 40 ms frame). false: plain transparent glass (same colour,
+       * opacity and reflections, no refraction). true restores the refraction.
+       */
+      const OFFICE_WINDOW_GLASS_REFRACTION = false;
       /** The office model (it replaced office-table-embed94.gltf). */
       const OFFICE_SCENE_GLTF = "office-scene1.glb"; // binary office-scene1.gltf, original 4096² hand textures kept (57.2 MB -> 42.9 MB)
       const OUTDOOR_FALLBACK_GLTF = officeAsset("office-table-embed34.gltf");
@@ -4297,7 +4304,7 @@ let _officeSceneAnimationFrame = 0;
               opacity: 0.15,
               metalness: 0,
               roughness: 0.02,
-              transmission: 0.92,
+              transmission: OFFICE_WINDOW_GLASS_REFRACTION ? 0.92 : 0,
               thickness: 0.3,
               ior: 1.52,
               reflectivity: 0.5,
