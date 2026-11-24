@@ -1793,53 +1793,77 @@ export function isKitchenSceneReady() {
        * mirror, under a full clear coat (roughness 0.06), so it showed reflections (the HDRI room) instead of its
        * colour; the base-colour texture (≈ 0.53 linear) halved the white; and the top itself stayed blue
        * (0x647bb8, a blue glow) in bright mode.
-       * - `tone`: the white; `roughness`: its final roughness (the roughness map no longer lowers it);
-       *   `specular`: its highlight strength (1 = the usual); clear coat and metalness off.
-       * - `detail`: how much the tile texture shows (0 = flat white, 1 = as in dark mode: multiplied over).
-       * - `lift`: a little white self-light (the end panel faces away from the lights, the top a little).
+       * The tiles in bright mode (the top): the base-colour texture is nearly flat (its grout barely differs), so
+       * the grout lines come from the tile roughness map (grout ≈ 0.75 rough, tiles ≈ 0.1): a grout mask that
+       * darkens the white to a light grey there, roughens it, and dims its self-light, with the normal map
+       * stronger so the grout catches light and shadow.
+       * Per part (`top`, `side`; the end panel stays as it was: no grout, normal as in dark mode):
+       * - `tone`: the tiles' white (the top a soft off-white: pure white blew out and hid the grid);
+       * - `roughness` / `groutRoughness`: the final roughness of the tiles / grout (mostly matte, a soft sheen);
+       * - `groutDarkness`: how much darker the grout is (0 = none, 0.3 = light grey lines);
+       * - `normalStrength`: the tile relief × the dark mode's (1 = the same);
+       * - `detail`: how much the base-colour texture shows (0 = flat, 1 = multiplied over, as in dark mode);
+       * - `lift`: a little white self-light (the end panel faces away from the lights); `specular`: highlight
+       *   strength (1 = the usual). Clear coat and metalness off.
+       * `groutMask`: the roughness-map range that counts as grout (a soft edge, low enough to keep the lines in
+       * the texture's smaller mip levels at a distance).
        */
       const KITCHEN_TABLE_WHITE = {
-        tone: 0xf7f5f0,
-        roughness: 0.85,
+        top: { tone: 0xf0eee8, roughness: 0.78, groutRoughness: 0.95, groutDarkness: 0.32, normalStrength: 1.8, detail: 0.25, lift: 0.06 },
+        side: { tone: 0xf7f5f0, roughness: 0.85, groutRoughness: 0.85, groutDarkness: 0, normalStrength: 1, detail: 0.25, lift: 0.32 },
         specular: 0.35,
-        detail: 0.25,
-        lift: { top: 0.1, side: 0.32 },
+        groutMask: [0.16, 0.42],
       };
-      const _tableWhiteTone = new THREE.Color(KITCHEN_TABLE_WHITE.tone);
       const _tableWhiteEmissive = new THREE.Color(0xffffff);
       /**
-       * The cover's bright white in its shader (uniforms only, so one program for both modes): the texture as a
-       * light detail and its roughness set. At uBright 0 (dark mode) the output is exactly as before.
+       * The cover's bright look in its shader (uniforms only, so one program for both modes): the texture as a
+       * light detail, the grout mask (colour, roughness, self-light) and its roughness set. At uBright 0 (dark
+       * mode) the output is exactly as before.
        */
       function patchKitchenTableWhite(mat, part) {
+        const P = KITCHEN_TABLE_WHITE[part];
         const U = {
           uTableBright: { value: 0 },
-          uTableRough: { value: KITCHEN_TABLE_WHITE.roughness },
-          uTableDetail: { value: KITCHEN_TABLE_WHITE.detail },
+          uTableRough: { value: P.roughness },
+          uTableGroutRough: { value: P.groutRoughness },
+          uTableGroutDark: { value: P.groutDarkness },
+          uTableGroutMask: { value: new THREE.Vector2(...KITCHEN_TABLE_WHITE.groutMask) },
+          uTableDetail: { value: P.detail },
         };
         mat.userData.tableWhite = {
           U,
           part,
+          tone: new THREE.Color(P.tone),
           darkColor: mat.color.clone(),
           darkEmissive: mat.emissive.clone(),
           darkEmissiveIntensity: mat.emissiveIntensity,
           darkMetalness: mat.metalness,
           darkClearcoat: mat.clearcoat,
           darkSpecular: mat.specularIntensity,
+          darkNormalScale: mat.normalScale.clone(),
         };
         const prev = mat.onBeforeCompile;
         mat.onBeforeCompile = function (shader, renderer) {
           if (prev) prev.call(this, shader, renderer);
           Object.assign(shader.uniforms, U);
           shader.fragmentShader = shader.fragmentShader
-            .replace("void main() {", "uniform float uTableBright;\nuniform float uTableRough;\nuniform float uTableDetail;\nvoid main() {")
+            .replace(
+              "void main() {",
+              "uniform float uTableBright;\nuniform float uTableRough;\nuniform float uTableGroutRough;\nuniform float uTableGroutDark;\nuniform vec2 uTableGroutMask;\nuniform float uTableDetail;\nvoid main() {\nfloat tableGrout = 0.0;",
+            )
             .replace(
               "#include <map_fragment>",
-              "#include <map_fragment>\n#ifdef USE_MAP\ndiffuseColor.rgb = mix(diffuseColor.rgb, diffuse * mix(vec3(1.0), sampledDiffuseColor.rgb, uTableDetail), uTableBright);\n#endif",
+              "#include <map_fragment>\n" +
+                "#ifdef USE_ROUGHNESSMAP\ntableGrout = smoothstep(uTableGroutMask.x, uTableGroutMask.y, texture2D(roughnessMap, vRoughnessMapUv).g);\n#endif\n" +
+                "#ifdef USE_MAP\ndiffuseColor.rgb = mix(diffuseColor.rgb, diffuse * mix(vec3(1.0), sampledDiffuseColor.rgb, uTableDetail) * (1.0 - uTableGroutDark * tableGrout), uTableBright);\n#endif",
             )
             .replace(
               "#include <roughnessmap_fragment>",
-              "#include <roughnessmap_fragment>\nroughnessFactor = mix(roughnessFactor, uTableRough, uTableBright);",
+              "#include <roughnessmap_fragment>\nroughnessFactor = mix(roughnessFactor, mix(uTableRough, uTableGroutRough, tableGrout), uTableBright);",
+            )
+            .replace(
+              "#include <emissivemap_fragment>",
+              "#include <emissivemap_fragment>\ntotalEmissiveRadiance *= mix(1.0, 1.0 - uTableGroutDark * tableGrout, uTableBright);",
             );
         };
         const prevKey = mat.customProgramCacheKey;
@@ -1849,14 +1873,16 @@ export function isKitchenSceneReady() {
       function applyKitchenTableWhite(mat, b) {
         const W = mat && mat.userData.tableWhite;
         if (!W) return;
+        const P = KITCHEN_TABLE_WHITE[W.part];
         const lerp = (a, c) => a + (c - a) * b;
         W.U.uTableBright.value = b;
-        mat.color.lerpColors(W.darkColor, _tableWhiteTone, b);
+        mat.color.lerpColors(W.darkColor, W.tone, b);
         mat.emissive.lerpColors(W.darkEmissive, _tableWhiteEmissive, b);
-        mat.emissiveIntensity = lerp(W.darkEmissiveIntensity, KITCHEN_TABLE_WHITE.lift[W.part]);
+        mat.emissiveIntensity = lerp(W.darkEmissiveIntensity, P.lift);
         mat.metalness = lerp(W.darkMetalness, 0);
         mat.clearcoat = lerp(W.darkClearcoat, 1e-4); // ~0, not 0: 0 would switch its shader (a rebuild)
         mat.specularIntensity = lerp(W.darkSpecular, KITCHEN_TABLE_WHITE.specular);
+        mat.normalScale.copy(W.darkNormalScale).multiplyScalar(lerp(1, P.normalStrength));
       }
       /**
        * mainTablePlate in bright mode: the same material (it has no image texture: a flat colour with the
