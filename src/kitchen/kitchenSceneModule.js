@@ -81,6 +81,8 @@ export function isKitchenSceneReady() {
       const carCameraFollow = new THREE.PerspectiveCamera(50, 1, 0.1, 1000);
       carCameraFollow.position.set(2, 2, 2);
       const testCamera = new THREE.PerspectiveCamera(50, 1, 0.1, 1000);
+      /** The chase camera (key 2, once the race runs): behind the player's car (KITCHEN_CHASE_CAM). */
+      const chaseCamera = new THREE.PerspectiveCamera(56, 1, 0.05, 1000);
       let camera = carCamera;
       const CAR_CAM_YAW_FOLLOW = 0.42;
       const CAR_CAM_AZIMUTH_LIMIT = THREE.MathUtils.degToRad(70);
@@ -688,6 +690,7 @@ export function isKitchenSceneReady() {
       carCamera.layers.enable(CAR_LIGHTS_BLOOM_LAYER);
       carCameraFollow.layers.enable(CAR_LIGHTS_BLOOM_LAYER);
       testCamera.layers.enable(CAR_LIGHTS_BLOOM_LAYER);
+      chaseCamera.layers.enable(CAR_LIGHTS_BLOOM_LAYER);
 
       /** SMAA + composer MSAA handle edges; skipping canvas MSAA saves a full multisampled resolve per pass. */
       const renderer = new THREE.WebGLRenderer({
@@ -1946,11 +1949,12 @@ export function isKitchenSceneReady() {
         }
         if (e.code === "Digit1") {
           e.preventDefault();
-          switchCarView(carCamera);
+          if (camera === chaseCamera) leaveKitchenChaseCamera();
+          else switchCarView(carCamera);
         }
         if (e.code === "Digit2") {
           e.preventDefault();
-          switchToFreeCamera();
+          enterKitchenChaseCamera(); // the chase camera (was the free camera, still on C)
         }
         if (e.code === "KeyC") {
           e.preventDefault();
@@ -5024,6 +5028,7 @@ let _worldSwitched = false;
       /** "Race again": everything back to the start, straight into the countdown (no intro). */
       function retryKitchenRace() {
         if (!_raceTrack) return;
+        if (camera === chaseCamera) leaveKitchenChaseCamera(); // the countdown needs the race camera
         if (_kIntro.state !== "done") finishKitchenIntro();
         cancelKitchenCameraFx();
         resetKitchenProps();
@@ -7362,6 +7367,170 @@ let _worldSwitched = false;
         camera.quaternion.copy(K.savedQuat);
         camera.updateMatrixWorld();
         K.overriding = false;
+      }
+
+      // ---------------------------------------------------------------------------
+      // Chase camera (key 2; key 1 back to the race camera): behind the player's car, along its direction of travel,
+      // a little above it, tilted down, the track ahead in view (after the reference: a classic racing-game chase
+      // view). Sizes are in the car's own length, so it frames the same whatever the car's scale. Follows with
+      // damping (position and heading separately, exponential), and keeps a clear line to the car: a ray from the car
+      // to where the camera wants to be; on a hit (walls, objects, raceBoundariesPhysic) it closes in quickly in front
+      // of it, and eases back out once clear. Only once the race runs (the intro and the countdown drive the race
+      // camera); "Race again" returns to the race camera for its countdown.
+      // ---------------------------------------------------------------------------
+      const KITCHEN_CHASE_CAM = {
+        distance: 2.35, // behind the car (× its length)
+        height: 0.85, // above the car's base (× its length)
+        tiltDeg: 11, // looking down by this much
+        fovDeg: 56, // vertical field of view
+        lookAhead: 0.15, // aim height above the car's base for the clear-line check (× its length)
+        posDamping: 7, // position follow (per second: higher = tighter)
+        yawDamping: 5, // heading follow (per second)
+        heightDamping: 6, // height follow (per second; softens bumps)
+        driftFollow: 0.5, // how much of a drift's slide angle it follows (0 = the car's nose)
+        clearance: 0.25, // kept in front of anything between it and the car
+        closeIn: 14, // per second, closing in on a blocker (quick)
+        easeOut: 2.5, // per second, easing back out once clear
+        colliderNames: ["raceBoundariesPhysic"], // hidden physics meshes it must not pass through either
+      };
+      const _chase = {
+        active: false,
+        yaw: 0,
+        pos: new THREE.Vector3(),
+        y: 0,
+        dist: 0, // the clear-line distance factor (1 = full distance)
+        savedOrbit: null, // the race camera's state when it was left
+        ray: new THREE.Raycaster(),
+        from: new THREE.Vector3(),
+        to: new THREE.Vector3(),
+        dir: new THREE.Vector3(),
+        target: new THREE.Vector3(),
+        q: new THREE.Quaternion(),
+        e: new THREE.Euler(0, 0, 0, "YXZ"),
+        carLen: 1,
+      };
+      function chaseCarLength() {
+        if (!car) return 1;
+        const b = new THREE.Box3().setFromObject(car);
+        const s = b.getSize(new THREE.Vector3());
+        return Math.max(0.5, Math.max(s.x, s.z));
+      }
+      const _chaseAngle = () => carState.angle + (carState.driftAngle || 0) * KITCHEN_CHASE_CAM.driftFollow;
+      /** Where the chase camera wants to be for heading `yaw` (full distance × f). */
+      function chaseDesired(yaw, f, out) {
+        const C = KITCHEN_CHASE_CAM;
+        const L = _chase.carLen;
+        return out.set(car.position.x - Math.sin(yaw) * C.distance * L * f, car.position.y + C.height * L * f, car.position.z - Math.cos(yaw) * C.distance * L * f);
+      }
+      /** Share of the full distance with a clear line from the car (1 = clear). */
+      function chaseClearShare(yaw) {
+        const C = KITCHEN_CHASE_CAM;
+        const L = _chase.carLen;
+        _chase.from.copy(car.position);
+        _chase.from.y += C.lookAhead * L;
+        chaseDesired(yaw, 1, _chase.to);
+        _chase.dir.subVectors(_chase.to, _chase.from);
+        const full = _chase.dir.length();
+        if (full < 1e-4 || !_kitchenDragRoot) return 1;
+        _chase.dir.divideScalar(full);
+        _chase.ray.set(_chase.from, _chase.dir);
+        _chase.ray.far = full + C.clearance;
+        let hits = [];
+        try {
+          hits = _chase.ray.intersectObject(_kitchenDragRoot, true);
+        } catch (e) {
+          hits = [];
+        }
+        for (const h of hits) {
+          if (!h.object.isMesh) continue;
+          if (!h.object.visible && !KITCHEN_CHASE_CAM.colliderNames.includes(h.object.name)) continue;
+          let own = false;
+          for (let x = h.object; x; x = x.parent) if (x === car) own = true;
+          if (own) continue;
+          return Math.max(0.15, (h.distance - C.clearance) / full);
+        }
+        return 1;
+      }
+      function placeChaseCamera() {
+        const C = KITCHEN_CHASE_CAM;
+        chaseDesired(_chase.yaw, _chase.dist, _chase.target);
+        chaseCamera.position.set(_chase.pos.x, _chase.y, _chase.pos.z);
+        // Facing the car's way (the camera looks down its -z: yaw + π), tilted down.
+        _chase.e.set(-THREE.MathUtils.degToRad(C.tiltDeg), _chase.yaw + Math.PI, 0);
+        chaseCamera.quaternion.setFromEuler(_chase.e);
+        chaseCamera.updateMatrixWorld();
+      }
+      function enterKitchenChaseCamera() {
+        if (!car || camera === chaseCamera) return;
+        // Only while the race runs: the intro and the countdown camera drive the race camera.
+        if (_kIntro.state !== "done" || !(_racePhase === "racing" || _racePhase === "finishing" || _racePhase === "finished")) return;
+        if (camera !== carCamera) switchCarView(carCamera); // from the free / test cameras: via the race camera
+        const C = KITCHEN_CHASE_CAM;
+        cancelKitchenCameraFx(); // no jump camera left over on the race camera
+        _chase.savedOrbit = { distance: _carOrbitCamDistance, elev: _carOrbitCamElev, yaw: _carOrbitCamWorldYaw, fov: carCamera.fov };
+        _chase.carLen = chaseCarLength();
+        _chase.yaw = _chaseAngle();
+        _chase.dist = chaseClearShare(_chase.yaw);
+        chaseDesired(_chase.yaw, _chase.dist, _chase.target);
+        _chase.pos.copy(_chase.target);
+        _chase.y = _chase.target.y;
+        camera = chaseCamera;
+        renderScenePass.camera = camera;
+        const mount = getKitchenSceneMount();
+        camera.fov = C.fovDeg;
+        camera.aspect = Math.max(1, mount.clientWidth || window.innerWidth) / Math.max(1, mount.clientHeight || window.innerHeight);
+        camera.updateProjectionMatrix();
+        if (controls) controls.enabled = false; // the chase camera follows by itself
+        _chase.active = true;
+        placeChaseCamera();
+      }
+      function leaveKitchenChaseCamera() {
+        if (camera !== chaseCamera) return;
+        _chase.active = false;
+        if (controls) controls.enabled = true;
+        // The race camera back where it was left (its own orbit round the car, as it was), then the normal switch.
+        const S = _chase.savedOrbit;
+        camera = carCamera;
+        if (S) {
+          _carOrbitCamDistance = S.distance;
+          _carOrbitCamElev = S.elev;
+          _carOrbitCamWorldYaw = S.yaw;
+          if (carCamera.fov !== S.fov) {
+            carCamera.fov = S.fov;
+            carCamera.updateProjectionMatrix();
+          }
+          applyCarOrbitCameraFromAngles();
+        }
+        camera = chaseCamera; // switchCarView switches from the current camera
+        switchCarView(carCamera);
+      }
+      function updateKitchenChaseCamera(dt) {
+        if (camera !== chaseCamera || !car) return;
+        const C = KITCHEN_CHASE_CAM;
+        const k = (rate) => 1 - Math.exp(-rate * dt);
+        // Heading: toward the car's direction of travel, the short way round.
+        let dy = _chaseAngle() - _chase.yaw;
+        dy = Math.atan2(Math.sin(dy), Math.cos(dy));
+        _chase.yaw += dy * k(C.yawDamping);
+        // A clear line: close in fast on a blocker, ease back out slowly.
+        const clear = chaseClearShare(_chase.yaw);
+        _chase.dist += (clear - _chase.dist) * k(clear < _chase.dist ? C.closeIn : C.easeOut);
+        chaseDesired(_chase.yaw, _chase.dist, _chase.target);
+        _chase.pos.x += (_chase.target.x - _chase.pos.x) * k(C.posDamping);
+        _chase.pos.z += (_chase.target.z - _chase.pos.z) * k(C.posDamping);
+        _chase.y += (_chase.target.y - _chase.y) * k(C.heightDamping);
+        // Never further out than the clear line allows (the damping must not carry it into what it just avoided).
+        _chase.from.copy(car.position);
+        _chase.from.y += C.lookAhead * _chase.carLen;
+        const maxD = C.distance * _chase.carLen * Math.max(_chase.dist, clear) * 1.02 + 0.01;
+        _chase.dir.set(_chase.pos.x - _chase.from.x, _chase.y - _chase.from.y, _chase.pos.z - _chase.from.z);
+        const d = _chase.dir.length();
+        if (d > Math.hypot(maxD, C.height * _chase.carLen) && clear < 1) {
+          _chase.dir.multiplyScalar(Math.hypot(maxD, C.height * _chase.carLen) / d);
+          _chase.pos.set(_chase.from.x + _chase.dir.x, 0, _chase.from.z + _chase.dir.z);
+          _chase.y = _chase.from.y + _chase.dir.y;
+        }
+        placeChaseCamera();
       }
 
       window.kitchenRace = {
@@ -14497,6 +14666,7 @@ let _worldSwitched = false;
             kitchenCameraDrag.update(Math.min(rawDt, 0.1));
             if (car && gameplayCam) kitchenCameraDrag.apply(camera, getCarCameraLookAtPoint(_kitchenDragTarget));
           }
+          updateKitchenChaseCamera(Math.min(rawDt, 0.1));
           applyKitchenIntroCamera(Math.min(rawDt, 0.1));
           applyKitchenJumpCamera();
           applyKitchenCountdownCamera();
