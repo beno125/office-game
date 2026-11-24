@@ -56,20 +56,20 @@ export const KITCHEN_SHELF_JARS = {
   glassNames: ["glassPot1", "glassPotBig1", "glassPotBig2"],
   glass: {
     color: 0xffffff,
-    reflection: 0.7, // environment reflection strength (envMapIntensity; more is too bright in the dim kitchen); the physical shader's Fresnel makes edges reflect more
-    roughness: 0.02, // polished: sharp reflections
+    reflection: 0.3, // environment reflection strength (envMapIntensity; 0.7 was too strong); the physical shader's Fresnel makes edges reflect more
+    roughness: 0.05, // polished, the reflections a little soft
     ior: 1.5, // glass
-    thickness: 0.35, // refraction depth (model units): what's behind visibly bends
+    thickness: 0.25, // refraction depth (model units): what's behind bends a little
     metalness: 0,
     transmission: 1, // fully see-through
     specularIntensity: 1,
-    clearcoat: 0.25, // an extra polished layer: more shine
+    clearcoat: 0, // an extra polished layer for more shine (off: too much)
     clearcoatRoughness: 0.03,
     tint: 0xe9f6f1, // a very faint green-blue (attenuation colour)
     tintDistance: 8, // how far light travels in the glass before taking the tint (model units): faint
     rim: {
       color: 0xd8e8ff, // the pot's outline: a faint bright edge where the surface turns away from the camera
-      strength: 0.32,
+      strength: 0.12,
       power: 3, // higher = thinner edge
     },
     cheapOpacity: 0.35, // lower tiers (no transmission): how much of the glass's own shading covers what's behind it
@@ -152,6 +152,7 @@ export function createShelfJars({ THREE, root, envMap, lidEnvMap = envMap, ownsE
         #include <opaque_fragment>`,
       );
   };
+  glassMat.userData.rim = rimUniforms; // tunable at run time
   glassMat.customProgramCacheKey = () => "kitchenShelfJarGlassRim";
   const lidMat = new THREE.MeshStandardMaterial({
     color: C.lid.color,
