@@ -23,7 +23,15 @@
  *
  * Glow on the surroundings: one small point light in front of the lenses, its
  * colour the current one, its intensity × the share of lit lenses (always in
- * the scene, 0 when dark: no shader recompiles).
+ * the scene, 0 when dark: no shader recompiles); it reaches the table under
+ * the gantry.
+ *
+ * Reflections on the table: each lamp has a soft additive streak lying on the
+ * table, like a light on a satin floor: from the table under the lamp to where
+ * its mirror image is seen from the camera (the ray from the camera to the lamp
+ * mirrored below the table, where it meets the table), along the view. Placed at render time
+ * (onBeforeRender, with the camera actually drawn), in the lamp's colour × how
+ * lit it is.
  */
 import { setBloomWeight } from "../game/thresholdBloom.js";
 
@@ -40,10 +48,17 @@ export const KITCHEN_START_LIGHTS = {
   offGlowIntensity: 1.2,
   offRoughness: 0.35, // the lens glass
   glow: {
-    intensity: 1.6, // the point light at all lenses lit (physical units)
-    distance: 2.2, // its reach (model units)
+    intensity: 8, // the point light at all lenses lit (physical units)
+    distance: 4.5, // its reach (model units): down to the table under the gantry
     decay: 2,
     offset: -0.25, // in front of the lenses, along their facing (x; they face -x)
+  },
+  reflection: {
+    strength: 3.2, // a lit lamp's reflection brightness (additive)
+    width: 0.42, // across the view (model units; a lamp is 0.23 wide)
+    extra: 0.5, // the streak runs on this far past both ends (soft ends)
+    maxLength: 10, // never longer than this (a very flat view)
+    lift: 0.055, // above the table: over the kitchen's transparent table overlay (0.045 above it), no z-fighting
   },
   stand: { color: 0xecebe6, roughness: 0.6, metalness: 0.15 }, // ramzorMainStand: painted iron
   counter: { color: 0x141518, roughness: 0.42, metalness: 0 }, // counterBody: dark grey-black plastic, slight sheen
@@ -137,13 +152,20 @@ function lensUVs(THREE, geometry, T) {
   return g;
 }
 
+/** The top-most parent (the scene): the reflections are placed in world space. */
+function scene0(o) {
+  while (o.parent) o = o.parent;
+  return o;
+}
+
 /**
  * @param {object} o
  * @param {typeof import("three")} o.THREE
  * @param {import("three").Object3D} o.root  the kitchen model
+ * @param {() => number|null} [o.getTableY]  the table's surface height (for the reflections)
  * @returns {{ update(t: number|null): void, missing: string[], dispose(): void, center: import("three").Vector3|null }}
  */
-export function createStartLights({ THREE, root }) {
+export function createStartLights({ THREE, root, getTableY = null }) {
   const C = KITCHEN_START_LIGHTS;
   const byName = (n) => {
     const m = root.getObjectByName(n);
@@ -200,6 +222,81 @@ export function createStartLights({ THREE, root }) {
   }
   root.add(glow);
 
+  // Reflections on the table: one streak per lamp (a soft round spot stretched along the view).
+  const R = C.reflection;
+  // The streak's brightness: soft across, brightest near the lamp's end (v = 1), fading toward the viewer.
+  const spot = (() => {
+    const c = document.createElement("canvas");
+    c.width = 64;
+    c.height = 256;
+    const g = c.getContext("2d");
+    const img = g.createImageData(64, 256);
+    for (let y = 0; y < 256; y++) {
+      const v = 1 - y / 255; // canvas top = texture v 1 (flipY)
+      const along = Math.pow(Math.sin(Math.PI * Math.min(1, v * 1.08)), 0.6) * (0.25 + 0.75 * v * v);
+      for (let x = 0; x < 64; x++) {
+        const u = (x / 63) * 2 - 1;
+        const a = along * Math.exp(-u * u * 4.5);
+        const i = (y * 64 + x) * 4;
+        img.data[i] = img.data[i + 1] = img.data[i + 2] = 255;
+        img.data[i + 3] = Math.round(255 * Math.min(1, a));
+      }
+    }
+    g.putImageData(img, 0, 0);
+    const t = new THREE.CanvasTexture(c);
+    t.colorSpace = THREE.SRGBColorSpace;
+    return t;
+  })();
+  const reflGeo = new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2); // lying flat, its length along local z
+  const reflections = [];
+  const _c = new THREE.Vector3();
+  const _m = new THREE.Vector3();
+  const _p = new THREE.Vector3();
+  for (const L of lamps) {
+    const m = byName(C.lights[L.index]);
+    const centre = new THREE.Box3().setFromObject(m).getCenter(new THREE.Vector3());
+    const mat = new THREE.MeshBasicMaterial({
+      map: spot,
+      color: 0x000000,
+      transparent: true,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      toneMapped: true,
+    });
+    const mesh = new THREE.Mesh(reflGeo, mat);
+    mesh.name = m.name + "_tableReflection";
+    mesh.matrixAutoUpdate = false;
+    mesh.frustumCulled = false; // placed at render time
+    mesh.renderOrder = 3;
+    mesh.visible = false;
+    mesh.onBeforeRender = (renderer, scene, cam) => {
+      const ty = getTableY ? getTableY() : null;
+      cam.getWorldPosition(_c);
+      if (ty == null || _c.y <= ty + 0.01 || centre.y <= ty) {
+        mesh.scale.setScalar(1e-6);
+      } else {
+        // The lamp mirrored below the table, and where the view of it meets the table.
+        _m.set(centre.x, 2 * ty - centre.y, centre.z);
+        const s = (_c.y - ty) / (_c.y - _m.y);
+        _p.copy(_c).lerp(_m, s);
+        _p.y = ty + R.lift;
+        // From the table under the lamp to the mirror point (along the view), soft past both ends.
+        const dx = _p.x - centre.x, dz = _p.z - centre.z;
+        const len = Math.min(R.maxLength, Math.hypot(dx, dz) + 2 * R.extra);
+        mesh.position.set((centre.x + _p.x) / 2, ty + R.lift, (centre.z + _p.z) / 2);
+        mesh.rotation.set(0, Math.atan2(dx, dz), 0);
+        mesh.scale.set(R.width, 1, len);
+      }
+      mesh.updateMatrix();
+      mesh.matrixWorld.copy(mesh.matrix);
+      mesh.modelViewMatrix.multiplyMatrices(cam.matrixWorldInverse, mesh.matrixWorld);
+      mesh.normalMatrix.getNormalMatrix(mesh.modelViewMatrix);
+    };
+    scene0(root).add(mesh);
+    owned.push(mat);
+    reflections.push({ L, mesh, mat });
+  }
+
   const N = C.lights.length;
   const ease = (x) => Math.min(1, Math.max(0, x / C.fadeSec));
   const col = new THREE.Color();
@@ -218,6 +315,11 @@ export function createStartLights({ THREE, root }) {
       L.mat.userData.bloomWeight.value = on * C.bloom;
       lit += on;
     }
+    for (const r of reflections) {
+      const on = t == null ? 0 : ease(t + (N - r.L.index) * C.interval);
+      r.mesh.visible = on > 0;
+      r.mat.color.copy(col).multiplyScalar(on * R.strength);
+    }
     glow.color.copy(col);
     glow.intensity = lamps.length ? (C.glow.intensity * lit) / N : 0;
   }
@@ -226,6 +328,9 @@ export function createStartLights({ THREE, root }) {
   if (missing.length) console.warn("Start lights: missing in the model:", missing.join(", "));
 
   function dispose() {
+    for (const r of reflections) r.mesh.removeFromParent();
+    reflGeo.dispose();
+    spot.dispose();
     glow.removeFromParent();
     glow.dispose();
     for (const m of owned) m.dispose();

@@ -32,7 +32,7 @@ export const KITCHEN_COUNTER_SCREEN = {
   frameShare: 0.11, // the frame's width, × the screen's height
   rivetPitch: 0.34, // between rivets, × the screen's height
   rivetRadius: 0.36, // × the frame's width
-  ledFill: 0.78, // an LED's diameter / its cell
+  ledFill: 0.56, // an LED's diameter / its cell (smaller: more dark panel between the LEDs)
   marginCells: 1, // empty LED rows / columns round the text
 };
 

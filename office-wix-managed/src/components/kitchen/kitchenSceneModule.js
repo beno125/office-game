@@ -12535,7 +12535,7 @@ let _worldSwitched = false;
             // The start lights on the table (see kitchenStartLights.js): materials, lit by the countdown.
             if (!_startLights) {
               try {
-                _startLights = createStartLights({ THREE, root: kmodel });
+                _startLights = createStartLights({ THREE, root: kmodel, getTableY: () => getTablePlaySurfaceY() });
               } catch (e) {
                 console.warn("Failed to set up the start lights:", e);
               }
