@@ -39,6 +39,7 @@ import { createTouchDrive } from "../game/touch/touchDrive.js";
 import { createKitchenFood, trayFromMesh, addTrayShapes, KITCHEN_FOOD } from "./kitchenFood.js";
 import { createMilkCartons } from "./kitchenMilkCartons.js";
 import { createShelfJars } from "./kitchenShelfJars.js";
+import { createStartLights } from "./kitchenStartLights.js";
 import { createKitchenNapkins } from "./kitchenNapkins.js";
 import { createCameraDrag } from "../game/cameraDrag.js";
 import {
@@ -701,6 +702,7 @@ export function isKitchenSceneReady() {
       const MAX_DEVICE_PIXEL_RATIO = 2;
       const VISUAL_PARITY_TIER = 2;
       let _shelfJars = null; // kitchenShelfJars.js (declared early: applyPerformanceSettings reads it)
+      let _startLights = null; // kitchenStartLights.js
 
       function getScreenPixelCount() {
         const dpr = window.devicePixelRatio || 1;
@@ -5103,6 +5105,16 @@ let _worldSwitched = false;
         });
       }
 
+      /**
+       * Seconds relative to GO from the race's own countdown timer (the one the HUD's 3-2-1-GO reads): -time left during
+       * the countdown, time since GO while racing; null otherwise (the start lights are dark).
+       */
+      function raceTimeFromGo() {
+        if (_racePhase === "countdown") return -_raceTimer;
+        if (_racePhase === "racing" || _racePhase === "finishing") return _raceElapsed;
+        return null;
+      }
+
       /** Per frame: race phases, laps, HUD, AI car visuals. */
       function updateKitchenRace(dt) {
         if (!_raceTrack) {
@@ -9139,6 +9151,10 @@ let _worldSwitched = false;
           _shelfJars.dispose();
           _shelfJars = null;
         }
+        if (_startLights) {
+          _startLights.dispose();
+          _startLights = null;
+        }
         if (_kitchenNapkins) {
           _kitchenNapkins.dispose();
           _kitchenNapkins = null;
@@ -12373,6 +12389,14 @@ let _worldSwitched = false;
                 console.warn("Failed to set up the shelf jars:", e);
               }
             }
+            // The start lights on the table (see kitchenStartLights.js): materials, lit by the countdown.
+            if (!_startLights) {
+              try {
+                _startLights = createStartLights({ THREE, root: kmodel });
+              } catch (e) {
+                console.warn("Failed to set up the start lights:", e);
+              }
+            }
             // Paper napkins flying out of the paper dispenser (see kitchenNapkins.js).
             if (!_kitchenNapkins) {
               try {
@@ -13968,6 +13992,7 @@ let _worldSwitched = false;
             carTimeLeft -= step;
           }
           updateKitchenRace(dt);
+          if (_startLights) _startLights.update(raceTimeFromGo());
           updateKitchenRaceArrows(dt);
           if (_carLandShakePending && camera === carCamera) {
             triggerCarCam1LandingShake(
