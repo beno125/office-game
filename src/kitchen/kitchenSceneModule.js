@@ -1703,6 +1703,12 @@ export function isKitchenSceneReady() {
       const KITCHEN_TABLE_SIDE_BRIGHT = { color: 0xffffff, emissive: 0xffffff, emissiveIntensity: 0.32, metalness: 0 };
       const _tableSideBrightColor = new THREE.Color(KITCHEN_TABLE_SIDE_BRIGHT.color);
       const _tableSideBrightEmissive = new THREE.Color(KITCHEN_TABLE_SIDE_BRIGHT.emissive);
+      /**
+       * mainTablePlate in bright mode: the same material (it has no image texture: a flat colour with the
+       * kitchen's lighting patches) in white. Dark mode keeps its own colour (set where its material is made).
+       */
+      const KITCHEN_TABLE_PLATE_BRIGHT = { color: 0xffffff };
+      const _tablePlateBrightColor = new THREE.Color(KITCHEN_TABLE_PLATE_BRIGHT.color);
       let lightBlend = 0;
       let lightBlendTarget = 0;
       const LIGHT_FADE_DURATION = 0.2;
@@ -1844,6 +1850,11 @@ export function isKitchenSceneReady() {
               entry.darkPenumbra +
               (entry.brightPenumbra - entry.darkPenumbra) * b;
           }
+        }
+        if (_iceCoffeeTankMat) _iceCoffeeTankMat.uniforms.uBright.value = b; // shared with its surface
+        const plateMat = _mainTablePlateMatRef;
+        if (plateMat && plateMat.userData.darkColor) {
+          plateMat.color.lerpColors(plateMat.userData.darkColor, _tablePlateBrightColor, b);
         }
         const sideMat = _kitchenTableCoverSideMat;
         if (sideMat && sideMat.userData.darkColor) {
@@ -2061,6 +2072,7 @@ let _worldSwitched = false;
       };
       let _kitchenTableCoverLampMat = null;
       let _kitchenTableCoverSideMat = null;
+      let _mainTablePlateMatRef = null; // mainTablePlate's material (its bright-mode colour, from the light blend)
       let _barChairWoodMat = null;
       let _barChairWoodMatBackup = null;
       const waterTapChromeMat = new THREE.MeshPhysicalMaterial({
@@ -5707,8 +5719,8 @@ let _worldSwitched = false;
 
       // ---------------------------------------------------------------------------
       // Cinematic intro, letterboxed:
-      //   0. room reveal — a high, wide sweep across the kitchen gliding down onto the portal shot's first pose,
-      //      the room going from bright mode to dark mode meanwhile (dark mode from the portal on)
+      //   0. room reveal — a low glide across the kitchen, from the pesel wall to the iced coffee machine, in
+      //      bright mode, switching to dark mode near its end (dark mode from the portal on); a fade cut
       //   1. table overview — a slow glide along the table, descending toward the track
       //   2. car beauty shot — (cut) a slow, low front-three-quarter orbit of the player's car
       //   3. Mister Spot — (cut) a low three-quarter push-in on the robot firing
@@ -5726,25 +5738,53 @@ let _worldSwitched = false;
        * at the start of this one). The arrival is one continuous move.
        */
       /**
-       * 0. Room reveal (the intro's first shot): starts in bright mode, high and wide in the room's front-right
-       * corner looking across the kitchen, and sweeps round the portal's spot in a descending arc (a slight bank
-       * mid-move), landing at rest exactly on the portal shot's first pose (position, aim, fov), which is left as
-       * it was. The lights go from bright mode to dark mode over `lights` (seconds into the shot; the existing
-       * light blend, Key P / Key O: lights, colours, emissive, bloom, background), done before the shot ends.
+       * 0. Room reveal (the intro's first shot): a glide across the kitchen in bright mode, a little above the
+       * table's height and tilted slightly down onto it (the track, the cars and what's on the table in view).
+       * It starts on the room's right side by the pesel wall (its coloured panels and light bars), turns into
+       * the aisle between the table and the back counter and travels the length of the room to the far side,
+       * ending on the iced coffee machine. As it gets there (`switch.atShare` of the shot) the lights go to dark
+       * mode: a short flicker, then down (the existing light blend, Key P / Key O: lights, colours, emissive,
+       * bloom, background, together). A fade-to-black cut to the portal shot (the intro's other cuts' style).
+       * The path keeps clear of the table, the robot (above its height), the lamps, the fridges and the counter.
        */
       const KITCHEN_INTRO_REVEAL = {
-        sec: 7.0, // the shot's length
-        lights: { fromSec: 1.4, toSec: 5.8 }, // bright → dark (eased in and out)
-        startPos: { x: 44, y: 36, z: 40 }, // camera start (world): high, front-right of the room
-        lookFrom: { x: 0, y: 20, z: -16 }, // where it looks first (the back wall's closets / counter)…
-        lookSettle: 0.8, // …turning onto the portal's spot by this share of the shot (then held)
-        heightLag: 1.35, // > 1: it stays high a little longer, then glides down low
-        fovFrom: 60, // wide, narrowing to the portal shot's own fov
-        bankDeg: 3, // the slight bank mid-sweep (0 at both ends)
+        sec: 8.0, // the shot's length
+        /** Lights: bright → dark starting at this share of the shot, over `sec`; `flicker`: the blend's level
+         *  (× the fall) at even steps over the first `flickerShare` of it (a power-down stutter). */
+        switch: { atShare: 2 / 3, sec: 1.1, flicker: [1, 0.3, 0.95, 0.2, 0.75, 0.45], flickerShare: 0.45 },
+        /** Camera height (world y; the table's top is 14.3, the lamps' bottoms 26) and its tilt down (degrees
+         *  below level) the whole shot (was 6 → 10.5 high, looking up 8–24°). */
+        height: 22,
+        tiltDeg: 15,
+        /** Camera path (world x, z), smooth through these, at a near-steady pace. */
+        path: [
+          [38, 48], // right side, front: the pesel wall on the right, the table's end on the left
+          [58, 30], // past the pesel wall
+          [63, 8],
+          [50, -4.5], // round the table's end into the back aisle, beside the table
+          [20, -5],
+          [-12, -5],
+          [-28, -4], // the iced coffee machine side
+        ],
+        /** Which way it faces along the way (points it heads toward, world x, z; same count, matched in order):
+         *  between the pesel wall and the table, then across the table diagonally, settling on the iced coffee
+         *  machine. */
+        look: [
+          [66, 4],
+          [70, 0],
+          [30, 12],
+          [-10, 14],
+          [-35, 12],
+          [-44, -12],
+          [-44.5, -22],
+        ],
+        ease: 0.55, // 0 = steady pace, 1 = fully eased in and out
+        fovFrom: 58, // wide…
+        fovTo: 48, // …tighter on the coffee machine
       };
       const KITCHEN_INTRO_SHOTS = [
-        { name: "roomReveal", sec: KITCHEN_INTRO_REVEAL.sec, blendIn: 0 }, // ends on the portal shot's first pose (no cut)
-        { name: "portal", sec: 5.6, blendIn: 0 }, // a build-up, the portal opens, the car drives out of it, it closes (was 4.6)
+        { name: "roomReveal", sec: KITCHEN_INTRO_REVEAL.sec, blendIn: 0 },
+        { name: "portal", sec: 5.6, blendIn: 0, fade: true }, // fade cut from the reveal (its own sequence unchanged) // a build-up, the portal opens, the car drives out of it, it closes (was 4.6)
         { name: "overview", sec: 3.6, blendIn: 0, fade: true },
         { name: "carBeauty", sec: 3.6, blendIn: 0, fade: true },
         { name: "misterSpot", sec: 3.6, blendIn: 0, fade: true }, // Mister Spot firing its lasers
@@ -6758,37 +6798,41 @@ let _worldSwitched = false;
       }
 
       // ── Intro shot 0: the room reveal (bright → dark) ────────────────────────
-      const _kRevealEnd = { pos: new THREE.Vector3(), look: new THREE.Vector3(), fov: 50, roll: 0 };
-      const _kRevealLook = new THREE.Vector3();
-      /** The reveal's pose at u (0..1): a descending arc round the portal's centre, ending on the portal shot's first pose. */
+      let _kRevealCurves = null;
+      /** The reveal's pose at u (0..1): along its path, looking along its look points. */
       function _kIntroRevealPose(u, o) {
         const V = KITCHEN_INTRO_REVEAL;
-        // The portal is built here as the portal shot did (under the loader): its camera angle is chosen then.
+        // The portal is built here (under the loader) as when its shot came first; hidden until its shot.
         if (!_kPortal.active && !_kPortal.done) _kIntroPortalBegin();
-        _kIntroPortalCamPose(0, _kRevealEnd); // the portal shot's first pose (no shake at its start)
-        if (u >= 1) {
-          o.pos.copy(_kRevealEnd.pos);
-          o.look.copy(_kRevealEnd.look);
-          o.fov = _kRevealEnd.fov;
-          o.roll = _kRevealEnd.roll;
-          return o;
+        if (!_kRevealCurves) {
+          const curve = (pts) => new THREE.CatmullRomCurve3(pts.map((p) => new THREE.Vector3(p[0], 0, p[1])), false, "centripetal");
+          _kRevealCurves = { pos: curve(V.path), look: curve(V.look) };
         }
-        const c = _kRevealEnd.look; // the portal's centre: the arc's pivot
-        const sx = V.startPos.x - c.x, sz = V.startPos.z - c.z;
-        const ex = _kRevealEnd.pos.x - c.x, ez = _kRevealEnd.pos.z - c.z;
-        const aS = Math.atan2(sz, sx);
-        let da = Math.atan2(ez, ex) - aS;
-        da = Math.atan2(Math.sin(da), Math.cos(da)); // the short way round
-        const e = _kIntroEaseSine(u);
-        const eH = _kIntroEaseSine(Math.pow(u, V.heightLag));
-        const a = aS + da * e;
-        const r = _kIntroLerp(Math.hypot(sx, sz), Math.hypot(ex, ez), e);
-        o.pos.set(c.x + Math.cos(a) * r, _kIntroLerp(V.startPos.y, _kRevealEnd.pos.y, eH), c.z + Math.sin(a) * r);
-        _kRevealLook.set(V.lookFrom.x, V.lookFrom.y, V.lookFrom.z);
-        o.look.lerpVectors(_kRevealLook, c, _kIntroEaseSine(Math.min(1, u / V.lookSettle)));
-        o.fov = _kIntroLerp(V.fovFrom, _kRevealEnd.fov, e);
-        o.roll = V.bankDeg * _kIntroDeg * Math.sin(Math.PI * u) * Math.sign(da) + _kRevealEnd.roll * e;
+        const e = _kIntroLerp(u, _kIntroEaseSine(u), V.ease);
+        _kRevealCurves.pos.getPointAt(e, o.pos);
+        o.pos.y = V.height;
+        // Heading toward the look points (matched to the path points: same share along each, not by length),
+        // pitched down by the tilt.
+        _kRevealCurves.look.getPoint(_kRevealCurves.pos.getUtoTmapping(e), o.look);
+        const dx = o.look.x - o.pos.x, dz = o.look.z - o.pos.z;
+        const flat = Math.hypot(dx, dz) || 1;
+        o.look.set(o.pos.x + dx / flat, V.height - Math.tan(V.tiltDeg * _kIntroDeg), o.pos.z + dz / flat);
+        o.fov = _kIntroLerp(V.fovFrom, V.fovTo, _kIntroEaseSine(u));
+        o.roll = 0;
         return o;
+      }
+      /** The reveal's light blend at shot time t: bright, then (from the switch) a flicker down to dark. */
+      function _kRevealBlendAt(t) {
+        const S = KITCHEN_INTRO_REVEAL.switch;
+        const t0 = S.atShare * KITCHEN_INTRO_REVEAL.sec;
+        const k = Math.min(1, Math.max(0, (t - t0) / S.sec));
+        if (k <= 0) return 1;
+        if (k >= 1) return 0;
+        const fall = 1 - introEase(k);
+        if (k >= S.flickerShare) return fall;
+        const f = S.flicker;
+        const step = Math.min(f.length - 1, Math.floor((k / S.flickerShare) * f.length));
+        return fall * f[step];
       }
 
       /**
@@ -6822,14 +6866,12 @@ let _worldSwitched = false;
       }
       /** Per frame of the intro: the reveal's lights (bright → dark) until the portal shot starts. */
       function _kIntroRevealTick(t) {
-        const V = KITCHEN_INTRO_REVEAL;
         if (_kIntro.revealDone) return;
         if (t >= _kIntro.shotStart("portal")) {
           _kIntroRevealEnd();
           return;
         }
-        const k = Math.min(1, Math.max(0, (t - V.lights.fromSec) / (V.lights.toSec - V.lights.fromSec)));
-        _kRevealApplyLights(1 - introEase(k));
+        _kRevealApplyLights(_kRevealBlendAt(t));
         _kRevealShowPortal(false);
       }
       /** The reveal over (or skipped): dark mode exactly as before, the usual light set, the portal shown. */
@@ -9046,9 +9088,10 @@ let _worldSwitched = false;
       }
 
       /**
-       * The iced coffee in iceCoffeeTank (sRGB hex): creamy coffee with milk, light-to-medium brown. Unlit (the
-       * same in both light modes). Tank: the liquid's body (hot = its glow low in the middle, low → body → upper
-       * by height, edge = darker toward the sides). Surface: its moving top (deep troughs → mid → lift on the crests).
+       * iceCoffeeTank's liquid in bright mode (sRGB hex): iced coffee, creamy coffee with milk, light-to-medium
+       * brown, no glow (dark mode keeps its glowing purple, in the shaders; the light blend goes between them).
+       * Tank: the liquid's body (hot = its colour low in the middle, low → body → upper by height, edge = darker
+       * toward the sides). Surface: its moving top (deep troughs → mid → lift on the crests).
        */
       const KITCHEN_ICE_COFFEE_COLORS = {
         tank: { hot: 0xc8915e, low: 0xb9844f, body: 0xa9784c, upper: 0xc9a27a, edge: 0x7a5234 },
@@ -11597,6 +11640,10 @@ let _worldSwitched = false;
               _kitchenMainPlateMat.envMap = scene.environment;
               _mainTablePlateMat.envMap = null;
             }
+            // Its dark-mode colour (bright mode: KITCHEN_TABLE_PLATE_BRIGHT, from the light blend).
+            _mainTablePlateMat.userData.darkColor = _mainTablePlateMat.color.clone();
+            _mainTablePlateMatRef = _mainTablePlateMat;
+            if (lightBlend > 0) try { applyLightBlend(lightBlend); } catch (e) {}
             const _mainTableSidePannelsMat = new THREE.MeshStandardMaterial({
               color: 0xff837b,
               roughness: 1.0,
@@ -11695,6 +11742,7 @@ let _worldSwitched = false;
             const _iceCoffeeUniforms = {
               uTime: { value: 0 },
               uFill: { value: 0.56 },
+              uBright: { value: lightBlend }, // 0 dark mode (glowing purple) → 1 bright mode (iced coffee)
             };
             if (_iceCoffeeTankMat) _iceCoffeeTankMat.dispose();
             if (_iceCoffeeSurfaceMat) _iceCoffeeSurfaceMat.dispose();
@@ -11752,22 +11800,29 @@ let _worldSwitched = false;
               fragmentShader: `
                 varying vec3 vLocal;
                 uniform float uFill;
+                uniform float uBright;
+                vec3 shade(vec3 hot, vec3 low, vec3 body, vec3 upper, vec3 edge, float h, float radial) {
+                  vec3 col = mix(hot, low, smoothstep(0.0, 0.18, h));
+                  col = mix(col, body, smoothstep(0.12, 0.5, h));
+                  col = mix(col, upper, smoothstep(0.55, 1.0, h));
+                  return mix(col, edge, smoothstep(0.45, 1.0, radial) * 0.65);
+                }
                 void main() {
                   float h = clamp((vLocal.y + 1.282) / (uFill + 1.282), 0.0, 1.0);
                   vec2 xz = vLocal.xz / vec2(0.793, 1.648);
                   float radial = clamp(length(xz), 0.0, 1.0);
                   float core = exp(-dot(xz, xz) * 2.2) * pow(1.0 - h, 1.2);
-                  vec3 hot = ${_iceCoffeeVec3(KITCHEN_ICE_COFFEE_COLORS.tank.hot)};
-                  vec3 low = ${_iceCoffeeVec3(KITCHEN_ICE_COFFEE_COLORS.tank.low)};
-                  vec3 body = ${_iceCoffeeVec3(KITCHEN_ICE_COFFEE_COLORS.tank.body)};
-                  vec3 upper = ${_iceCoffeeVec3(KITCHEN_ICE_COFFEE_COLORS.tank.upper)};
-                  vec3 edge = ${_iceCoffeeVec3(KITCHEN_ICE_COFFEE_COLORS.tank.edge)};
-                  vec3 col = mix(hot, low, smoothstep(0.0, 0.18, h));
-                  col = mix(col, body, smoothstep(0.12, 0.5, h));
-                  col = mix(col, upper, smoothstep(0.55, 1.0, h));
-                  col = mix(col, edge, smoothstep(0.45, 1.0, radial) * 0.65);
-                  col += hot * core * 0.4;
-                  gl_FragColor = vec4(col, 1.0);
+                  vec3 hot = vec3(0.95, 0.0, 0.38);
+                  vec3 col = shade(hot, vec3(0.86, 0.0, 0.32), vec3(0.78, 0.0, 0.28), vec3(0.84, 0.0, 0.34), vec3(0.52, 0.0, 0.2), h, radial);
+                  col += hot * core * 0.4; // dark mode's glow from within
+                  vec3 coffee = shade(
+                    ${_iceCoffeeVec3(KITCHEN_ICE_COFFEE_COLORS.tank.hot)},
+                    ${_iceCoffeeVec3(KITCHEN_ICE_COFFEE_COLORS.tank.low)},
+                    ${_iceCoffeeVec3(KITCHEN_ICE_COFFEE_COLORS.tank.body)},
+                    ${_iceCoffeeVec3(KITCHEN_ICE_COFFEE_COLORS.tank.upper)},
+                    ${_iceCoffeeVec3(KITCHEN_ICE_COFFEE_COLORS.tank.edge)},
+                    h, radial); // no glow
+                  gl_FragColor = vec4(mix(col, coffee, uBright), 1.0);
                 }
               `,
             });
@@ -11803,14 +11858,20 @@ let _worldSwitched = false;
               fragmentShader: `
                 varying float vWave;
                 varying float vChop;
+                uniform float uBright;
                 void main() {
                   float crest = smoothstep(-0.35, 0.55, vWave);
-                  vec3 deep = ${_iceCoffeeVec3(KITCHEN_ICE_COFFEE_COLORS.surface.deep)};
-                  vec3 mid = ${_iceCoffeeVec3(KITCHEN_ICE_COFFEE_COLORS.surface.mid)};
-                  vec3 lift = ${_iceCoffeeVec3(KITCHEN_ICE_COFFEE_COLORS.surface.lift)};
+                  vec3 deep = vec3(0.42, 0.0, 0.16);
+                  vec3 mid = vec3(0.92, 0.0, 0.34);
+                  vec3 lift = vec3(1.0, 0.0, 0.4);
                   vec3 col = mix(deep, mid, clamp(vChop, 0.0, 1.0));
                   col = mix(col, lift, crest * 0.85);
-                  gl_FragColor = vec4(col, 1.0);
+                  vec3 coffee = mix(
+                    ${_iceCoffeeVec3(KITCHEN_ICE_COFFEE_COLORS.surface.deep)},
+                    ${_iceCoffeeVec3(KITCHEN_ICE_COFFEE_COLORS.surface.mid)},
+                    clamp(vChop, 0.0, 1.0));
+                  coffee = mix(coffee, ${_iceCoffeeVec3(KITCHEN_ICE_COFFEE_COLORS.surface.lift)}, crest * 0.85);
+                  gl_FragColor = vec4(mix(col, coffee, uBright), 1.0);
                 }
               `,
             });
