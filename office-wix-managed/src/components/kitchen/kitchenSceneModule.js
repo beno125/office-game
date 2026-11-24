@@ -1786,14 +1786,78 @@ export function isKitchenSceneReady() {
         }
       }
       /**
-       * mainTableSidePlane in bright mode: white. Not metallic (metal only tinted its reflections: it read grey),
-       * and a little white self-light, as the end panel faces away from the bright mode's lights (it read grey
-       * too). Dark mode keeps its own colour / glow / metalness (set where its material is made); the light blend
-       * goes between the two.
+       * The race table's tiled cover in bright mode (mainTableTopPlane, the top, and mainTableSidePlane, its end
+       * panel; both use the ceramic tile textures): matte white with a soft sheen. Dark mode keeps its own look
+       * (set where the materials are made); the light blend goes between the two, so nothing rebuilds a shader.
+       * Why it read glossy and not white: the tile roughness map (≈ 0.12) × roughness 0.78 left it ≈ 0.09, near
+       * mirror, under a full clear coat (roughness 0.06), so it showed reflections (the HDRI room) instead of its
+       * colour; the base-colour texture (≈ 0.53 linear) halved the white; and the top itself stayed blue
+       * (0x647bb8, a blue glow) in bright mode.
+       * - `tone`: the white; `roughness`: its final roughness (the roughness map no longer lowers it);
+       *   `specular`: its highlight strength (1 = the usual); clear coat and metalness off.
+       * - `detail`: how much the tile texture shows (0 = flat white, 1 = as in dark mode: multiplied over).
+       * - `lift`: a little white self-light (the end panel faces away from the lights, the top a little).
        */
-      const KITCHEN_TABLE_SIDE_BRIGHT = { color: 0xffffff, emissive: 0xffffff, emissiveIntensity: 0.32, metalness: 0 };
-      const _tableSideBrightColor = new THREE.Color(KITCHEN_TABLE_SIDE_BRIGHT.color);
-      const _tableSideBrightEmissive = new THREE.Color(KITCHEN_TABLE_SIDE_BRIGHT.emissive);
+      const KITCHEN_TABLE_WHITE = {
+        tone: 0xf7f5f0,
+        roughness: 0.85,
+        specular: 0.35,
+        detail: 0.25,
+        lift: { top: 0.1, side: 0.32 },
+      };
+      const _tableWhiteTone = new THREE.Color(KITCHEN_TABLE_WHITE.tone);
+      const _tableWhiteEmissive = new THREE.Color(0xffffff);
+      /**
+       * The cover's bright white in its shader (uniforms only, so one program for both modes): the texture as a
+       * light detail and its roughness set. At uBright 0 (dark mode) the output is exactly as before.
+       */
+      function patchKitchenTableWhite(mat, part) {
+        const U = {
+          uTableBright: { value: 0 },
+          uTableRough: { value: KITCHEN_TABLE_WHITE.roughness },
+          uTableDetail: { value: KITCHEN_TABLE_WHITE.detail },
+        };
+        mat.userData.tableWhite = {
+          U,
+          part,
+          darkColor: mat.color.clone(),
+          darkEmissive: mat.emissive.clone(),
+          darkEmissiveIntensity: mat.emissiveIntensity,
+          darkMetalness: mat.metalness,
+          darkClearcoat: mat.clearcoat,
+          darkSpecular: mat.specularIntensity,
+        };
+        const prev = mat.onBeforeCompile;
+        mat.onBeforeCompile = function (shader, renderer) {
+          if (prev) prev.call(this, shader, renderer);
+          Object.assign(shader.uniforms, U);
+          shader.fragmentShader = shader.fragmentShader
+            .replace("void main() {", "uniform float uTableBright;\nuniform float uTableRough;\nuniform float uTableDetail;\nvoid main() {")
+            .replace(
+              "#include <map_fragment>",
+              "#include <map_fragment>\n#ifdef USE_MAP\ndiffuseColor.rgb = mix(diffuseColor.rgb, diffuse * mix(vec3(1.0), sampledDiffuseColor.rgb, uTableDetail), uTableBright);\n#endif",
+            )
+            .replace(
+              "#include <roughnessmap_fragment>",
+              "#include <roughnessmap_fragment>\nroughnessFactor = mix(roughnessFactor, uTableRough, uTableBright);",
+            );
+        };
+        const prevKey = mat.customProgramCacheKey;
+        mat.customProgramCacheKey = () => (prevKey ? prevKey.call(mat) : "") + "|tableWhite";
+      }
+      /** The cover's light blend (b: 0 dark → 1 bright). */
+      function applyKitchenTableWhite(mat, b) {
+        const W = mat && mat.userData.tableWhite;
+        if (!W) return;
+        const lerp = (a, c) => a + (c - a) * b;
+        W.U.uTableBright.value = b;
+        mat.color.lerpColors(W.darkColor, _tableWhiteTone, b);
+        mat.emissive.lerpColors(W.darkEmissive, _tableWhiteEmissive, b);
+        mat.emissiveIntensity = lerp(W.darkEmissiveIntensity, KITCHEN_TABLE_WHITE.lift[W.part]);
+        mat.metalness = lerp(W.darkMetalness, 0);
+        mat.clearcoat = lerp(W.darkClearcoat, 1e-4); // ~0, not 0: 0 would switch its shader (a rebuild)
+        mat.specularIntensity = lerp(W.darkSpecular, KITCHEN_TABLE_WHITE.specular);
+      }
       /**
        * mainTablePlate in bright mode: the same material (it has no image texture: a flat colour with the
        * kitchen's lighting patches) in white. Dark mode keeps its own colour (set where its material is made).
@@ -2027,16 +2091,8 @@ export function isKitchenSceneReady() {
         if (plateMat && plateMat.userData.darkColor) {
           plateMat.color.lerpColors(plateMat.userData.darkColor, _tablePlateBrightColor, b);
         }
-        const sideMat = _kitchenTableCoverSideMat;
-        if (sideMat && sideMat.userData.darkColor) {
-          sideMat.color.lerpColors(sideMat.userData.darkColor, _tableSideBrightColor, b);
-          sideMat.emissive.lerpColors(sideMat.userData.darkEmissive, _tableSideBrightEmissive, b);
-          sideMat.emissiveIntensity =
-            sideMat.userData.darkEmissiveIntensity +
-            (KITCHEN_TABLE_SIDE_BRIGHT.emissiveIntensity - sideMat.userData.darkEmissiveIntensity) * b;
-          sideMat.metalness =
-            sideMat.userData.darkMetalness + (KITCHEN_TABLE_SIDE_BRIGHT.metalness - sideMat.userData.darkMetalness) * b;
-        }
+        applyKitchenTableWhite(_kitchenTableCoverLampMat, b); // the table top
+        if (_kitchenTableCoverSideMat !== _kitchenTableCoverLampMat) applyKitchenTableWhite(_kitchenTableCoverSideMat, b); // its end panel
         for (const m of _kitchenPastelMats) {
           m.emissiveIntensity =
             KITCHEN_SOAP_PASTEL.selfLight.dark +
@@ -10083,17 +10139,15 @@ let _worldSwitched = false;
         sideMat.color.set(0x647bb8);
         sideMat.emissive.setHex(0x0d1d50);
         sideMat.emissiveIntensity = 0.2;
-        // Its dark-mode look (bright mode: KITCHEN_TABLE_SIDE_BRIGHT, from the light blend).
-        sideMat.userData.darkColor = sideMat.color.clone();
-        sideMat.userData.darkEmissive = sideMat.emissive.clone();
-        sideMat.userData.darkEmissiveIntensity = sideMat.emissiveIntensity;
-        sideMat.userData.darkMetalness = sideMat.metalness;
         baseMat.color.set(0x302544);
         baseMat.emissive.setHex(0x160a2d);
         baseMat.emissiveIntensity = 0.12;
         topMat.customProgramCacheKey = () => "kitchen_table_top_plane";
         sideMat.customProgramCacheKey = () => "kitchen_table_side_plane";
         baseMat.customProgramCacheKey = () => "kitchen_table_base";
+        // Bright mode: matte white (KITCHEN_TABLE_WHITE, from the light blend); dark mode as set above.
+        patchKitchenTableWhite(topMat, "top");
+        patchKitchenTableWhite(sideMat, "side");
         if (scene.environment) {
           topMat.envMap = scene.environment;
           sideMat.envMap = scene.environment;
@@ -14580,6 +14634,17 @@ let _worldSwitched = false;
             // The intro's room reveal (bright → dark): every mode's lights on at once (_kRevealLightSet), compiled
             // here too, so the reveal doesn't freeze as it starts or as it hands over to dark mode.
             // As it plays: the car hidden (in the portal's tunnel, with its own lights).
+            // After the first shot's cut: dark mode, no HDRI, the car hidden (in the portal's tunnel). Compiled here
+            // (the frames under the loader now have the HDRI on), so the cut doesn't stall on them.
+            {
+              const carWas = car.visible;
+              car.visible = false;
+              renderer.setRenderTarget(finalComposer.readBuffer);
+              const compilingCut = renderer.compileAsync(scene, camera).catch(() => {});
+              renderer.setRenderTarget(prevTarget);
+              car.visible = carWas;
+              await Promise.race([compilingCut, new Promise((resolve) => setTimeout(resolve, KITCHEN_WARMUP.maxWaitMs))]);
+            }
             // Its HDRI too (on from here to the cut after the first shot).
             if (_kIntro.state === "pending") {
               await _kHdriLoad();
