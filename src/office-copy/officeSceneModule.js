@@ -3700,7 +3700,28 @@ let _officeSceneAnimationFrame = 0;
         return true;
       }
 
+      /** The first mode on a hit: the car touching the hand now, and not the frame before. */
+      function updateHandHitFx(dt) {
+        const touching = _handCarTouchedThisFrame;
+        _handCarTouchedThisFrame = false;
+        _handHitCooldown = Math.max(0, _handHitCooldown - dt);
+        if (touching && !_handCarWasTouching && _handHitCooldown === 0 && _handWalkZPhase === 0) {
+          _handHitT = 0;
+          _handHitCooldown = HAND_HIT_FX.cooldownSec;
+          playHandWalkWarningAnimation();
+          initHandWalkSmallFxFlameOn();
+        }
+        _handCarWasTouching = touching;
+        _handHitFx = 0;
+        if (_handHitT >= 0) {
+          _handHitT += dt;
+          if (_handHitT < HAND_HIT_FX.holdSec) _handHitFx = 1;
+          else _handHitT = -1;
+        }
+      }
+
       function updateHandWalkTrigger(dt) {
+        updateHandHitFx(dt);
         let smallFxTarget = 0;
         let bigFxTarget = 0;
         let smallFxPos = null;
@@ -3764,7 +3785,7 @@ let _officeSceneAnimationFrame = 0;
         const inside = _handWalkTriggerBox.containsPoint(car.position);
         if (!inside) {
           _handWalkTriggerWasInside = false;
-          if (_handWalkZPhase === 0) stopOfficeArmatureAnimation();
+          if (_handWalkZPhase === 0 && _handHitT < 0) stopOfficeArmatureAnimation(); // not while a hit's move plays
           if (_handWalkZTriggeredThisVisit && _handWalkZPhase === 0) {
             resetHandWalkTriggerCycle();
           } else if (!_handWalkZTriggeredThisVisit) {
@@ -3793,21 +3814,11 @@ let _officeSceneAnimationFrame = 0;
 
         _handTriggerOutsideTime = 0;
 
-        if (!_handWalkTriggerWasInside) {
-          _handWalkTriggerWasInside = true;
-          if (_handTriggerInsideTime === 0 && !_handWalkZTriggeredThisVisit) {
-            playHandWalkWarningAnimation();
-            initHandWalkSmallFxFlameOn();
-          }
-        }
+        // Entering the zone no longer plays the first mode (a hit on the hand does: updateHandHitFx).
+        _handWalkTriggerWasInside = true;
 
         if (!_handWalkZTriggeredThisVisit && _handWalkZPhase === 0) {
           _handTriggerInsideTime += dt;
-          smallFxTarget = THREE.MathUtils.clamp(
-            _handTriggerInsideTime / HAND_TRIGGER_HOLD_SEC,
-            0,
-            1,
-          );
         }
 
         if (
@@ -5397,6 +5408,21 @@ let _officeSceneAnimationFrame = 0;
       let _handWalkZPhase = 0;
       /** 0..1: the intro shows the hand's green flame (set by the intro only). */
       let _introHandFxDemo = 0;
+      /**
+       * The hand's first mode (its small warning move and the green flame) plays when
+       * the car drives into the hand (its collision box), not when the car enters the
+       * trigger zone. The walk (the second mode) keeps its trigger: the car held in the
+       * zone for HAND_TRIGGER_HOLD_SEC.
+       */
+      const HAND_HIT_FX = {
+        holdSec: 1.4, // the green flame stays on this long after a hit, then fades
+        cooldownSec: 2, // a new hit plays it again only after this
+      };
+      let _handCarTouchedThisFrame = false; // set by the car's hand collision (resolveCarHandPhysicsBlock)
+      let _handCarWasTouching = false;
+      let _handHitT = -1; // seconds since the last hit (-1: none showing)
+      let _handHitCooldown = 0;
+      let _handHitFx = 0; // 0..1: the first mode's flame (read by updateHandWalkTriggerEffects)
       let _handWalkZMoveT = 0;
       let _handWalkZTriggeredThisVisit = false;
       const HAND_TRIGGER_HOLD_SEC = 3;
@@ -9693,16 +9719,16 @@ let _officeSceneAnimationFrame = 0;
        */
       const PHONE_CHARGER_GLOW = {
         periodSec: 2.6, // one slow breath
-        low: 0.35, // the glow at the pulse's low (× full)
-        bloomWeight: 0.55, // bloom at full glow (0..1, thresholdBloom.js weight)
+        low: 0.2, // the glow at the pulse's low (× full)
+        bloomWeight: 0.9, // bloom at full glow (0..1, thresholdBloom.js weight)
         edgeInner: 0.35, // the glow is full inside this share of the disc's radius…
         edgeOuter: 1.0, // …and fades out to here (the rim)
         edgeFloor: 0.15, // what's left of the glow at the rim
         cup: {
-          strength: 1.1, // the cup's glow at its centre (emissive, × the light's colour)
+          strength: 2.6, // the cup's glow at its centre (emissive, × the light's colour)
           innerShare: 0.2, // full inside this × the light's radius…
-          outerShare: 1.9, // …fading out to zero here (soft, past the light's own rim)
-          bloomWeight: 0.6, // bloom of the cup's glow at full (× the glow's falloff)
+          outerShare: 2.5, // …fading out to zero here (soft, past the light's own rim)
+          bloomWeight: 1.0, // bloom of the cup's glow at full (× the glow's falloff)
         },
       };
       const _phoneChargerGlowUniform = { value: 1 };
@@ -11756,6 +11782,7 @@ let _officeSceneAnimationFrame = 0;
         _handWalkFxTime += dt;
         // The intro's demonstration of the hand's green flame (no trigger, no walk).
         if (_introHandFxDemo > 0) smallTarget = Math.max(smallTarget, _introHandFxDemo);
+        if (_handHitFx > 0) smallTarget = Math.max(smallTarget, _handHitFx); // the first mode, from a hit
         _handWalkSmallFxFade +=
           (THREE.MathUtils.clamp(smallTarget, 0, 1) - _handWalkSmallFxFade) *
           Math.min(1, dt * 10);
@@ -15619,6 +15646,7 @@ diffuseColor.a = 1.0;
           const carR = Math.max(halfW, halfL) * storedCarScale;
           for (let _handPass = 0; _handPass < 4; _handPass++) {
             if (!resolveCarHandPhysicsBlock(carR)) break;
+            _handCarTouchedThisFrame = true;
           }
         }
         if (!carFalling) {
