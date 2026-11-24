@@ -43,7 +43,9 @@ export const KITCHEN_TRAILING_PLANTS = {
   sideReach: 0.32, // left / right stems start within this share of the opening's length from their end
   rise: [0.35, 0.8], // how much a stem rises out of the planter before curling over (initial up share)
   outward: 0.9, // push toward its edge (front: into the room; left / right) while above / near the planter
-  pull: [0.18, 0.42], // downward pull per unit of length (range: tighter or looser curls)
+  pull: [0.35, 0.75], // downward pull per unit of length over the edge (range: tighter or looser curls)
+  hangRate: [1.6, 4.2], // past the edge: how fast a stem turns to hang (per unit of length; range per stem)
+  hangOut: [0.1, 0.4], // …toward straight down, leaning out from the planter by this much (range per stem)
   wander: 0.25, // sideways wander per unit of length
   clearance: 0.05, // kept from surfaces
   // Stem tube
@@ -58,7 +60,7 @@ export const KITCHEN_TRAILING_PLANTS = {
   leafAngleJitterDeg: 34, // ± twist round the stem
   leafRollDeg: 48, // ± roll round the leaf's own midrib (how it turns to the light)
   leafSpread: [0.4, 1], // how far out sideways from the stem (share)
-  leafDroop: [0.1, 0.95], // how much the blade hangs down (share)
+  leafDroop: [0.35, 1.1], // how much the blade hangs down (share)
   leafLean: [-0.15, 0.5], // along the stem (share; forward toward the tip)
   leafFaceTilt: [-0.25, 0.7], // its facing: down … up
   leafStart: 0.5, // no leaves on the first bit of a stem (inside the planter)
@@ -196,6 +198,7 @@ export function createTrailingPlants({ THREE, root, leafUrl }) {
   // Short bushy stems on a jittered grid over the whole opening fill the crown.
   const stems = []; // { pts: [Vector3], length, plant, out: Vector3 }
   const down = new THREE.Vector3(0, -1, 0);
+  const hang = new THREE.Vector3();
   const EDGE = {
     front: new THREE.Vector3(0, 0, 1), // into the room (the back wall is at -z)
     left: new THREE.Vector3(-1, 0, 0),
@@ -229,13 +232,22 @@ export function createTrailingPlants({ THREE, root, leafUrl }) {
     const pts = [p.clone()];
     let grown = 0;
     let cleared = false; // over its edge and hanging below the rim
+    const hangRate = range(C.hangRate) * (bushy ? 0.5 : 1);
+    const hangOut = range(C.hangOut);
     let wa = (rand() - 0.5) * R, wb = (rand() - 0.5) * R;
     while (grown < length) {
       const t = grown / length;
       // Out while over / near the planter, then down: the pull grows as it clears the edge.
       const overPlanter = pastEdge(T, p, out) < 0.4 && p.y > T.rimY - 1;
-      if (overPlanter) dir.addScaledVector(out, C.outward * C.step);
-      dir.addScaledVector(down, pull * C.step * (overPlanter ? 0.6 : 1.6 + t));
+      if (overPlanter) {
+        dir.addScaledVector(out, C.outward * C.step);
+        dir.addScaledVector(down, pull * C.step * 0.6);
+      } else {
+        // Past the edge: gravity takes over: it turns toward hanging (down, leaning out a little), at its own rate.
+        hang.copy(down).addScaledVector(out, hangOut).normalize();
+        dir.lerp(hang, Math.min(1, hangRate * C.step * (0.6 + t)));
+        dir.addScaledVector(down, pull * C.step);
+      }
       wa = (wa + (rand() - 0.5) * 0.6) * 0.85;
       wb = (wb + (rand() - 0.5) * 0.6) * 0.85;
       dir.addScaledVector(sideAxis, wa * C.wander * C.step * R);
@@ -464,6 +476,7 @@ export function createTrailingPlants({ THREE, root, leafUrl }) {
     }),
     stems: stems.length,
     stemTriangles: indices.length / 3,
+    meanHangingLength: +(stems.filter((S) => !S.bushy).reduce((a, S) => a + S.length, 0) / Math.max(1, stems.filter((S) => !S.bushy).length)).toFixed(2),
     leaves: leafPlacements.length,
   };
   return { group, check, dispose, report, missing };
