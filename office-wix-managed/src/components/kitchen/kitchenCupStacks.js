@@ -46,9 +46,9 @@ export const KITCHEN_CUP_STACKS = {
     { name: "blue", hex: 0xa6bccb, weight: 0.25 }, // powder blue, muted
   ],
   maxRun: 2, // never more than this many cups of one colour in a row
-  white: { color: 0xeae7e2, roughness: 0.42, metalness: 0 },
+  white: { color: 0xdedad4, roughness: 0.42, metalness: 0 },
   selfLight: 0.32, // their own soft light at first (then the kitchen's pastel self-light: dark 0.32 / bright 0.22)…
-  selfLightColor: 0.6, // …in their colour × this (less than the soap dispensers: they read too bright)
+  selfLightColor: 0.38, // …in their colour × this (less than the soap dispensers: they read too bright)
   plastic: { roughness: 0.5, metalness: 0 },
 };
 
