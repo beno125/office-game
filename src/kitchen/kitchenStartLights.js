@@ -21,17 +21,19 @@
  * comes on as the countdown starts (GO - 3 s = the "3"). Off outside the
  * countdown / race.
  *
- * Glow on the surroundings: one small point light in front of the lenses, its
- * colour the current one, its intensity × the share of lit lenses (always in
- * the scene, 0 when dark: no shader recompiles); it reaches the table under
- * the gantry.
+ * Glow on the surroundings: one soft spot light just ahead of the lit lenses
+ * (their weighted centre), aimed out and down along their facing: it lights
+ * what's in front of the traffic light only, in the current colour, its
+ * intensity per lit lamp (always in the scene, 0 when dark: no shader
+ * recompiles).
  *
  * Reflections on the table: each lamp has a soft additive streak lying on the
- * table, like a light on a satin floor: from the table under the lamp to where
- * its mirror image is seen from the camera (the ray from the camera to the lamp
- * mirrored below the table, where it meets the table), along the view. Placed at render time
+ * table where its mirror image is seen from the camera (the ray from the
+ * camera to the lamp mirrored below the table, where it meets the table), long
+ * along the view like a light on a satin floor. Placed at render time
  * (onBeforeRender, with the camera actually drawn), in the lamp's colour × how
- * lit it is.
+ * lit it is, seen only from in front of the lamp and only where nothing stands
+ * between the lamp and that point.
  */
 import { setBloomWeight } from "../game/thresholdBloom.js";
 
@@ -48,16 +50,22 @@ export const KITCHEN_START_LIGHTS = {
   offGlowIntensity: 1.2,
   offRoughness: 0.35, // the lens glass
   glow: {
-    intensity: 8, // the point light at all lenses lit (physical units)
-    distance: 4.5, // its reach (model units): down to the table under the gantry
+    perLamp: 3, // the spot light's intensity per lit lamp (physical units)
+    distance: 5, // its reach (model units): the table and cars in front of the gantry
     decay: 2,
-    offset: -0.25, // in front of the lenses, along their facing (x; they face -x)
+    coneDeg: 62, // half-angle of its cone
+    penumbra: 1, // fully soft edge
+    tiltDeg: 38, // aimed this far below the lenses' facing (out and down)
+    front: 0.18, // its place ahead of the lenses (along their facing: just out of the lamp housing)
   },
   reflection: {
     strength: 3.2, // a lit lamp's reflection brightness (additive)
     width: 0.42, // across the view (model units; a lamp is 0.23 wide)
-    extra: 0.5, // the streak runs on this far past both ends (soft ends)
-    maxLength: 10, // never longer than this (a very flat view)
+    length: 0.5, // along the view, ÷ the view's steepness (longer when flatter)
+    maxLength: 3, // never longer than this (a very flat view)
+    facingSoft: 0.35, // fades out as the camera moves round to the lamp's side (0 from behind)
+    blockerRange: 6, // objects this near the lamps are checked for blocking a reflection
+    visibilityEase: 0.25, // per frame: a reflection fades in / out over a few frames when blocked / revealed
     lift: 0.055, // above the table: over the kitchen's transparent table overlay (0.045 above it), no z-fighting
   },
   stand: { color: 0xecebe6, roughness: 0.6, metalness: 0.15 }, // ramzorMainStand: painted iron
@@ -209,22 +217,54 @@ export function createStartLights({ THREE, root, getTableY = null }) {
     lamps.push({ mat, index });
   });
 
-  // The glow on the stand and around: in front of the lenses' centre.
+  // Each lamp: its lenses' centre and the way they face (the lens normal in world space).
   const box = new THREE.Box3();
-  for (const n of C.lights) {
-    const m = byName(n);
-    if (m) box.union(new THREE.Box3().setFromObject(m));
+  for (const L of lamps) {
+    const m = byName(C.lights[L.index]);
+    m.updateWorldMatrix(true, false);
+    L.centre = new THREE.Box3().setFromObject(m).getCenter(new THREE.Vector3());
+    box.union(new THREE.Box3().setFromObject(m));
+    const n = m.geometry.attributes.normal;
+    L.facing = new THREE.Vector3(n.getX(0), n.getY(0), n.getZ(0))
+      .applyMatrix3(new THREE.Matrix3().getNormalMatrix(m.matrixWorld))
+      .normalize();
   }
-  const glow = new THREE.PointLight(C.red, 0, C.glow.distance, C.glow.decay);
-  if (!box.isEmpty()) {
-    box.getCenter(glow.position);
-    glow.position.x += C.glow.offset;
-  }
-  root.add(glow);
+  const facing = lamps.length ? lamps[0].facing.clone() : new THREE.Vector3(-1, 0, 0);
 
-  // Reflections on the table: one streak per lamp (a soft round spot stretched along the view).
+  // The glow on the surroundings: a spot light in front of the lit lenses (their weighted centre), aimed out and
+  // down along their facing, with a soft wide cone: it lights what's in front of the traffic light (the table, the
+  // cars, the block below) and nothing behind or above it (a point light here lit the stand's bar from 0.3 away and
+  // everything behind the lights, through the body).
+  const G = C.glow;
+  const glow = new THREE.SpotLight(C.red, 0, G.distance, THREE.MathUtils.degToRad(G.coneDeg), G.penumbra, G.decay);
+  const aimDir = facing.clone().setY(0).normalize().multiplyScalar(Math.cos(THREE.MathUtils.degToRad(G.tiltDeg)));
+  aimDir.y = -Math.sin(THREE.MathUtils.degToRad(G.tiltDeg));
+  root.add(glow);
+  root.add(glow.target);
+  const glowAt = new THREE.Vector3();
+  if (!box.isEmpty()) box.getCenter(glowAt);
+  /** The light at the lit lenses' centre (weights: how lit each is), `front` ahead of them. */
+  function placeGlow(weights) {
+    let sum = 0;
+    const c = new THREE.Vector3();
+    lamps.forEach((L, i) => {
+      if (weights[i] > 0) {
+        c.addScaledVector(L.centre, weights[i]);
+        sum += weights[i];
+      }
+    });
+    if (sum > 0) glowAt.copy(c.divideScalar(sum));
+    glow.position.copy(glowAt).addScaledVector(facing, G.front);
+    glow.target.position.copy(glow.position).add(aimDir);
+    glow.updateMatrixWorld();
+    glow.target.updateMatrixWorld();
+  }
+
+  // Reflections on the table: one streak per lamp, centred where its mirror image is seen from the camera (the ray
+  // from the camera to the lamp mirrored below the table, where it meets the table), long along the view like a
+  // light on a satin floor. Seen only from in front of the lamp (its lens faces the camera), and only where the light
+  // can reach that point: nothing between the lamp and it (the red block under the gantry covers the table there).
   const R = C.reflection;
-  // The streak's brightness: soft across, brightest near the lamp's end (v = 1), fading toward the viewer.
   const spot = (() => {
     const c = document.createElement("canvas");
     c.width = 64;
@@ -232,8 +272,8 @@ export function createStartLights({ THREE, root, getTableY = null }) {
     const g = c.getContext("2d");
     const img = g.createImageData(64, 256);
     for (let y = 0; y < 256; y++) {
-      const v = 1 - y / 255; // canvas top = texture v 1 (flipY)
-      const along = Math.pow(Math.sin(Math.PI * Math.min(1, v * 1.08)), 0.6) * (0.25 + 0.75 * v * v);
+      const v = (y / 255) * 2 - 1;
+      const along = Math.exp(-v * v * 3.2); // brightest at the mirror point, fading both ways
       for (let x = 0; x < 64; x++) {
         const u = (x / 63) * 2 - 1;
         const a = along * Math.exp(-u * u * 4.5);
@@ -247,14 +287,41 @@ export function createStartLights({ THREE, root, getTableY = null }) {
     t.colorSpace = THREE.SRGBColorSpace;
     return t;
   })();
+  // What can stand between a lamp and the table in front of it: the model's meshes near the gantry (their bounds,
+  // read live: some are physics props), not the traffic light itself, not the table.
+  const own = new Set([...C.lights, "ramzorBody", "ramzorHolder", "ramzorMainStand", "counterBody", "counterScreen"]);
+  const near = box.clone().expandByScalar(R.blockerRange);
+  const blockers = [];
+  root.traverse((o) => {
+    if (!o.isMesh || own.has(o.name) || /^mainTable/.test(o.name)) return;
+    const b = new THREE.Box3().setFromObject(o);
+    if (b.intersectsBox(near) && b.max.y > (box.min.y - 4) && b.getSize(new THREE.Vector3()).length() < 40) blockers.push(o);
+  });
+  const _bb = new THREE.Box3();
+  const _ray = new THREE.Ray();
+  const _hit = new THREE.Vector3();
+  /** Something between `from` and `to`? */
+  function blocked(from, to) {
+    _ray.origin.copy(from);
+    _ray.direction.subVectors(to, from);
+    const d = _ray.direction.length();
+    _ray.direction.divideScalar(d);
+    for (const o of blockers) {
+      if (!o.visible) continue;
+      _bb.setFromObject(o);
+      if (_bb.containsPoint(from)) return true;
+      if (_ray.intersectBox(_bb, _hit) && _hit.distanceTo(from) < d) return true;
+    }
+    return false;
+  }
   const reflGeo = new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2); // lying flat, its length along local z
   const reflections = [];
   const _c = new THREE.Vector3();
   const _m = new THREE.Vector3();
   const _p = new THREE.Vector3();
+  const _toCam = new THREE.Vector3();
   for (const L of lamps) {
-    const m = byName(C.lights[L.index]);
-    const centre = new THREE.Box3().setFromObject(m).getCenter(new THREE.Vector3());
+    const centre = L.centre;
     const mat = new THREE.MeshBasicMaterial({
       map: spot,
       color: 0x000000,
@@ -264,29 +331,37 @@ export function createStartLights({ THREE, root, getTableY = null }) {
       toneMapped: true,
     });
     const mesh = new THREE.Mesh(reflGeo, mat);
-    mesh.name = m.name + "_tableReflection";
+    mesh.name = C.lights[L.index] + "_tableReflection";
     mesh.matrixAutoUpdate = false;
     mesh.frustumCulled = false; // placed at render time
     mesh.renderOrder = 3;
     mesh.visible = false;
+    const r = { L, mesh, mat, base: new THREE.Color(), seen: 0 };
     mesh.onBeforeRender = (renderer, scene, cam) => {
       const ty = getTableY ? getTableY() : null;
       cam.getWorldPosition(_c);
-      if (ty == null || _c.y <= ty + 0.01 || centre.y <= ty) {
-        mesh.scale.setScalar(1e-6);
-      } else {
+      let target = 0;
+      if (ty != null && _c.y > ty + 0.01 && centre.y > ty) {
         // The lamp mirrored below the table, and where the view of it meets the table.
         _m.set(centre.x, 2 * ty - centre.y, centre.z);
         const s = (_c.y - ty) / (_c.y - _m.y);
         _p.copy(_c).lerp(_m, s);
         _p.y = ty + R.lift;
-        // From the table under the lamp to the mirror point (along the view), soft past both ends.
-        const dx = _p.x - centre.x, dz = _p.z - centre.z;
-        const len = Math.min(R.maxLength, Math.hypot(dx, dz) + 2 * R.extra);
-        mesh.position.set((centre.x + _p.x) / 2, ty + R.lift, (centre.z + _p.z) / 2);
+        // Long along the view, longer the flatter the view.
+        const dx = _c.x - _p.x, dz = _c.z - _p.z;
+        const flat = Math.hypot(dx, dz) || 1;
+        const sinElev = (_c.y - ty) / Math.hypot(flat, _c.y - ty);
+        mesh.position.copy(_p);
         mesh.rotation.set(0, Math.atan2(dx, dz), 0);
-        mesh.scale.set(R.width, 1, len);
+        mesh.scale.set(R.width, 1, Math.min(R.maxLength, R.length / Math.max(0.15, sinElev)));
+        // Seen from the front only (the lens faces the camera), and only if the light reaches the table there.
+        const front = _toCam.subVectors(_c, centre).normalize().dot(L.facing);
+        target = Math.min(1, Math.max(0, front / R.facingSoft));
+        if (target > 0 && blocked(_m.set(_p.x, ty + 0.03, _p.z), centre)) target = 0;
       }
+      r.seen += (target - r.seen) * R.visibilityEase; // no pop as something moves in front
+      mat.color.copy(r.base).multiplyScalar(r.seen);
+      if (r.seen < 1e-3) mesh.scale.setScalar(1e-6);
       mesh.updateMatrix();
       mesh.matrixWorld.copy(mesh.matrix);
       mesh.modelViewMatrix.multiplyMatrices(cam.matrixWorldInverse, mesh.matrixWorld);
@@ -294,7 +369,7 @@ export function createStartLights({ THREE, root, getTableY = null }) {
     };
     scene0(root).add(mesh);
     owned.push(mat);
-    reflections.push({ L, mesh, mat });
+    reflections.push(r);
   }
 
   const N = C.lights.length;
@@ -315,13 +390,16 @@ export function createStartLights({ THREE, root, getTableY = null }) {
       L.mat.userData.bloomWeight.value = on * C.bloom;
       lit += on;
     }
+    const weights = [];
     for (const r of reflections) {
       const on = t == null ? 0 : ease(t + (N - r.L.index) * C.interval);
+      weights.push(on);
       r.mesh.visible = on > 0;
-      r.mat.color.copy(col).multiplyScalar(on * R.strength);
+      r.base.copy(col).multiplyScalar(on * R.strength); // × how much of it is seen (at render time)
     }
     glow.color.copy(col);
-    glow.intensity = lamps.length ? (C.glow.intensity * lit) / N : 0;
+    glow.intensity = G.perLamp * lit; // each lit lamp adds its share
+    placeGlow(weights);
   }
   update(null);
 
@@ -332,6 +410,7 @@ export function createStartLights({ THREE, root, getTableY = null }) {
     reflGeo.dispose();
     spot.dispose();
     glow.removeFromParent();
+    glow.target.removeFromParent();
     glow.dispose();
     for (const m of owned) m.dispose();
     for (const g of geometries) g.dispose();
