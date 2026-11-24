@@ -141,7 +141,7 @@ function lensUVs(THREE, geometry, T) {
  * @param {object} o
  * @param {typeof import("three")} o.THREE
  * @param {import("three").Object3D} o.root  the kitchen model
- * @returns {{ update(t: number|null): void, missing: string[], dispose(): void }}
+ * @returns {{ update(t: number|null): void, missing: string[], dispose(): void, center: import("three").Vector3|null }}
  */
 export function createStartLights({ THREE, root }) {
   const C = KITCHEN_START_LIGHTS;
@@ -232,5 +232,5 @@ export function createStartLights({ THREE, root }) {
     for (const g of geometries) g.dispose();
     tex.dispose();
   }
-  return { update, missing, dispose };
+  return { update, missing, dispose, center: box.isEmpty() ? null : box.getCenter(new THREE.Vector3()) };
 }

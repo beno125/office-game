@@ -7221,6 +7221,96 @@ let _worldSwitched = false;
         F.overriding = false;
       }
 
+      // ---------------------------------------------------------------------------
+      // Countdown camera: during the countdown the race camera swings left round the car so the start lights are in
+      // frame with the cars, and eases back from GO. Drawn on top of the race camera at render time (applied before
+      // the render, restored right after), so the camera's own state, follow and behaviour are never touched: once the
+      // swing reaches 0 nothing is applied and the frame is exactly the normal one. Timed by raceTimeFromGo(), the
+      // same clock as the countdown HUD and the start lights' green.
+      // ---------------------------------------------------------------------------
+      const KITCHEN_COUNTDOWN_CAM = {
+        yawDeg: -60, // swing round the car about the vertical (degrees; negative = to the left, toward the start lights)
+        lookShift: 0.68, // aim this share of the way from the car toward the start lights (both framed)
+        distance: 0.5, // the camera's distance from the car × this (closer: the lights read larger)
+        enterSec: 0.7, // easing in as the countdown starts (no snap at the intro's hand-off / "Race again")
+        returnSec: 0.85, // back to the normal camera from GO
+        ease: introEaseSine, // ease in-out (sine) for both moves
+        clearance: 0.5, // kept between the camera and anything between it and the car
+      };
+      const _ccam = {
+        overriding: false,
+        savedPos: new THREE.Vector3(),
+        savedQuat: new THREE.Quaternion(),
+        look: new THREE.Vector3(),
+        aim: new THREE.Vector3(),
+        off: new THREE.Vector3(),
+        q: new THREE.Quaternion(),
+        m: new THREE.Matrix4(),
+        ray: new THREE.Raycaster(),
+        dir: new THREE.Vector3(),
+      };
+      /** The swing's weight now (0..1): eased in from the countdown's start, out from GO; 0 outside. */
+      function kitchenCountdownCamWeight() {
+        const C = KITCHEN_COUNTDOWN_CAM;
+        const t = raceTimeFromGo();
+        if (t == null) return 0;
+        if (t < 0) return C.ease(Math.min(1, (t + RACE_COUNTDOWN_SEC) / C.enterSec));
+        return t >= C.returnSec ? 0 : 1 - C.ease(t / C.returnSec);
+      }
+      function applyKitchenCountdownCamera() {
+        const C = KITCHEN_COUNTDOWN_CAM;
+        const K = _ccam;
+        if (!car || camera !== carCamera || _kIntro.state !== "done" || _kIntro.overriding || _jumpFx.overriding) return;
+        const w = kitchenCountdownCamWeight();
+        if (w <= 0) return;
+        K.savedPos.copy(camera.position);
+        K.savedQuat.copy(camera.quaternion);
+        K.overriding = true;
+        getCarCameraLookAtPoint(K.look);
+        // Round the car: the camera's offset from it turned about the vertical.
+        K.off
+          .copy(camera.position)
+          .sub(K.look)
+          .applyAxisAngle(THREE.Object3D.DEFAULT_UP, THREE.MathUtils.degToRad(C.yawDeg) * w)
+          .multiplyScalar(1 + (C.distance - 1) * w);
+        camera.position.copy(K.look).add(K.off);
+        // Nothing between the car and the camera: pulled in front of the first hit.
+        const dist = K.off.length();
+        if (_kitchenDragRoot && dist > 1e-3) {
+          K.ray.set(K.look, K.dir.copy(K.off).divideScalar(dist));
+          K.ray.far = dist;
+          let hits = [];
+          try {
+            hits = K.ray.intersectObject(_kitchenDragRoot, true);
+          } catch (e) {
+            hits = [];
+          }
+          for (const h of hits) {
+            if (!h.object.visible || !h.object.isMesh) continue;
+            let own = false;
+            for (let x = h.object; x; x = x.parent) if (x === car) own = true;
+            if (own) continue;
+            camera.position.copy(K.look).addScaledVector(K.dir, Math.max(0, h.distance - C.clearance));
+            break;
+          }
+        }
+        // Aim between the car and the start lights, blended from the normal view by the same weight.
+        K.aim.copy(K.look);
+        if (_startLights && _startLights.center) K.aim.lerp(_startLights.center, C.lookShift);
+        K.m.lookAt(camera.position, K.aim, camera.up);
+        K.q.setFromRotationMatrix(K.m);
+        camera.quaternion.copy(K.savedQuat).slerp(K.q, w);
+        camera.updateMatrixWorld();
+      }
+      function restoreKitchenCountdownCamera() {
+        const K = _ccam;
+        if (!K.overriding) return;
+        camera.position.copy(K.savedPos);
+        camera.quaternion.copy(K.savedQuat);
+        camera.updateMatrixWorld();
+        K.overriding = false;
+      }
+
       window.kitchenRace = {
         restart: () => retryKitchenRace(),
         getState: () => ({
@@ -14305,6 +14395,7 @@ let _worldSwitched = false;
           }
           applyKitchenIntroCamera(Math.min(rawDt, 0.1));
           applyKitchenJumpCamera();
+          applyKitchenCountdownCamera();
           if (sceneBloomEnabled) {
             renderCarLightsBloomComposer();
             carBloomMixPass.material.uniforms.bloomTexture.value =
@@ -14323,6 +14414,7 @@ let _worldSwitched = false;
           updateTableLightReflections();
           if (_shelfJars) _shelfJars.update(camera); // the cheap glass's copies back to front
           finalComposer.render();
+          restoreKitchenCountdownCamera();
           restoreKitchenJumpCamera();
           restoreKitchenIntroCamera();
           kitchenCameraDrag.restore(camera);
@@ -14331,6 +14423,7 @@ let _worldSwitched = false;
             emitKitchenSceneEvent("ready");
           }
         } catch (e) {
+          restoreKitchenCountdownCamera();
           restoreKitchenJumpCamera();
           kitchenCameraDrag.restore(camera);
           restoreKitchenIntroCamera();
