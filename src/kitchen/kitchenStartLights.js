@@ -52,8 +52,8 @@ export const KITCHEN_START_LIGHTS = {
   offGlowIntensity: 1.2,
   offRoughness: 0.35, // the lens glass
   glow: {
-    perLamp: 3, // the spot light's intensity per lit lamp (physical units)
-    distance: 5, // its reach (model units): the table and cars in front of the gantry
+    perLamp: 1.1, // the light cast on the surroundings: the spot light's intensity per lit lamp (physical units)
+    distance: 3, // its reach (model units): the table and cars just in front of the gantry
     decay: 2,
     coneDeg: 62, // half-angle of its cone
     penumbra: 1, // fully soft edge
@@ -61,7 +61,7 @@ export const KITCHEN_START_LIGHTS = {
     front: 0.18, // its place ahead of the lenses (along their facing: just out of the lamp housing)
   },
   reflection: {
-    strength: 1.8, // a lit lamp's reflection brightness (additive)
+    strength: 0.9, // a lit lamp's reflection brightness on the table (additive; the lens itself is set by emissive / bloom)
     width: 0.2, // across the view (model units; a lamp is 0.23 wide)
     length: 2.2, // along the view, ÷ the view's steepness (longer when flatter)
     maxLength: 8, // never longer than this (a very flat view)
@@ -354,11 +354,21 @@ export function createStartLights({ THREE, root, getTableY = null }) {
   const _white = new THREE.Color(1, 1, 1);
   for (const L of lamps) {
     const centre = L.centre;
+    // Additive in colour only. The kitchen bloom reads the HDR image's alpha as its per-material marker (opaque 1,
+    // weighted 4 + w, bloom group 8 +; thresholdBloom.js); three's AdditiveBlending also adds srcAlpha² into that alpha,
+    // so overlapping streaks pushed the table's pixels into the weighted / group ranges and they bloomed. The
+    // destination alpha (the marker of whatever is under the streak) is kept as it is.
     const mat = new THREE.MeshBasicMaterial({
       map: spot,
       color: 0x000000,
       transparent: true,
-      blending: THREE.AdditiveBlending,
+      blending: THREE.CustomBlending,
+      blendEquation: THREE.AddEquation,
+      blendSrc: THREE.SrcAlphaFactor,
+      blendDst: THREE.OneFactor,
+      blendEquationAlpha: THREE.AddEquation,
+      blendSrcAlpha: THREE.ZeroFactor,
+      blendDstAlpha: THREE.OneFactor,
       depthWrite: false,
       toneMapped: true,
     });
