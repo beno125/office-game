@@ -28,9 +28,11 @@
  * recompiles).
  *
  * Reflections on the table: each lamp has a soft additive streak lying on the
- * table where its mirror image is seen from the camera (the ray from the
- * camera to the lamp mirrored below the table, where it meets the table), long
- * along the view like a light on a satin floor. Placed at render time
+ * table through where its mirror image is seen from the camera (the ray from
+ * the camera to the lamp mirrored below the table, where it meets the table):
+ * a long, thin, broken streak along the view, like a light on a wet floor,
+ * brightest at the mirror point, reaching back toward the lamp and further
+ * toward the viewer. Placed at render time
  * (onBeforeRender, with the camera actually drawn), in the lamp's colour × how
  * lit it is, seen only from in front of the lamp and only where nothing stands
  * between the lamp and that point.
@@ -59,10 +61,13 @@ export const KITCHEN_START_LIGHTS = {
     front: 0.18, // its place ahead of the lenses (along their facing: just out of the lamp housing)
   },
   reflection: {
-    strength: 3.2, // a lit lamp's reflection brightness (additive)
-    width: 0.42, // across the view (model units; a lamp is 0.23 wide)
-    length: 0.5, // along the view, ÷ the view's steepness (longer when flatter)
-    maxLength: 3, // never longer than this (a very flat view)
+    strength: 1.8, // a lit lamp's reflection brightness (additive)
+    width: 0.2, // across the view (model units; a lamp is 0.23 wide)
+    length: 2.2, // along the view, ÷ the view's steepness (longer when flatter)
+    maxLength: 8, // never longer than this (a very flat view)
+    peak: 0.62, // where along it (from the viewer's end) the mirror point and its brightest part are
+    tail: 1.1, // how fast it fades toward the viewer (higher = shorter bright part)
+    core: 0, // white mixed into the colour (the hot middle of a light's reflection)
     facingSoft: 0.35, // fades out as the camera moves round to the lamp's side (0 from behind)
     blockerRange: 6, // objects this near the lamps are checked for blocking a reflection
     visibilityEase: 0.25, // per frame: a reflection fades in / out over a few frames when blocked / revealed
@@ -260,24 +265,50 @@ export function createStartLights({ THREE, root, getTableY = null }) {
     glow.target.updateMatrixWorld();
   }
 
-  // Reflections on the table: one streak per lamp, centred where its mirror image is seen from the camera (the ray
-  // from the camera to the lamp mirrored below the table, where it meets the table), long along the view like a
-  // light on a satin floor. Seen only from in front of the lamp (its lens faces the camera), and only where the light
+  // Reflections on the table: one streak per lamp through where its mirror image is seen from the camera (the ray
+  // from the camera to the lamp mirrored below the table, where it meets the table), long and broken along the view
+  // like a light on a wet floor. Seen only from in front of the lamp (its lens faces the camera), and only where the light
   // can reach that point: nothing between the lamp and it (the red block under the gantry covers the table there).
   const R = C.reflection;
+  // The streak, after a light on a wet floor: brightest at the far end (the mirror point, v = 1), a long broken tail
+  // toward the viewer (v = 0): uneven bands and specks along it, narrower far away, slightly wavy.
   const spot = (() => {
+    const W = 64, H = 512;
     const c = document.createElement("canvas");
-    c.width = 64;
-    c.height = 256;
+    c.width = W;
+    c.height = H;
     const g = c.getContext("2d");
-    const img = g.createImageData(64, 256);
-    for (let y = 0; y < 256; y++) {
-      const v = (y / 255) * 2 - 1;
-      const along = Math.exp(-v * v * 3.2); // brightest at the mirror point, fading both ways
-      for (let x = 0; x < 64; x++) {
-        const u = (x / 63) * 2 - 1;
-        const a = along * Math.exp(-u * u * 4.5);
-        const i = (y * 64 + x) * 4;
+    const img = g.createImageData(W, H);
+    let seed = 7;
+    const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+    // Per-row breakup: a smoothed random walk (patches of wet shine and duller bits).
+    const band = new Float32Array(H);
+    let b = 0.7;
+    for (let y = 0; y < H; y++) {
+      b += (rnd() - 0.5) * 0.35;
+      b = Math.min(1, Math.max(0.25, b));
+      band[y] = b;
+    }
+    for (let k = 0; k < 3; k++) for (let y = 1; y < H - 1; y++) band[y] = (band[y - 1] + band[y] * 2 + band[y + 1]) / 4;
+    const specks = new Float32Array(W * H);
+    for (let i = 0; i < 260; i++) {
+      const sx = Math.floor(W / 2 + (rnd() - 0.5) * W * 0.7);
+      const sy = Math.floor(rnd() * H);
+      specks[sy * W + sx] = 0.6 + rnd() * 0.4;
+    }
+    for (let y = 0; y < H; y++) {
+      const v = 1 - y / (H - 1); // canvas top = texture v 1 (flipY): the far end (toward the lamp)
+      // Brightest at the mirror point (v = R.peak), fading toward the lamp and, longer, toward the viewer.
+      const along =
+        (v > R.peak ? Math.pow(1 - (v - R.peak) / (1 - R.peak), 1.3) : Math.pow(v / R.peak, R.tail)) *
+        (0.2 + 0.8 * band[y] * band[y]);
+      const halfW = 0.45 + 0.35 * (1 - v); // narrower far away
+      const wob = (band[(y + 211) % H] - 0.6) * 0.12; // an irregular sideways drift (ripples on the wet surface)
+      for (let x = 0; x < W; x++) {
+        const u = ((x / (W - 1)) * 2 - 1 - wob) / halfW;
+        const across = Math.exp(-u * u * 3.2);
+        const a = along * across + specks[y * W + x] * Math.pow(v, 0.6) * 0.5;
+        const i = (y * W + x) * 4;
         img.data[i] = img.data[i + 1] = img.data[i + 2] = 255;
         img.data[i + 3] = Math.round(255 * Math.min(1, a));
       }
@@ -320,6 +351,7 @@ export function createStartLights({ THREE, root, getTableY = null }) {
   const _m = new THREE.Vector3();
   const _p = new THREE.Vector3();
   const _toCam = new THREE.Vector3();
+  const _white = new THREE.Color(1, 1, 1);
   for (const L of lamps) {
     const centre = L.centre;
     const mat = new THREE.MeshBasicMaterial({
@@ -347,13 +379,19 @@ export function createStartLights({ THREE, root, getTableY = null }) {
         const s = (_c.y - ty) / (_c.y - _m.y);
         _p.copy(_c).lerp(_m, s);
         _p.y = ty + R.lift;
-        // Long along the view, longer the flatter the view.
+        // A wet floor's streak along the view through the mirror point: a share `peak` of it toward the lamp (not past
+        // the table under it), the rest toward the viewer; longer the flatter the view.
         const dx = _c.x - _p.x, dz = _c.z - _p.z;
         const flat = Math.hypot(dx, dz) || 1;
         const sinElev = (_c.y - ty) / Math.hypot(flat, _c.y - ty);
-        mesh.position.copy(_p);
+        const toFoot = Math.hypot(centre.x - _p.x, centre.z - _p.z);
+        let len = Math.min(R.maxLength, R.length / Math.max(0.15, sinElev));
+        len = Math.min(len, toFoot / Math.max(0.05, 1 - R.peak), (flat * 0.9) / R.peak);
+        const ux = dx / flat, uz = dz / flat;
+        const shift = len * (R.peak - 0.5); // the plane's centre from the mirror point, toward the viewer
+        mesh.position.set(_p.x + ux * shift, _p.y, _p.z + uz * shift);
         mesh.rotation.set(0, Math.atan2(dx, dz), 0);
-        mesh.scale.set(R.width, 1, Math.min(R.maxLength, R.length / Math.max(0.15, sinElev)));
+        mesh.scale.set(R.width, 1, len);
         // Seen from the front only (the lens faces the camera), and only if the light reaches the table there.
         const front = _toCam.subVectors(_c, centre).normalize().dot(L.facing);
         target = Math.min(1, Math.max(0, front / R.facingSoft));
@@ -395,7 +433,8 @@ export function createStartLights({ THREE, root, getTableY = null }) {
       const on = t == null ? 0 : ease(t + (N - r.L.index) * C.interval);
       weights.push(on);
       r.mesh.visible = on > 0;
-      r.base.copy(col).multiplyScalar(on * R.strength); // × how much of it is seen (at render time)
+      // The lamp's colour with a little white (a reflection's hot core), × how much of it is seen (at render time).
+      r.base.copy(col).lerp(_white, R.core).multiplyScalar(on * R.strength);
     }
     glow.color.copy(col);
     glow.intensity = G.perLamp * lit; // each lit lamp adds its share
