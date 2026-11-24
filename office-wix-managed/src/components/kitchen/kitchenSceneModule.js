@@ -1649,7 +1649,47 @@ export function isKitchenSceneReady() {
       darkPurpleFill.position.set(10, 25, -20);
       scene.add(darkPurpleFill);
       /** Lights only one of the light modes uses (hidden at intensity 0: see the light blend). */
-      const _modeOnlyLights = [warmKeyLight, warmFillLight, darkBlueLight, darkBlueFill, darkPinkLight, darkPurpleFill];
+      const _modeOnlyLights = [warmKeyLight, warmFillLight, darkBlueLight, darkPinkLight];
+      // Performance: the six coloured directional fills are drawn as two lights, grouped by where they come from (the
+      // three from the room's front, +z, and the three from the back). The originals keep their colours / intensities
+      // from the light blend (dark / bright mode) but are hidden; after every blend each merged light takes its group's
+      // summed colour × intensity, along the group's intensity-weighted mean direction (updateMergedDirectionalFills).
+      // Grouped by direction (not hue) so front-facing surfaces (cabinet doors, the counter front, the table's side)
+      // keep their light: by hue the mean directions came out nearly straight down and those went darker. Measured:
+      // countdown 27.0 → 22.4 ms, race camera 33.4 → 29.1 ms, chase camera 14.8 → 11.8 ms (4 lights fewer).
+      const KITCHEN_MERGED_FILLS = [
+        { name: "kitchenMergedFillFront", lights: [dirPink, dirFillPink, darkBlueFill] },
+        { name: "kitchenMergedFillBack", lights: [dirBlue, dirFillBlue, darkPurpleFill] },
+      ];
+      for (const G of KITCHEN_MERGED_FILLS) {
+        G.light = new THREE.DirectionalLight(0xffffff, 0);
+        G.light.name = G.name;
+        scene.add(G.light);
+        for (const l of G.lights) l.visible = false;
+      }
+      const _mfDir = new THREE.Vector3();
+      const _mfSum = new THREE.Vector3();
+      const _mfCol = new THREE.Color();
+      function updateMergedDirectionalFills() {
+        for (const G of KITCHEN_MERGED_FILLS) {
+          _mfSum.set(0, 0, 0);
+          _mfCol.setRGB(0, 0, 0);
+          for (const l of G.lights) {
+            const I = l.intensity;
+            if (!(I > 0)) continue;
+            _mfCol.r += l.color.r * I;
+            _mfCol.g += l.color.g * I;
+            _mfCol.b += l.color.b * I;
+            const w = I * (0.2126 * l.color.r + 0.7152 * l.color.g + 0.0722 * l.color.b);
+            _mfDir.subVectors(l.position, l.target.position).normalize();
+            _mfSum.addScaledVector(_mfDir, w);
+          }
+          const m = Math.max(_mfCol.r, _mfCol.g, _mfCol.b);
+          G.light.intensity = m;
+          if (m > 0) G.light.color.setRGB(_mfCol.r / m, _mfCol.g / m, _mfCol.b / m);
+          if (_mfSum.lengthSq() > 1e-12) G.light.position.copy(_mfSum.normalize().multiplyScalar(50));
+        }
+      }
 
       const darkMode = {
         background: 0x1a1a1a,
@@ -1879,6 +1919,7 @@ export function isKitchenSceneReady() {
         // the bright-mode warm key / fill in dark mode, the dark-mode fills in bright mode. Shaders rebuild only when
         // the mode changes (O / P).
         for (const l of _modeOnlyLights) l.visible = l.intensity > 0;
+        updateMergedDirectionalFills();
         for (let i = 0; i < _darkModeOnlyLights.length; i++) {
           const dl = _darkModeOnlyLights[i];
           if (!dl) continue;
