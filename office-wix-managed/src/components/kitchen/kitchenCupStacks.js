@@ -28,7 +28,9 @@ export const KITCHEN_CUP_STACKS = {
   shelf: "shelf2",
   bay: [-38.358, -24.12], // usable length (x): between the frame's end members at shelf height
   cupsPerStack: { 3: 0.7, 2: 0.2, 1: 0.1 }, // how many cups a stack has (weights)
-  spacing: 0.35, // gap between neighbouring stacks (model units; a cup is 1.13 across)
+  spacing: 0.35, // gap between neighbouring stacks (model units; a cup is 1.13 across)…
+  spacingJitter: 0.14, // …± this per gap (× randomness), never under minGap
+  minGap: 0.12,
   maxCols: 8, // stacks per row at most (the group from the shelf's left end)
   maxRows: 2, // rows at most (the shelf could take 3)
   rowSpacing: 0.35, // gap between rows
@@ -202,10 +204,13 @@ export function createCupStacks({ THREE, root, envMap = null }) {
     }
     rowHeights.push(row);
   }
-  for (let r = 0; r < rows; r++)
+  for (let r = 0; r < rows; r++) {
+    let rowX = x0;
     for (let c = 0; c < cols; c++) {
       const n = rowHeights[r][c];
-      const sx = x0 + c * (cupD + gapX) + (rand() * 2 - 1) * C.jitter.along * R;
+      // Each gap a little different (the row still starts at the left end).
+      if (c > 0) rowX += cupD + Math.max(C.minGap, gapX + (rand() * 2 - 1) * C.spacingJitter * R);
+      const sx = rowX + (rand() * 2 - 1) * C.jitter.along * R;
       const sz = z0 + r * (cupD + C.rowSpacing) + (rand() * 2 - 1) * C.jitter.across * R;
       const yaw = THREE.MathUtils.degToRad((rand() * 2 - 1) * C.jitter.yawDeg * R);
       const stack = { x: sx, z: sz, yaw, cups: [] };
@@ -220,6 +225,7 @@ export function createCupStacks({ THREE, root, envMap = null }) {
       }
       stacks.push(stack);
     }
+  }
 
   // ── Meshes: the white cups, and the sleeves per colour ─────────────────
   const group = new THREE.Group();
