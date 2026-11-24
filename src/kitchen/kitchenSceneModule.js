@@ -2089,14 +2089,32 @@ export function isKitchenSceneReady() {
       const car = new THREE.Group();
       car.rotation.order = "YXZ";
       scene.add(car);
+      // The car's key / rim lights live in the scene (not under the car), following anchors on the car, at
+      // intensity 0 while the car is hidden (the intro hides it in the portal tunnel): a light under a hidden group
+      // drops out of the shaders' light set, and the set changing rebuilt every visible material when the car drove
+      // out of the portal (a ~340 ms freeze). Same light, same place, same look (updateKitchenCarLights, per frame).
       const carKeyLight = new THREE.PointLight(0xc7eaff, 7.5, 16, 1.8);
-      carKeyLight.position.set(-1.2, 3.8, 1.8);
       carKeyLight.name = "kitchenCarKeyLight";
-      car.add(carKeyLight);
+      scene.add(carKeyLight);
       const carRimLight = new THREE.PointLight(0xff4fc8, 3.5, 11, 1.8);
-      carRimLight.position.set(1.5, 2.4, -2.2);
       carRimLight.name = "kitchenCarRimLight";
-      car.add(carRimLight);
+      scene.add(carRimLight);
+      const _carLightRigs = [carKeyLight, carRimLight].map((light, i) => {
+        const anchor = new THREE.Object3D();
+        anchor.position.set(i === 0 ? -1.2 : 1.5, i === 0 ? 3.8 : 2.4, i === 0 ? 1.8 : -2.2);
+        car.add(anchor);
+        return { light, anchor, intensity: light.intensity };
+      });
+      /** The car's lights onto their anchors (world space), lit only while the car (and its parents) are shown. */
+      function updateKitchenCarLights() {
+        let shown = true;
+        for (let o = car; o; o = o.parent) if (!o.visible) shown = false;
+        for (const R of _carLightRigs) {
+          R.anchor.updateWorldMatrix(true, false);
+          R.anchor.getWorldPosition(R.light.position);
+          R.light.intensity = shown ? R.intensity : 0;
+        }
+      }
 
       const MAX_STEER_DEG = 28;
       const MAX_STEER_RAD = (MAX_STEER_DEG * Math.PI) / 180;
@@ -6525,6 +6543,34 @@ let _worldSwitched = false;
         return portalGlowTexture(THREE);
       }
 
+      // Shader warm-up across the intro's light changes: the portal ring brings two point lights of its own for its
+      // shot. Two placeholder point lights (intensity 0) hold their places from loading (so the warm-up compiles the
+      // shaders for the intro's light count) and leave the moment the ring adds its own: the count never changes. As
+      // the ring starts, the shaders for the count after it (the race's) are compiled in the background, so its end
+      // doesn't freeze either.
+      const _kPortalLightSlots = [0, 1].map(() => {
+        const l = new THREE.PointLight(0xffffff, 0, 1, 2);
+        l.name = "kitchenPortalLightSlot";
+        scene.add(l);
+        return l;
+      });
+      function _kReleasePortalLightSlots() {
+        for (const l of _kPortalLightSlots) if (l.parent) l.parent.remove(l);
+      }
+      /** Compiles (in the background, KHR_parallel_shader_compile) the shaders for the light set without `hide`. */
+      function _kPrecompileWithout(hide) {
+        if (!renderer.compileAsync) return;
+        const was = hide.map((l) => l.visible);
+        hide.forEach((l) => (l.visible = false));
+        const prevTarget = renderer.getRenderTarget();
+        try {
+          renderer.setRenderTarget(finalComposer.readBuffer); // the frames' own target (see runKitchenWarmup)
+          renderer.compileAsync(scene, camera).catch(() => {});
+        } catch (e) {}
+        renderer.setRenderTarget(prevTarget);
+        hide.forEach((l, i) => (l.visible = was[i]));
+      }
+
       /** Builds the portal (once, when its shot starts), from the player's grid spot. */
       function _kIntroPortalBegin() {
         const P = KITCHEN_INTRO_PORTAL;
@@ -6551,6 +6597,8 @@ let _worldSwitched = false;
         _kPortal.clip.setFromNormalAndCoplanarPoint(_kPortal.fwd, _kPortal.centre);
         // The ring itself (the opening, the tunnel, the streaks, the smoke rim, sparks, flash, haze, its light, the
         // electric arcs): portalRing.js, shared with the Office drawer.
+        const lightsBefore = new Set();
+        scene.traverse((o) => o.isLight && lightsBefore.add(o));
         const ring = createPortalRing(THREE, {
           P,
           scene,
@@ -6563,6 +6611,11 @@ let _worldSwitched = false;
           bloomLayer: CAR_LIGHTS_BLOOM_LAYER,
         });
         _kPortal.ring = ring;
+        // Its lights take the placeholders' places (the light count stays), and the race's shaders compile meanwhile.
+        _kReleasePortalLightSlots();
+        const ringLights = [];
+        scene.traverse((o) => o.isLight && !lightsBefore.has(o) && ringLights.push(o));
+        _kPrecompileWithout(ringLights);
         _kPortal.uniforms = ring.uniforms;
         _kPortal.group = ring.group;
         _kPortal.masked = ring.masked;
@@ -6869,6 +6922,7 @@ let _worldSwitched = false;
       /** Race camera, HUD and the countdown (end of the intro). */
       function finishKitchenIntro() {
         if (_kIntro.state === "done") return;
+        _kReleasePortalLightSlots(); // skipped before the portal began: the placeholders go now
         const wasPlaying = _kIntro.state === "playing";
         _kIntro.state = "done";
         _kIntroPortalEnd(); // the portal gone, the car on its grid spot
@@ -14393,6 +14447,10 @@ let _worldSwitched = false;
         try {
           // The plates' food settles first (off-screen physics, a time budget per frame).
           if (_kitchenFood) await _kitchenFood.settle(_kitchenNextFrame);
+          // The rail sparks (and their flash light) are made on the first spark: made now, so the light count is final
+          // before the shaders compile (a light added later rebuilt every visible material at the first wall hit: a
+          // ~370-460 ms freeze right after GO).
+          ensureRailSparks();
           scene.updateMatrixWorld(true);
           const textures = new Set();
           scene.traverse((o) => {
@@ -14810,6 +14868,7 @@ let _worldSwitched = false;
           updateMisterSpotTrail(dt);
           updateTableLightReflections();
           if (_shelfJars) _shelfJars.update(camera); // the cheap glass's copies back to front
+          updateKitchenCarLights();
           finalComposer.render();
           restoreKitchenCountdownCamera();
           restoreKitchenJumpCamera();
