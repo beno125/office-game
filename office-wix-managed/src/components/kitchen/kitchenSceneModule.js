@@ -1799,6 +1799,81 @@ export function isKitchenSceneReady() {
        * kitchen's lighting patches) in white. Dark mode keeps its own colour (set where its material is made).
        */
       const KITCHEN_TABLE_PLATE_BRIGHT = { color: 0xffffff };
+      /**
+       * Bright mode's colours and materials from the reference photo of the real kitchen (mint walls and lower
+       * cabinets, deep teal tile backsplash, off-white stone counter, coral-red shelf frames, brushed steel sink,
+       * matte white tap, black coffee machines). Bright mode only: each material goes between its own dark-mode
+       * values (as they were) and these with the light blend (colour, roughness, metalness: no shader rebuild).
+       * `enabled: false` reverts bright mode to the materials' own look. `from`: the meshes whose material(s) it
+       * is; a material also used by other meshes is copied for these (the others keep theirs).
+       */
+      const KITCHEN_BRIGHT_LOOK = {
+        enabled: true,
+        materials: [
+          { from: ["mainGreenWall"], color: 0xcde6d8, roughness: 1 }, // walls: pale mint paint
+          { from: ["ceilingWhiteBase"], color: 0xe2efe8, roughness: 1 }, // ceiling: very pale mint
+          { from: ["MainNishBackWallPlate", "MainNishBackWallPlate_instanced"], color: 0x2c5a66, roughness: 0.3, metalness: 0 }, // backsplash: deep teal ceramic
+          { from: ["MainNishBackWall"], color: 0x24474f }, // behind it: dark teal grout
+          { from: ["closetDoors", "dishwasherDoor", "tzokelLeft", "tzokelRight"], color: 0xc9e2d4, roughness: 1 }, // lower cabinets, kick plates: pale mint
+          { from: ["kitchenMainPlate"], color: 0xeee3d2, roughness: 0.55 }, // counter top: off-white stone, satin
+          { from: ["leftTopClosetMatalFrame", "midTopClosetMatalFrame", "rightTopClosetMatalFrame"], color: 0xdf5a43, roughness: 0.45 }, // shelf frames: coral-red powder coat
+          { from: ["glassPotCup1_shelfRow", "glassPotBigCup1_shelfRow", "glassPotBigCup2_shelfRow"], color: 0x3a2e26 }, // jar lids: near-black brown
+          { from: ["sinkInner"], color: 0x9a9a98, roughness: 0.35, metalness: 1 }, // sink: brushed steel
+          { from: ["waterTapBody"], color: 0xffffff, roughness: 0.5, metalness: 0 }, // tap: matte white
+          { from: ["coffeeMuchineBody", "coffeeStrokEdge", "coffeeTankCup", "iceCoffeeBody", "iceCoffeeCup", "iceCoffeeHandle"], color: 0x1e1e1e, roughness: 0.35 }, // coffee machine / iced coffee dispenser bodies: black, semi-gloss
+          { from: ["topClosetMidLeftRightPannels"], color: 0xf2f2ee }, // upper cabinet side panels: white
+          { from: ["kitchenFloorStripes"], color: 0xe9a397 }, // floor lines: faint coral
+        ],
+      };
+      /** The materials KITCHEN_BRIGHT_LOOK changes, with their dark-mode values (filled once the kitchen is loaded). */
+      const _kBrightLook = [];
+      function _kRegisterBrightLook() {
+        if (!KITCHEN_BRIGHT_LOOK.enabled || _kBrightLook.length) return;
+        const baseName = (n) => n.replace(/_\d+$/, ""); // a multi-material mesh's parts (name_1, name_2)
+        const byName = new Map();
+        const users = new Map(); // material → the mesh names using it
+        scene.traverse((o) => {
+          if (!o.isMesh) return;
+          const n = baseName(o.name || "");
+          if (!byName.has(n)) byName.set(n, []);
+          byName.get(n).push(o);
+          for (const m of Array.isArray(o.material) ? o.material : [o.material]) {
+            if (!m) continue;
+            if (!users.has(m)) users.set(m, new Set());
+            users.get(m).add(n);
+          }
+        });
+        const seen = new Set();
+        for (const L of KITCHEN_BRIGHT_LOOK.materials) {
+          const copies = new Map(); // shared material → this entry's copy (same values: dark mode looks the same)
+          for (const name of L.from) {
+            for (const mesh of byName.get(name) || []) {
+              const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+              const next = mats.map((m) => {
+                if (!m || !m.color) return m;
+                const shared = [...users.get(m)].some((n) => !L.from.includes(n));
+                if (!shared) return m;
+                if (!copies.has(m)) copies.set(m, m.clone());
+                return copies.get(m);
+              });
+              mesh.material = Array.isArray(mesh.material) ? next : next[0];
+              for (const m of next) {
+                if (!m || !m.color || seen.has(m)) continue;
+                seen.add(m);
+                _kBrightLook.push({
+                  mat: m,
+                  L,
+                  darkColor: m.color.clone(),
+                  brightColor: new THREE.Color(L.color),
+                  darkRough: m.roughness,
+                  darkMetal: m.metalness,
+                });
+              }
+            }
+          }
+        }
+        try { applyLightBlend(lightBlend); } catch (e) {}
+      }
       const _tablePlateBrightColor = new THREE.Color(KITCHEN_TABLE_PLATE_BRIGHT.color);
       let lightBlend = 0;
       let lightBlendTarget = 0;
@@ -1943,6 +2018,11 @@ export function isKitchenSceneReady() {
           }
         }
         if (_iceCoffeeTankMat) _iceCoffeeTankMat.uniforms.uBright.value = b; // shared with its surface
+        for (const e of _kBrightLook) {
+          e.mat.color.lerpColors(e.darkColor, e.brightColor, b);
+          if (e.L.roughness != null) e.mat.roughness = e.darkRough + (e.L.roughness - e.darkRough) * b;
+          if (e.L.metalness != null) e.mat.metalness = e.darkMetal + (e.L.metalness - e.darkMetal) * b;
+        }
         const plateMat = _mainTablePlateMatRef;
         if (plateMat && plateMat.userData.darkColor) {
           plateMat.color.lerpColors(plateMat.userData.darkColor, _tablePlateBrightColor, b);
@@ -14452,6 +14532,7 @@ let _worldSwitched = false;
       async function runKitchenWarmup() {
         _kitchenWarmup.state = "running";
         try {
+          _kRegisterBrightLook(); // bright mode's photo look (everything's loaded now)
           // The plates' food settles first (off-screen physics, a time budget per frame).
           if (_kitchenFood) await _kitchenFood.settle(_kitchenNextFrame);
           // The rail sparks (and their flash light) are made on the first spark: made now, so the light count is final
