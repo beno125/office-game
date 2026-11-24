@@ -28,8 +28,9 @@ export const KITCHEN_CUP_STACKS = {
   shelf: "shelf2",
   bay: [-38.358, -24.12], // usable length (x): between the frame's end members at shelf height
   cupsPerStack: { 3: 0.7, 2: 0.2, 1: 0.1 }, // how many cups a stack has (weights)
-  spacing: 0.32, // gap between neighbouring stacks (model units; a cup is 1.16 across)
-  rowSpacing: 0.3, // gap between rows
+  spacing: 1.6, // minimum gap between neighbouring stacks (sets how many fit; model units; a cup is 1.13 across)
+  maxRows: 2, // rows at most (the shelf could take 3)
+  rowSpacing: 0.6, // gap between rows
   backClearance: 0.08, // from the shelf's back edge
   edgeClearance: 0.08, // from the bay's ends and the shelf's front edge
   nestClearance: 0.006, // between a cup's outside and the inside of the cup below
@@ -37,13 +38,14 @@ export const KITCHEN_CUP_STACKS = {
   jitter: { along: 0.04, across: 0.04, yawDeg: 2 }, // per stack (1 unit ≈ 5.6 cm: 0.04 ≈ 2 mm)
   seed: 1977,
   colors: [
-    { name: "pink", hex: 0xe9c4d8, weight: 0.5 }, // the reference's pink-lilac (most of the cups)
-    { name: "yellow", hex: 0xf0cf7c, weight: 0.25 }, // butter yellow
-    { name: "blue", hex: 0xb4cfdd, weight: 0.25 }, // powder blue
+    { name: "pink", hex: 0xd6b4c5, weight: 0.5 }, // the reference's pink-lilac, muted (most of the cups)
+    { name: "yellow", hex: 0xd8bc78, weight: 0.25 }, // butter yellow, muted
+    { name: "blue", hex: 0xa6bccb, weight: 0.25 }, // powder blue, muted
   ],
   maxRun: 2, // never more than this many cups of one colour in a row
-  white: { color: 0xf3f1ed, roughness: 0.42, metalness: 0 },
-  selfLight: 0.32, // their own soft light at first (then the kitchen's pastel self-light: dark 0.32 / bright 0.22)
+  white: { color: 0xeae7e2, roughness: 0.42, metalness: 0 },
+  selfLight: 0.32, // their own soft light at first (then the kitchen's pastel self-light: dark 0.32 / bright 0.22)…
+  selfLightColor: 0.6, // …in their colour × this (less than the soap dispensers: they read too bright)
   plastic: { roughness: 0.5, metalness: 0 },
 };
 
@@ -155,7 +157,7 @@ export function createCupStacks({ THREE, root, envMap = null }) {
   const L = C.bay[1] - C.bay[0] - 2 * C.edgeClearance;
   const D = shelfBox.max.z - shelfBox.min.z - C.backClearance - C.edgeClearance;
   const cols = Math.max(1, Math.floor((L + C.spacing) / (cupD + C.spacing)));
-  const rows = Math.max(1, Math.floor((D + C.rowSpacing) / (cupD + C.rowSpacing)));
+  const rows = Math.max(1, Math.min(C.maxRows, Math.floor((D + C.rowSpacing) / (cupD + C.rowSpacing))));
   const gapX = (L - cols * cupD) / Math.max(1, cols - 1); // even, filling the bay
   const rowW = rows * cupD + (rows - 1) * C.rowSpacing;
   const z0 = shelfBox.min.z + C.backClearance + (D - rowW) / 2 + cupD / 2;
@@ -211,10 +213,11 @@ export function createCupStacks({ THREE, root, envMap = null }) {
   group.name = "kitchenCupStacks";
   // Like the kitchen's other pastel plastics (the soap dispensers): a soft light of their own colour, so they read in
   // the closets' shade (the kitchen drives it with its dark / bright mode: pastelMaterials).
-  const whiteMat = new THREE.MeshStandardMaterial({ ...C.white, envMap, envMapIntensity: 0.25, emissive: C.white.color, emissiveIntensity: C.selfLight });
+  const glowOf = (hex) => new THREE.Color(hex).multiplyScalar(C.selfLightColor);
+  const whiteMat = new THREE.MeshStandardMaterial({ ...C.white, envMap, envMapIntensity: 0.25, emissive: glowOf(C.white.color), emissiveIntensity: C.selfLight });
   const colorMats = C.colors.map(
     // Double-sided as in the model (glassColor1's faces point into the cup: its outside is their back).
-    (c) => new THREE.MeshStandardMaterial({ color: c.hex, ...C.plastic, side: THREE.DoubleSide, envMap, envMapIntensity: 0.2, emissive: c.hex, emissiveIntensity: C.selfLight }),
+    (c) => new THREE.MeshStandardMaterial({ color: c.hex, ...C.plastic, side: THREE.DoubleSide, envMap, envMapIntensity: 0.2, emissive: glowOf(c.hex), emissiveIntensity: C.selfLight }),
   );
   const meshes = [];
   const place = (geo, mat, list, partMatrix, name) => {
