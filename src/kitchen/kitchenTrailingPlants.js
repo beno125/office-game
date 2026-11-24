@@ -55,7 +55,12 @@ export const KITCHEN_TRAILING_PLANTS = {
   leafSize: 0.95, // a leaf's width at the stem's base (height × the image's aspect)
   leafTipScale: 0.55, // its size at the stem's tip (× leafSize)
   leafSizeJitter: 0.22, // ± share
-  leafAngleJitterDeg: 22,
+  leafAngleJitterDeg: 34, // ± twist round the stem
+  leafRollDeg: 48, // ± roll round the leaf's own midrib (how it turns to the light)
+  leafSpread: [0.4, 1], // how far out sideways from the stem (share)
+  leafDroop: [0.1, 0.95], // how much the blade hangs down (share)
+  leafLean: [-0.15, 0.5], // along the stem (share; forward toward the tip)
+  leafFaceTilt: [-0.25, 0.7], // its facing: down … up
   leafStart: 0.5, // no leaves on the first bit of a stem (inside the planter)
   leafTint: 0xffffff, // × the leaf image (white = as in the Office)
 };
@@ -370,15 +375,22 @@ export function createTrailingPlants({ THREE, root, leafUrl }) {
       sideV.crossVectors(tan, down);
       if (sideV.lengthSq() < 1e-4) sideV.set(1, 0, 0);
       sideV.normalize();
+      // Each leaf its own pose: spread, droop, lean, twist round the stem, roll round its midrib, facing tilt.
       const ang = THREE.MathUtils.degToRad((rand() * 2 - 1) * C.leafAngleJitterDeg * R);
+      const roll = THREE.MathUtils.degToRad((rand() * 2 - 1) * C.leafRollDeg * R);
+      const mixR = (r) => lerp(lerp(r[0], r[1], 0.5), range(r), R);
+      const spread = mixR(C.leafSpread), droop = mixR(C.leafDroop), lean = mixR(C.leafLean), tilt = mixR(C.leafFaceTilt);
+      const faceSide = (rand() - 0.5) * 0.8 * R;
       let placed = false;
       for (let attempt = 0; attempt < 3 && !placed; attempt++) {
         const sgn = attempt === 1 ? -sideSign : sideSign;
         if (attempt === 2) size *= 0.6;
-        blade.copy(sideV).multiplyScalar(0.75 * sgn).addScaledVector(down, 0.55).addScaledVector(tan, 0.25).normalize();
+        blade.copy(sideV).multiplyScalar(spread * sgn).addScaledVector(down, droop).addScaledVector(tan, lean).normalize();
         blade.applyAxisAngle(tan, ang);
-        // Facing out of its edge and toward the room, a little up.
-        face.copy(S.out).multiplyScalar(0.7).add(_room).addScaledVector(sideV, 0.25 * sgn).normalize();
+        // Facing out of its edge and toward the room, tilted up or down, then rolled round its midrib.
+        face.copy(S.out).multiplyScalar(0.7).add(_room).addScaledVector(sideV, (0.25 + faceSide) * sgn);
+        face.y += tilt;
+        face.addScaledVector(blade, -face.dot(blade)).normalize().applyAxisAngle(blade, roll);
         Y.copy(blade).negate(); // the image's up (tip → notch) points back to the stem
         X.crossVectors(Y, face);
         if (X.lengthSq() < 1e-4) X.set(1, 0, 0);
