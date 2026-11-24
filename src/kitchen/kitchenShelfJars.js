@@ -56,10 +56,10 @@ export const KITCHEN_SHELF_JARS = {
   glassNames: ["glassPot1", "glassPotBig1", "glassPotBig2"],
   glass: {
     color: 0xffffff,
-    reflection: 0.15, // environment reflection strength (envMapIntensity; 0.7 and 0.3 were too strong); the physical shader's Fresnel makes edges reflect more
+    reflection: 0.07, // environment reflection strength (envMapIntensity; 0.7, 0.3 and 0.15 were too strong); the physical shader's Fresnel makes edges reflect more
     roughness: 0.05, // polished, the reflections a little soft
     ior: 1.5, // glass
-    thickness: 0.15, // refraction depth (model units): what's behind bends slightly
+    thickness: 0.08, // refraction depth (model units): what's behind bends very slightly
     metalness: 0,
     transmission: 1, // fully see-through
     specularIntensity: 1,
@@ -69,7 +69,7 @@ export const KITCHEN_SHELF_JARS = {
     tintDistance: 8, // how far light travels in the glass before taking the tint (model units): faint
     rim: {
       color: 0xd8e8ff, // the pot's outline: a faint bright edge where the surface turns away from the camera
-      strength: 0.06,
+      strength: 0.03,
       power: 3, // higher = thinner edge
     },
     cheapOpacity: 0.35, // lower tiers (no transmission): how much of the glass's own shading covers what's behind it
