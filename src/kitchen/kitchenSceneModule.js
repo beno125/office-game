@@ -11,6 +11,7 @@
       import { ShaderPass } from "three/addons/postprocessing/ShaderPass.js";
       import { RectAreaLightUniformsLib } from "three/addons/lights/RectAreaLightUniformsLib.js";
       import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
+      import { RGBELoader } from "three/addons/loaders/RGBELoader.js";
 import { getKitchenSceneMount } from "./kitchenSceneMount.js";
 import { emitKitchenSceneEvent } from "../game/kitchenSceneEvents.js";
 import {
@@ -1695,6 +1696,96 @@ export function isKitchenSceneReady() {
         warmFill: { color: 0xffe8cc, intensity: 0.35 },
       };
       /**
+       * Bright mode's HDRI environment (lighting and reflections): Poly Haven's "Lebombo" (CC0, an indoor room
+       * with daylight windows), 1k Radiance .hdr (1.48 MB), prefiltered once (PMREM, 256 px cube faces, half
+       * float). Bright mode only: dark mode has no environment, as before (none loaded or rendered: it's freed
+       * when the room goes dark). It's the scene's environment for every material without its own, and it
+       * replaces the own environment of those that have one of the same size (the glass jars and their kin: no
+       * shader rebuild). `intensity` × each material's own reflection strength (envMapIntensity, capped at
+       * `maxStrength`), faded with the light blend. Switching it on or off rebuilds most shaders: in the intro that happens under the loader
+       * (on) and in the black of the cut after the first shot (off).
+       */
+      const KITCHEN_BRIGHT_HDRI = {
+        url: kitchenAsset("textures/hdri/lebombo_1k.hdr"),
+        intensity: 0.35,
+        /** Reflection strengths above this (materials tuned for the old neutral gradient, e.g. the metallic table top
+         *  at 2.8) are capped here before the intensity: the bright room's reflection turned them white. */
+        maxStrength: 1,
+      };
+      const _kHdri = { tex: null, rt: null, loading: null, on: false, hold: false, mats: new Map(), loadMs: 0 };
+      /** Loads and prefilters the HDRI (once; again after it was freed). */
+      function _kHdriLoad() {
+        if (_kHdri.tex) return Promise.resolve(_kHdri.tex);
+        if (_kHdri.loading) return _kHdri.loading;
+        const t0 = performance.now();
+        _kHdri.loading = new RGBELoader()
+          .setDataType(THREE.HalfFloatType)
+          .loadAsync(KITCHEN_BRIGHT_HDRI.url)
+          .then((eq) => {
+            eq.mapping = THREE.EquirectangularReflectionMapping;
+            const gen = new THREE.PMREMGenerator(renderer);
+            const rt = gen.fromEquirectangular(eq);
+            eq.dispose();
+            gen.dispose();
+            _kHdri.rt = rt;
+            _kHdri.tex = rt.texture;
+            _kHdri.loadMs = performance.now() - t0;
+            _kHdri.loading = null;
+            try { applyLightBlend(lightBlend); } catch (e) {} // bright already: on now
+            return rt.texture;
+          })
+          .catch((e) => {
+            console.warn("[kitchen] bright-mode HDRI failed (lights only):", e);
+            _kHdri.loading = null;
+            return null;
+          });
+        return _kHdri.loading;
+      }
+      /** The HDRI at strength k (the light blend: 0 dark → 1 bright); on while k > 0 (or held), off and freed at 0. */
+      function _kHdriSet(k) {
+        const want = k > 0 || _kHdri.hold;
+        if (want && !_kHdri.tex) {
+          if (k > 0) _kHdriLoad(); // applied when it's ready
+          return;
+        }
+        if (want && !_kHdri.on) {
+          const tex = _kHdri.tex;
+          const h = tex.image && tex.image.height;
+          scene.environment = tex;
+          scene.traverse((o) => {
+            if (!o.material) return;
+            for (const m of Array.isArray(o.material) ? o.material : [o.material]) {
+              if (!m || !m.isMeshStandardMaterial || _kHdri.mats.has(m)) continue;
+              const own = m.envMap;
+              const swap = !!own && own.mapping === THREE.CubeUVReflectionMapping && own.image && own.image.height === h;
+              if (own && !swap) continue; // its own environment of another kind / size: kept
+              _kHdri.mats.set(m, { base: m.envMapIntensity, own, swap });
+              if (swap) m.envMap = tex;
+            }
+          });
+          _kHdri.on = true;
+        }
+        if (_kHdri.on && !want) {
+          for (const [m, r] of _kHdri.mats) {
+            m.envMapIntensity = r.base;
+            if (r.swap) m.envMap = r.own;
+          }
+          _kHdri.mats.clear();
+          scene.environment = null;
+          _kHdri.on = false;
+          _kHdri.rt.dispose(); // not kept in dark mode
+          _kHdri.rt = _kHdri.tex = null;
+          return;
+        }
+        if (_kHdri.on) {
+          for (const [m, r] of _kHdri.mats) {
+            m.envMapIntensity = r.swap
+              ? r.base // the room it reflected, swapped for the HDRI, at its own strength
+              : Math.min(r.base, KITCHEN_BRIGHT_HDRI.maxStrength) * KITCHEN_BRIGHT_HDRI.intensity * k;
+          }
+        }
+      }
+      /**
        * mainTableSidePlane in bright mode: white. Not metallic (metal only tinted its reflections: it read grey),
        * and a little white self-light, as the end panel faces away from the bright mode's lights (it read grey
        * too). Dark mode keeps its own colour / glow / metalness (set where its material is made); the light blend
@@ -1880,6 +1971,7 @@ export function isKitchenSceneReady() {
           _kitchenFloorMat.emissive.setHex(0x16235a);
           _kitchenFloorMat.emissiveIntensity = (1 - b) * 0.16;
         }
+        if (_kitchenWorldActive) _kHdriSet(b); // bright mode's HDRI
       }
       document.addEventListener("keydown", (e) => {
         if (e.code === "KeyO") {
@@ -6878,6 +6970,7 @@ let _worldSwitched = false;
       function _kIntroRevealEnd() {
         if (_kIntro.revealDone) return;
         _kIntro.revealDone = true;
+        _kHdri.hold = false; // its HDRI goes with the light (in the cut's black)
         lightBlend = lightBlendTarget = 0;
         applyLightBlend(0);
         _kRevealShowPortal(true);
@@ -6903,7 +6996,7 @@ let _worldSwitched = false;
         _kReleasePortalLightSlots(); // skipped before the portal began: the placeholders go now
         const wasPlaying = _kIntro.state === "playing";
         _kIntro.state = "done";
-        if (wasPlaying) _kIntroRevealEnd(); // dark mode (if it ended mid-reveal)
+        _kIntroRevealEnd(); // dark mode, the HDRI freed (if it ended mid-reveal, or never played)
         _kIntroPortalEnd(); // the portal gone, the car on its grid spot
         // Mister Spot back to its normal path if the intro ends mid-shot.
         if (_kIntro.spotStarted && !_kIntro.spotEnded) {
@@ -14406,6 +14499,11 @@ let _worldSwitched = false;
             // The intro's room reveal (bright → dark): every mode's lights on at once (_kRevealLightSet), compiled
             // here too, so the reveal doesn't freeze as it starts or as it hands over to dark mode.
             // As it plays: the car hidden (in the portal's tunnel, with its own lights).
+            // Its HDRI too (on from here to the cut after the first shot).
+            if (_kIntro.state === "pending") {
+              await _kHdriLoad();
+              _kHdri.hold = true;
+            }
             const b0 = lightBlend;
             const target0 = lightBlendTarget;
             const carWasVisible = car.visible;
