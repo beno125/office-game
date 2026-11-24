@@ -37,6 +37,7 @@ import { addBloomGroup, addThresholdBloom, keepBelowBloomThreshold, setBloomWeig
 import { createTouchDrive } from "../game/touch/touchDrive.js";
 import { createKitchenFood, trayFromMesh, addTrayShapes, KITCHEN_FOOD } from "./kitchenFood.js";
 import { createMilkCartons } from "./kitchenMilkCartons.js";
+import { createShelfJars } from "./kitchenShelfJars.js";
 import { createKitchenNapkins } from "./kitchenNapkins.js";
 import { createCameraDrag } from "../game/cameraDrag.js";
 import {
@@ -698,6 +699,7 @@ export function isKitchenSceneReady() {
       /** Matches original office-scene rendering (high tier and above). */
       const MAX_DEVICE_PIXEL_RATIO = 2;
       const VISUAL_PARITY_TIER = 2;
+      let _shelfJars = null; // kitchenShelfJars.js (declared early: applyPerformanceSettings reads it)
 
       function getScreenPixelCount() {
         const dpr = window.devicePixelRatio || 1;
@@ -1010,6 +1012,8 @@ export function isKitchenSceneReady() {
         if (physicsWorld) {
           physicsWorld.solver.iterations = s.physicsIterations;
         }
+        // The shelf jars' glass: transmission on high / ultra, cheap alpha glass below (kitchenShelfJars.js).
+        if (_shelfJars) _shelfJars.setHighQuality(useVisualParity());
         if (_kitchenWorldActive) {
           renderer.shadowMap.enabled = true;
           renderer.toneMappingExposure = 0.86;
@@ -9130,6 +9134,10 @@ let _worldSwitched = false;
           _milkCartons.dispose();
           _milkCartons = null;
         }
+        if (_shelfJars) {
+          _shelfJars.dispose();
+          _shelfJars = null;
+        }
         if (_kitchenNapkins) {
           _kitchenNapkins.dispose();
           _kitchenNapkins = null;
@@ -12325,6 +12333,25 @@ let _worldSwitched = false;
                 if (report.issues.length) console.warn("Milk cartons:", report.issues);
               } catch (e) {
                 console.warn("Failed to set up the milk cartons:", e);
+              }
+            }
+            // Glass jars in rows on the shelves under the top closets (see kitchenShelfJars.js).
+            if (!_shelfJars) {
+              try {
+                let env = scene.environment;
+                let ownEnv = false;
+                if (!env) {
+                  // No quality tier builds one: their own from the kitchen's neutral gradient (as coffeeGrill).
+                  const src = buildNeutralEnvironmentTexture();
+                  env = pmremGenerator.fromEquirectangular(src).texture;
+                  src.dispose();
+                  ownEnv = true;
+                }
+                _shelfJars = createShelfJars({ THREE, root: kmodel, envMap: env, ownsEnvMap: ownEnv, highQuality: useVisualParity() });
+                const report = _shelfJars.check();
+                if (report.issues.length) console.warn("Shelf jars:", report.issues);
+              } catch (e) {
+                console.warn("Failed to set up the shelf jars:", e);
               }
             }
             // Paper napkins flying out of the paper dispenser (see kitchenNapkins.js).
