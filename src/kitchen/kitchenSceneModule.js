@@ -42,6 +42,7 @@ import { createShelfJars } from "./kitchenShelfJars.js";
 import { createStartLights } from "./kitchenStartLights.js";
 import { createCounterScreen } from "./kitchenCounterScreen.js";
 import { createTrailingPlants } from "./kitchenTrailingPlants.js";
+import { createCupStacks } from "./kitchenCupStacks.js";
 import { createKitchenNapkins } from "./kitchenNapkins.js";
 import { createCameraDrag } from "../game/cameraDrag.js";
 import {
@@ -707,6 +708,7 @@ export function isKitchenSceneReady() {
       let _startLights = null; // kitchenStartLights.js
       let _counterScreen = null; // kitchenCounterScreen.js
       let _trailingPlants = null; // kitchenTrailingPlants.js
+      let _cupStacks = null; // kitchenCupStacks.js
 
       function getScreenPixelCount() {
         const dpr = window.devicePixelRatio || 1;
@@ -9304,6 +9306,10 @@ let _worldSwitched = false;
           _trailingPlants.dispose();
           _trailingPlants = null;
         }
+        if (_cupStacks) {
+          _cupStacks.dispose();
+          _cupStacks = null;
+        }
         if (_kitchenNapkins) {
           _kitchenNapkins.dispose();
           _kitchenNapkins = null;
@@ -12538,6 +12544,18 @@ let _worldSwitched = false;
                 if (report.issues.length) console.warn("Shelf jars:", report.issues);
               } catch (e) {
                 console.warn("Failed to set up the shelf jars:", e);
+              }
+            }
+            // Stacks of nested plastic cups on the left closet's lower shelf (see kitchenCupStacks.js); before the plants,
+            // which must not enter them either.
+            if (!_cupStacks) {
+              try {
+                _cupStacks = createCupStacks({ THREE, root: kmodel });
+                _kitchenPastelMats.push(..._cupStacks.pastelMaterials); // the pastel self-light, with the dark / bright mode
+                const report = _cupStacks.check();
+                if (report.issues.length) console.warn("Cup stacks:", report.issues);
+              } catch (e) {
+                console.warn("Failed to set up the cup stacks:", e);
               }
             }
             // Trailing plants hanging from the top planters (see kitchenTrailingPlants.js); after the shelf jars, which
