@@ -9,7 +9,7 @@ import GameMenu from "./game/ui/GameMenu.jsx";
 
 /**
  * @param {object} props
- * @param {boolean} [props.hideModuleLoadingOverlay] — GameLoader owns the loading UI
+ * @param {boolean} [props.hideModuleLoadingOverlay] — the game page owns the loading UI
  * @param {() => void} [props.onModuleReady] — fired when the scene JS chunk has loaded
  * @param {() => void} [props.onTransitionToKitchen] — swaps the active world
  */

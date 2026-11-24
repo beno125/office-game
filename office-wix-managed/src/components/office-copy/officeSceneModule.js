@@ -56,7 +56,6 @@ let _officeSceneAnimationFrame = 0;
       let _carCam1OrbitYawSnapshot = 0;
       const _carCamOffset = new THREE.Vector3();
       const _rampJumpCamRestOffset = new THREE.Vector3();
-      const _carCamOrbitRight = new THREE.Vector3();
       const _carCam1ChaseOffset = new THREE.Vector3();
       const _carCam1ReturnTargetOffset = new THREE.Vector3();
       const _carCam1PreMatrixOffset = new THREE.Vector3();
@@ -539,9 +538,6 @@ let _officeSceneAnimationFrame = 0;
         return out;
       }
 
-      function getCarMatrixLookAtPoint(out) {
-        return getCarCameraLookAtPoint(out);
-      }
 
       function applyCarCameraLookAtCar() {
         if (!car || camera !== carCamera) return;
@@ -757,8 +753,6 @@ let _officeSceneAnimationFrame = 0;
       renderer.toneMappingExposure = 1;
       renderer.outputColorSpace = THREE.SRGBColorSpace;
 
-      /** Full resolution + 512 shadows from high tier upward. */
-      const MAX_DEVICE_PIXEL_RATIO = 2;
       const VISUAL_PARITY_TIER = 2;
 
       function getScreenPixelCount() {
@@ -997,13 +991,11 @@ let _officeSceneAnimationFrame = 0;
       let _perfMacFeedFrame = 0;
       let _perfScreenVideoFrame = 0;
       let _perfAirPlaneFrame = 0;
-      let _perfChargerFrame = 0;
       let _perfShadowFrame = 0;
       let _perfStarPlaceFrame = 0;
       let _wallShadowLightReady = false;
       let _physCoalesceDt = 0;
       let _tabVisible = !document.hidden;
-      let _deskFlamesWereHidden = true;
       const perfBadgeEl = document.getElementById("perfBadge");
 
       function getBloomRenderScale() {
@@ -2222,13 +2214,10 @@ let _officeSceneAnimationFrame = 0;
         side: THREE.DoubleSide,
       });
       const _wallShadowInward = new THREE.Vector3();
-      const _wallShadowPlaneNormal = new THREE.Vector3(0, 0, 1);
-      const _tableSideWallShadowFocus = new THREE.Vector3();
       const _wallInnerFace = new THREE.Vector3();
       const _wallTableRef = new THREE.Vector3();
       const _wallShadowBasisX = new THREE.Vector3();
       const _wallShadowBasisY = new THREE.Vector3(0, 1, 0);
-      const _wallShadowRotMatrix = new THREE.Matrix4();
 
       const dirPink = new THREE.DirectionalLight(0xee99bb, 0.5);
       dirPink.position.set(35, 45, 25);
@@ -2338,9 +2327,6 @@ let _officeSceneAnimationFrame = 0;
         applyCarLightEmissiveForTier();
       }
 
-      function applySceneShadowSettings() {
-        applyPerformanceSettings();
-      }
 
       applyPerformanceSettings();
       updatePerfBadge("auto-detected");
@@ -2875,7 +2861,6 @@ let _officeSceneAnimationFrame = 0;
       const _drC2 = new THREE.Color();
       const _drV = new THREE.Vector3();
       const _drDir = new THREE.Vector3();
-      const _drInvView = new THREE.Matrix3();
       /** color (linear) × intensity into a vector */
       function _lightVec(color, intensity, out) {
         return out.set(color.r * intensity, color.g * intensity, color.b * intensity);
@@ -2953,18 +2938,6 @@ let _officeSceneAnimationFrame = 0;
         for (; _deskDirSlot < DESK_RESTORE_DIRS; _deskDirSlot++) U.uDeskDirColor.value[_deskDirSlot].set(0, 0, 0);
       }
 
-      function applyDarkModePreset(src) {
-        for (const k of Object.keys(src)) {
-          const v = src[k];
-          if (v && typeof v === "object") {
-            if (!darkMode[k]) darkMode[k] = {};
-            Object.assign(darkMode[k], v);
-          } else {
-            darkMode[k] = v;
-          }
-        }
-        try { applyLightBlend(lightBlend); } catch (e) {}
-      }
       // Lights that should ONLY appear in dark mode (intensity = baseIntensity * (1-lightBlend)).
       const _darkModeOnlyLights = [];
       // Meshes whose emissiveIntensity is lerped between strong (dark) and gentle (bright).
@@ -3223,7 +3196,6 @@ let _officeSceneAnimationFrame = 0;
       // GLTF wheel names: wheelFl=front left, wheelFr=front right, wheelRl=rear left, wheelRr=rear right
       // Wheel covers (wheelCoverFl etc.) are parented to their wheel so they follow steer + roll.
       const WHEEL_RADIUS = 0.28;
-      const TABLE_WHEEL_CLEARANCE = 0;
       let halfW = 0.6,
         halfL = 1.0,
         carBodyHalfY = 0.25,
@@ -3238,8 +3210,6 @@ let _officeSceneAnimationFrame = 0;
       const _quatWheelRollOpposite = new THREE.Quaternion();
       const _axisWheelY = new THREE.Vector3(0, 1, 0);
       const _axisWheelRoll = new THREE.Vector3(1, 0, 0);
-      const _axisSteerLocal = new THREE.Vector3();
-      const _quatBaseInv = new THREE.Quaternion();
       let canonFL = null,
         canonFR = null,
         canonRL = null,
@@ -3250,8 +3220,6 @@ let _officeSceneAnimationFrame = 0;
         canonRRBody = null;
       let canonBodyMesh = null,
         canonBodyPhys = null;
-      let carWheelBox = null;
-      let carWheelBoxPhys = null;
       let bottleGroup = null;
       let bottleBodyMesh = null, bottleBaseMesh = null, bottleCupMesh = null;
       let bottlePhisicMesh = null;
@@ -3451,8 +3419,6 @@ let _officeSceneAnimationFrame = 0;
       let _bottleInitQuat = null;
       let _certifiedInitPos = null;
       let _certifiedInitQuat = null;
-      const _bottleWorldPos = new THREE.Vector3();
-      const _bottleWorldQuat = new THREE.Quaternion();
       const _canonWorldPos = new THREE.Vector3();
       const _canonWorldQuat = new THREE.Quaternion();
       const _wheelSyncWorldPos = [
@@ -3462,7 +3428,6 @@ let _officeSceneAnimationFrame = 0;
         new THREE.Vector3(),
       ];
       const _wheelsList = [null, null, null, null];
-      const _wheelHadBottom = [false, false, false, false];
       const _gumClampTmp = new THREE.Vector3();
       const _gumTankMwCached = new THREE.Matrix4();
       const _invTankMwGumClamp = new THREE.Matrix4();
@@ -3516,8 +3481,6 @@ let _officeSceneAnimationFrame = 0;
       };
       const CAR_GRAVITY = 75;
       const CAR_AIR_RESISTANCE = 0.08;
-      const CAR_KNOCKABLE_BLOCK_MARGIN = 0.045;
-      const CAR_IMPACT_MASS_MULTIPLIER = 1.65;
       const CAR_RAMP_JUMP_MULTIPLIER = 2;
       const CAR_RAMP_JUMP_MIN_SPEED = 5;
       const RAMP_JUMP_SLOW_MO_EDGE = 0.26;
@@ -3529,7 +3492,6 @@ let _officeSceneAnimationFrame = 0;
       const RAMP_JUMP_MATRIX_CHANCE = 0.4;
       const RAMP_JUMP_CAM_ZOOM = 0.88;
       const RAMP_JUMP_CAM_ZOOM_PEAK = 0.58;
-      const RAMP_JUMP_CAM_ZOOM_MATRIX_PEAK = 1;
       const RAMP_JUMP_CAM_ZOOM_MATRIX_ORBIT_END = 0.38;
       const RAMP_JUMP_MATRIX_ZOOM_MIN_FRAC = 0.65;
       const RAMP_JUMP_SLOW_MO_DRIFT_SCALE = 0.18;
@@ -3540,8 +3502,6 @@ let _officeSceneAnimationFrame = 0;
       const RAMP_JUMP_MATRIX_FRONT_AZIMUTH = RAMP_JUMP_MATRIX_ORBIT * 0.5;
       const RAMP_JUMP_MATRIX_ORBIT_AIR_START = 0.04;
       const RAMP_JUMP_MATRIX_ORBIT_AIR_END = 0.94;
-      const RAMP_JUMP_MATRIX_GRAVITY_SCALE = 0.11;
-      const RAMP_JUMP_MATRIX_TILT = 0.24;
       const RAMP_JUMP_EFFECT_LERP = 7;
       const RAMP_JUMP_LAND_CLEARANCE = 0.55;
       const RAMP_JUMP_EASE_IN_SEC = 0.32;
@@ -3560,7 +3520,6 @@ let _officeSceneAnimationFrame = 0;
         brake: false,
       };
 
-      const maxCarDistance = 80;
       let tableSpawn = new THREE.Vector3(0, 0, 0);
       let tableMinY = 0;
       let tableSurfaceY = 0;
@@ -3860,8 +3819,7 @@ let _officeSceneAnimationFrame = 0;
       let carFloorTimer = 0;
       let tablePlateMesh = null;
       let storedCarScale = 0.5;
-      let carBottomOffsetY = 0;
-      let carPhysicsHalfY = 0; // kept for compatibility
+      let carBottomOffsetY = 0; // kept for compatibility
 
       function isControlKey(code) {
         return [
@@ -4057,10 +4015,7 @@ let _officeSceneAnimationFrame = 0;
       const _macWheelL = new THREE.Vector3();
       const _macWheelR = new THREE.Vector3();
       const _macHeadlight = new THREE.Vector3();
-      const _macFrontCarBox = new THREE.Box3();
       const _macCarSize = new THREE.Vector3();
-      const MAC_SCREEN_RT_W = 640;
-      const MAC_SCREEN_RT_H = 360;
       const MAC_FRONT_CAM_DIST_FACTOR = 2.05;
       const MAC_FRONT_CAM_FOV = 48;
       const rightScreenVideoScale = 1.7;
@@ -4074,7 +4029,7 @@ let _officeSceneAnimationFrame = 0;
       const rightScreenVideoTop = 0;
       const rightScreenVideoBottom = 0;
 
-      /** The office model (was office-table-embed94.gltf; the old office at /office-old keeps that one). */
+      /** The office model (it replaced office-table-embed94.gltf). */
       const OFFICE_SCENE_GLTF = "office-scene1.glb"; // binary office-scene1.gltf, original 4096² hand textures kept (57.2 MB -> 42.9 MB)
       const OUTDOOR_FALLBACK_GLTF = officeAsset("office-table-embed34.gltf");
       const OUTDOOR_BACKGROUND_Y_SCALE = 1.35;
@@ -5108,8 +5063,6 @@ let _officeSceneAnimationFrame = 0;
       const carRampRayOrigin = new THREE.Vector3();
       const carRampRayFrontOrigin = new THREE.Vector3();
       const carRampRayRearOrigin = new THREE.Vector3();
-      const _rampWheelFLRayOrigin = new THREE.Vector3();
-      const _rampWheelFRRayOrigin = new THREE.Vector3();
       const carRampRayDir = new THREE.Vector3(0, -1, 0);
       const carRampWallRaycaster = new THREE.Raycaster();
       const _wallRayDir = new THREE.Vector3();
@@ -5328,9 +5281,6 @@ let _officeSceneAnimationFrame = 0;
       const _v1 = new THREE.Vector3();
       const _v2 = new THREE.Vector3();
       const _v3 = new THREE.Vector3();
-      const _shapeWorldCenter = new THREE.Vector3();
-      const _cannonBodyQuat = new THREE.Quaternion();
-      const _carWheelOverlapPoints = [];
       const _surfEdgeA = new THREE.Vector3();
       const _surfEdgeB = new THREE.Vector3();
       const _surfNormalB = new THREE.Vector3();
@@ -5338,14 +5288,11 @@ let _officeSceneAnimationFrame = 0;
       const carUpLerp = new THREE.Vector3(0, 1, 0);
       const CAR_RAMP_TILT_LERP = 12;
       const jumpLaunchUp = new THREE.Vector3(0, 1, 0);
-      const jumpForwardLeanUp = new THREE.Vector3();
       let jumpStartTime = 0;
       let jumpLaunchSpeed = 0;
       let jumpInitialVelY = 0;
       let _rampJumpSimAirTime = 0;
       let _carLandShakePending = false;
-      const JUMP_TILT_DURATION = 0.45;
-      const JUMP_FORWARD_LEAN_AMOUNT = 0.38;
       const LANDING_TILT_LERP = 120;
       const LANDING_RECOVERY_DURATION = 0.3;
       let wasInAir = false;
@@ -5384,10 +5331,7 @@ let _officeSceneAnimationFrame = 0;
       let _carSurfRange = 0;
       let _carAnyWheelOnRamp = false;
       const _carWheelSurfY = [0, 0, 0, 0];
-      const _carWorldBox = new THREE.Box3();
       const _carForward = new THREE.Vector3();
-      const _carRight = new THREE.Vector3();
-      const _carRotMat = new THREE.Matrix4();
       const _quatY = new THREE.Quaternion();
       const _quatTilt = new THREE.Quaternion();
       const _tiltAxis = new THREE.Vector3();
@@ -5436,7 +5380,6 @@ let _officeSceneAnimationFrame = 0;
       let _handWalkBigFxWind = 0;
       let _handWalkBigFxWindSign = -1;
       const HAND_WALK_BIG_FX_WIND_MAX = 0.95;
-      const HAND_WALK_FX_PIVOT_AXES_SIZE = 3.5;
       let _handWalkFxPivotGizmo = null;
       let gumsCupRemovedUntil = 0;
       /** Inner AABB in **gumsTankPhysic** local space (matches Cannon trimesh), not visual gumsTank. */
@@ -5550,7 +5493,6 @@ let _officeSceneAnimationFrame = 0;
       const GUM_PHYS_FIXED_STEP_DYNAMIC = 1 / 60;
       const GUM_PHYS_MAX_SUBSTEPS_FILL = 5;
       const GUM_PHYS_MAX_SUBSTEPS_MIXED = 5;
-      const GUM_PHYS_MAX_SUBSTEPS_DYNAMIC = 2;
       /** Match the gumsTankPhysic mesh exactly — inflation opened holes vs the wireframe. */
       const GUM_TANK_TRIMESH_SCALE = 1;
       /** Physics sphere matches visual radius so spheres do not sit inside the wall and pop through. */
@@ -5561,16 +5503,12 @@ let _officeSceneAnimationFrame = 0;
       const _gumSyncQ = new THREE.Quaternion();
       const _gumSyncP = new THREE.Vector3();
       const _gumSyncS = new THREE.Vector3(1, 1, 1);
-      const _gumHideP = new THREE.Vector3(0, -400, 0);
-      const _gumHideS = new THREE.Vector3(1e-6, 1e-6, 1e-6);
-      const _gumIdQ = new THREE.Quaternion();
       const gumReleased = new Set();
       let _gumRepulsionFrame = 0;
       let _gumPrevFrameTankAllStatic = false;
       let gumRadiusGlobal = 0.02;
       let gumsAddedCount = 0;
       let gumsReadyToDrop = false;
-      let _gumFillDoneTime = 0;
       let nextGumDropTime = 0;
       /** Ms between spawning each gum batch (only used if staggered drop is re-enabled). */
       const GUM_DROP_INTERVAL = 16;
@@ -6435,30 +6373,6 @@ let _officeSceneAnimationFrame = 0;
         return { entryDir, blockingAxis };
       }
 
-      function findCarRampSurfaceHit(origins) {
-        const targets = getCarRampRaycastTargets();
-        if (!targets.length) return null;
-        let best = null;
-        for (let oi = 0; oi < origins.length; oi++) {
-          carRampRaycaster.set(origins[oi], carRampRayDir);
-          const hits = carRampRaycaster.intersectObjects(targets, true);
-          for (let h = 0; h < hits.length; h++) {
-            const hit = hits[h];
-            if (hit.distance > 2.5) continue;
-            if (!getCarRampFromHit(hit.object)) continue;
-            getRampHitWorldNormal(hit);
-            if (_rampNormal.y < RAMP_DRIVE_UP_NY_THRESHOLD) continue;
-            if (!best || hit.point.y > best.hit.point.y) {
-              best = {
-                hit,
-                normal: _rampNormal.clone(),
-                rampInfo: getCarRampFromHit(hit.object),
-              };
-            }
-          }
-        }
-        return best;
-      }
 
       function updateFrontWheelsOffRampForRamp(rampObject) {
         if (!rampObject) return false;
@@ -9471,14 +9385,6 @@ let _officeSceneAnimationFrame = 0;
         );
       };
 
-      const CERTIFIED_MESH_NAMES = [
-        "cetifiedBackground",
-        "cetifiedCircle",
-        "certifiedDesignText",
-        "certifiedTitle",
-        "wixLogo",
-        "certifiedBody",
-      ];
 
       function applyCertifiedMaterials(model) {
         const _box = new THREE.Box3();
@@ -9669,8 +9575,6 @@ let _officeSceneAnimationFrame = 0;
       });
 
       let phoneChargerLightMesh = null;
-      const chargerCupBox = new THREE.Box3();
-      const chargerCupBoxExpand = 0.22;
 
       function applyPhoneChargerLightMaterial(model) {
         model.traverse((node) => {
@@ -11144,44 +11048,6 @@ let _officeSceneAnimationFrame = 0;
         };
       }
 
-      function updateHandWalkFxInstance(
-        fx,
-        dt,
-        fade,
-        worldPos,
-        xOffset,
-        yOffset,
-        zOffset,
-      ) {
-        if (!fx) return;
-        const f = THREE.MathUtils.clamp(fade, 0, 1);
-        fx.points.visible = f > 0.01;
-        fx.mat.uniforms.uFade.value = f;
-        if (!fx.points.visible || !worldPos) {
-          fx.light.intensity = 0;
-          clearHandWalkFxSceneLighting(fx);
-          return;
-        }
-        fx.points.position.copy(worldPos);
-        fx.points.position.x += xOffset;
-        fx.points.position.y += yOffset;
-        fx.points.position.z += zOffset;
-        fx.mat.uniforms.uTime.value = _handWalkFxTime;
-        const posAttr = fx.geo.attributes.position;
-        const arr = posAttr.array;
-        const heightScale = 0.7 + f * 0.9;
-        for (let i = 0; i < fx.count; i++) {
-          fx.rise[i] += dt * fx.riseSpeed[i];
-          if (fx.rise[i] > 1) fx.rise[i] -= 1;
-          const y = fx.rise[i] * fx.maxHeight[i] * heightScale;
-          const drift = y * 0.25;
-          arr[i * 3] = fx.spread[i * 2] + fx.driftX[i] * drift;
-          arr[i * 3 + 1] = y;
-          arr[i * 3 + 2] = fx.spread[i * 2 + 1] + fx.driftZ[i] * drift;
-        }
-        posAttr.needsUpdate = true;
-        updateHandWalkFxSceneLighting(fx, f, worldPos, xOffset, yOffset, zOffset);
-      }
 
       function clearHandWalkBigFxTrails() {
         if (handWalkBigFx && handWalkBigFx.trailZ) handWalkBigFx.trailZ.fill(0);
@@ -11636,51 +11502,7 @@ let _officeSceneAnimationFrame = 0;
       const handWalkBigFxHalo = createHandWalkBigFxSoftHalo();
       const handWalkBigFxMist = createHandWalkBigFxMist();
 
-      function makeHandWalkFxAxisLabel(text, hexColor) {
-        const c = document.createElement("canvas");
-        c.width = 64;
-        c.height = 64;
-        const ctx = c.getContext("2d");
-        ctx.fillStyle = "#000000";
-        ctx.fillRect(0, 0, 64, 64);
-        ctx.font = "bold 48px sans-serif";
-        ctx.textAlign = "center";
-        ctx.textBaseline = "middle";
-        ctx.fillStyle = "#" + ("000000" + hexColor.toString(16)).slice(-6);
-        ctx.fillText(text, 32, 32);
-        const tex = new THREE.CanvasTexture(c);
-        tex.needsUpdate = true;
-        const mat = new THREE.SpriteMaterial({
-          map: tex,
-          depthTest: false,
-          transparent: true,
-        });
-        const sprite = new THREE.Sprite(mat);
-        sprite.scale.set(0.85, 0.85, 1);
-        sprite.renderOrder = 9999;
-        return sprite;
-      }
 
-      function createHandWalkFxPivotGizmo() {
-        const gizmo = new THREE.Group();
-        gizmo.name = "handWalkFxPivotGizmo";
-        gizmo.visible = false;
-        const axes = new THREE.AxesHelper(HAND_WALK_FX_PIVOT_AXES_SIZE);
-        axes.renderOrder = 9998;
-        gizmo.add(axes);
-        const s = HAND_WALK_FX_PIVOT_AXES_SIZE;
-        const labelX = makeHandWalkFxAxisLabel("X", 0xff0000);
-        labelX.position.set(s, 0, 0);
-        gizmo.add(labelX);
-        const labelY = makeHandWalkFxAxisLabel("Y", 0x00ff00);
-        labelY.position.set(0, s, 0);
-        gizmo.add(labelY);
-        const labelZ = makeHandWalkFxAxisLabel("Z", 0x0000ff);
-        labelZ.position.set(0, 0, s);
-        gizmo.add(labelZ);
-        scene.add(gizmo);
-        return gizmo;
-      }
 
       _handWalkFxPivotGizmo = null;
 
@@ -12071,7 +11893,6 @@ let _officeSceneAnimationFrame = 0;
           const numB = parseInt(b.name.replace(/^flame/, ""), 10) || 0;
           return numA - numB;
         });
-        const _pos = new THREE.Vector3();
         for (let i = 0; i < flameMeshes.length; i++) {
           const flameMesh = flameMeshes[i];
           const effect = createSmallFireEffect();
@@ -13439,14 +13260,6 @@ diffuseColor.a = 1.0;
         });
       }
 
-      const OFFICE_PARTS_SUPPLEMENT_GLTF = officeAsset("office-table-embed87.gltf");
-      const OFFICE_SUPPLEMENT_PART_NAMES = [
-        "conus2", "conusStrips2", "conusPhysic2",
-        "conus3", "conusStrips3", "conusPhysic3",
-        "star", "starPhysic",
-        "headphonesBase", "headphonesEars", "headphonesButtons", "headphonesLight",
-      ];
-
       function modelHasNamedPart(model, name) {
         let found = false;
         model.traverse((node) => {
@@ -13495,49 +13308,6 @@ diffuseColor.a = 1.0;
             next();
           },
         );
-      }
-
-      function withOfficeSupplementParts(model, done) {
-        const missing = OFFICE_SUPPLEMENT_PART_NAMES.filter(
-          (name) => !modelHasNamedPart(model, name),
-        );
-        if (!missing.length) {
-          withDuckPupils(model, done);
-          return;
-        }
-        loader.load(
-          OFFICE_PARTS_SUPPLEMENT_GLTF,
-          (gltf) => {
-            gltf.scene.updateMatrixWorld(true);
-            model.updateMatrixWorld(true);
-            for (const partName of missing) {
-              const src = gltf.scene.getObjectByName(partName);
-              if (!src) continue;
-              const clone = src.clone(true);
-              clone.name = partName;
-              model.attach(clone);
-            }
-            model.updateMatrixWorld(true);
-            refreshShadowsAfterSupplement(model);
-            withDuckPupils(model, done);
-          },
-          undefined,
-          (err) => {
-            console.warn("[office] supplement parts GLTF failed:", err);
-            withDuckPupils(model, done);
-          },
-        );
-      }
-
-      function refreshShadowsAfterSupplement(model) {
-        try {
-          applyWallShadowCasters(model);
-          forceWallCasterShadowState(model);
-          applyTableKnockableShadows(model);
-          refreshTableSideWallShadows(model);
-        } catch (e) {
-          console.warn("Supplement shadow refresh failed:", e);
-        }
       }
 
       function applyTextureAlphaFromLuminance(tex, threshold = 20) {
@@ -13592,52 +13362,6 @@ diffuseColor.a = 1.0;
         return mesh;
       }
 
-      function filterDecalGeometryToFrontHalf(
-        geo,
-        planePoint,
-        worldNormal,
-        margin = 0,
-      ) {
-        const pos = geo.getAttribute("position");
-        if (!pos || pos.count < 3) return false;
-        const uv = geo.getAttribute("uv");
-        const keepPos = [];
-        const keepUv = [];
-        const vA = new THREE.Vector3();
-        const vB = new THREE.Vector3();
-        const vC = new THREE.Vector3();
-        const centroid = new THREE.Vector3();
-        const n = worldNormal.clone().normalize();
-        const plane = planePoint.clone();
-
-        for (let i = 0; i < pos.count; i += 3) {
-          vA.fromBufferAttribute(pos, i);
-          vB.fromBufferAttribute(pos, i + 1);
-          vC.fromBufferAttribute(pos, i + 2);
-          centroid
-            .set(
-              (vA.x + vB.x + vC.x) / 3,
-              (vA.y + vB.y + vC.y) / 3,
-              (vA.z + vB.z + vC.z) / 3,
-            )
-            .sub(plane);
-          if (centroid.dot(n) < margin) continue;
-          for (let j = 0; j < 3; j++) {
-            const idx = i + j;
-            keepPos.push(pos.getX(idx), pos.getY(idx), pos.getZ(idx));
-            if (uv) keepUv.push(uv.getX(idx), uv.getY(idx));
-          }
-        }
-        if (keepPos.length < 9) return false;
-        geo.setAttribute(
-          "position",
-          new THREE.Float32BufferAttribute(keepPos, 3),
-        );
-        if (uv && keepUv.length) {
-          geo.setAttribute("uv", new THREE.Float32BufferAttribute(keepUv, 2));
-        }
-        return true;
-      }
 
       function buildStarFaceDecalGeometry(mesh, viewFrom) {
         const geo = mesh.geometry;
@@ -13942,7 +13666,7 @@ diffuseColor.a = 1.0;
           setupTechDesignerMagnetDecal(model);
           applyPlant1GreenMaterial(model);
           setupPlant1LeafSprites(model);
-          withOfficeSupplementParts(model, () => {
+          withDuckPupils(model, () => {
           try {
             model.updateMatrixWorld(true);
             if (tablePlateMesh && !tablePlateBody) {

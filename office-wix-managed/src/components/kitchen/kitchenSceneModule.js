@@ -9,9 +9,6 @@
       import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
       import { SMAAPass } from "three/addons/postprocessing/SMAAPass.js";
       import { ShaderPass } from "three/addons/postprocessing/ShaderPass.js";
-      import { Reflector } from "three/addons/objects/Reflector.js";
-      import { RGBELoader } from "three/addons/loaders/RGBELoader.js";
-      import { DecalGeometry } from "three/addons/geometries/DecalGeometry.js";
       import { RectAreaLightUniformsLib } from "three/addons/lights/RectAreaLightUniformsLib.js";
       import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
 import { getKitchenSceneMount } from "./kitchenSceneMount.js";
@@ -30,8 +27,7 @@ import {
   raceAiMaxOutward,
 } from "./kitchenRace.js";
 import { SCENE_ROUTES, nextLevelPath } from "../game/sceneRoutes.js";
-import { createCinematicIntro, introEase, introEaseSine, introLerp } from "../game/cinematicIntro.js";
-import { startTransitionStrips, TRANSITION_STRIPS, TRANSITION_STRIP_COLORS } from "../game/transitionStrips.js";
+import { createCinematicIntro, introEaseSine, introLerp } from "../game/cinematicIntro.js";
 import { createPortalRing, portalGlowTexture } from "../game/portalRing.js";
 import { createCarLighting } from "../game/carLighting.js";
 import { addBloomGroup, addThresholdBloom, keepBelowBloomThreshold, setBloomWeight } from "../game/thresholdBloom.js";
@@ -100,16 +96,13 @@ export function isKitchenSceneReady() {
       const _carCamYAxis = new THREE.Vector3(0, 1, 0);
       const _carCamOffset = new THREE.Vector3();
       const _rampJumpCamRestOffset = new THREE.Vector3();
-      const _carCamOrbitRight = new THREE.Vector3();
       const _carCam1ChaseOffset = new THREE.Vector3();
       const _carCam1ReturnTargetOffset = new THREE.Vector3();
       const _carCam1PreMatrixOffset = new THREE.Vector3();
-      const _rampJumpCamDriftOffset = new THREE.Vector3();
       const _carMatrixLookAt = new THREE.Vector3();
       let _carCam1PreserveView = false;
       let _carCam1MatrixReturnActive = false;
       let _carCam1MatrixReturnT = 0;
-      let _carMatrixOrbitDist = 0;
       let _carCam1MatrixOrbitSettled = false;
       const CAR_CAM_MATRIX_RETURN_SPEED = 7;
 
@@ -253,19 +246,6 @@ export function isKitchenSceneReady() {
         setCarCameraFromLookAtOffset(_carCamOffset);
       }
 
-      function snapshotCarOrbitCamRestPose() {
-        if (!isCarCameraOrbitDefault() || !car) return;
-        syncCarOrbitCamAnglesFromPosition(carCamera);
-        _carOrbitCamDistance = Math.max(
-          _carOrbitCamDistance,
-          getCarCameraMinDistance(),
-        );
-        _carCam1OrbitDistSnapshot = _carOrbitCamDistance;
-        _carCam1OrbitElevSnapshot = _carOrbitCamElev;
-        _carCam1OrbitYawSnapshot = _carOrbitCamWorldYaw;
-        _carCam1RestDistance = _carOrbitCamDistance;
-        getCarCameraOffsetFromPosition(carCamera, _carCam1ChaseOffset);
-      }
 
       function restoreCarOrbitCamRestPose(yawFromOffset) {
         if (!isCarCameraOrbitDefault() || !car) return;
@@ -418,32 +398,7 @@ export function isKitchenSceneReady() {
         return x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2;
       }
 
-      function rollRampJumpMatrixCameraStyle() {
-        _rampJumpMatrixPitchBias = THREE.MathUtils.lerp(
-          0.06,
-          0.28,
-          Math.random(),
-        );
-        _rampJumpMatrixAzimuthBias = (Math.random() - 0.5) * 0.85;
-        _rampJumpMatrixSideBias = (Math.random() - 0.5) * 0.48;
-        _rampJumpMatrixOrbitSign = Math.random() < 0.5 ? -1 : 1;
-      }
 
-      function applyRampJumpMatrixCameraDrift(orbitProgress, dist) {
-        const arc = Math.sin(Math.PI * orbitProgress);
-        const spin = Math.sin(orbitProgress * Math.PI * 4);
-        const k = dist * RAMP_JUMP_MATRIX_DRIFT_SCALE;
-        const maxDown = dist * RAMP_JUMP_CAM_MAX_DOWN_DRIFT_FRAC;
-        _rampJumpCamDriftOffset.set(
-          (_rampJumpMatrixSideBias * arc + spin * 0.55) * k,
-          Math.max(_rampJumpMatrixPitchBias * arc * k * 1.15, -maxDown),
-          Math.cos(orbitProgress * Math.PI * 3) *
-            _rampJumpMatrixAzimuthBias *
-            k *
-            0.65,
-        );
-        return _rampJumpCamDriftOffset;
-      }
 
       function getCarCameraMinDistance() {
         if (!car) return 1.1;
@@ -458,9 +413,6 @@ export function isKitchenSceneReady() {
         return Math.max(fitDist, hullDist, 0.75);
       }
 
-      function getCarMatrixOrbitMinDistance() {
-        return getCarCameraMinDistance();
-      }
 
       function clampCarCameraOffsetInPlace(offset) {
         const minDist = getCarCameraMinDistance();
@@ -482,9 +434,6 @@ export function isKitchenSceneReady() {
         return out;
       }
 
-      function getCarMatrixLookAtPoint(out) {
-        return getCarCameraLookAtPoint(out);
-      }
 
       function applyCarCameraLookAtCar() {
         if (!car || camera !== carCamera) return;
@@ -526,63 +475,9 @@ export function isKitchenSceneReady() {
         applyCarCameraLookAtCar();
       }
 
-      function captureRampJumpMatrixCameraBasis() {
-        const minOrbit = getCarMatrixOrbitMinDistance();
-        _carMatrixOrbitDist = Math.max(
-          _rampJumpCamRestOffset.length(),
-          minOrbit,
-        );
-        _carCamOffset.copy(_rampJumpCamRestOffset);
-        const horizLen = Math.hypot(_carCamOffset.x, _carCamOffset.z);
-        _rampJumpMatrixHorizDist = Math.max(horizLen, minOrbit * 0.85);
-        _rampJumpMatrixHeightOff = _carCamOffset.y;
-        _rampJumpMatrixStartAzimuth = Math.atan2(
-          _carCamOffset.x,
-          _carCamOffset.z,
-        );
-        _rampJumpMatrixStartAzimuth += _rampJumpMatrixAzimuthBias * 0.35;
-        const pitchBase = Math.atan2(
-          Math.max(_carCamOffset.y, minOrbit * 0.22),
-          _rampJumpMatrixHorizDist,
-        );
-        _rampJumpMatrixPitch = THREE.MathUtils.clamp(
-          pitchBase + _rampJumpMatrixPitchBias,
-          0.18,
-          0.68,
-        );
-      }
 
-      function buildMatrixOrbitCameraOffset(orbitAngle, orbitDist) {
-        const minDist = getCarMatrixOrbitMinDistance();
-        const dist = Math.max(orbitDist, minDist);
-        const horiz = dist * Math.cos(_rampJumpMatrixPitch);
-        const yOff = dist * Math.sin(_rampJumpMatrixPitch);
-        const azimuth = _rampJumpMatrixStartAzimuth + orbitAngle;
-        _carCamOffset.set(
-          Math.sin(azimuth) * horiz,
-          yOff,
-          Math.cos(azimuth) * horiz,
-        );
-      }
 
-      function getRampJumpAirProgress() {
-        if (jumpInitialVelY <= 0.02) return 0;
-        const totalAirTime =
-          (2 * jumpInitialVelY) / Math.max(0.01, CAR_GRAVITY);
-        return THREE.MathUtils.clamp(_rampJumpSimAirTime / totalAirTime, 0, 1);
-      }
 
-      function getRampJumpMatrixOrbitProgress() {
-        const span = Math.max(
-          1e-3,
-          RAMP_JUMP_MATRIX_ORBIT_AIR_END - RAMP_JUMP_MATRIX_ORBIT_AIR_START,
-        );
-        return THREE.MathUtils.clamp(
-          (getRampJumpAirProgress() - RAMP_JUMP_MATRIX_ORBIT_AIR_START) / span,
-          0,
-          1,
-        );
-      }
 
       function getMatrixJumpGravityScale() {
         return 1;
@@ -633,28 +528,6 @@ export function isKitchenSceneReady() {
         controls.update();
       }
 
-      function switchToFreeCamera() {
-        if (camera === testCamera) return;
-        const sourceCamera = camera;
-        const freeTarget = controls?.target?.clone() || car?.position?.clone() || new THREE.Vector3();
-        testCamera.position.copy(sourceCamera.position);
-        testCamera.quaternion.copy(sourceCamera.quaternion);
-        camera = testCamera;
-        renderScenePass.camera = camera;
-        camera.aspect = window.innerWidth / window.innerHeight;
-        camera.updateProjectionMatrix();
-        controls.dispose();
-        controls = createOrbitControls(camera);
-        controls.target.copy(freeTarget);
-        controls.enableZoom = true;
-        controls.enablePan = true;
-        controls.screenSpacePanning = true;
-        controls.minDistance = 0.1;
-        controls.maxDistance = 1000;
-        controls.minPolarAngle = 0;
-        controls.maxPolarAngle = Math.PI;
-        controls.update();
-      }
 
       function placeCarViewCameras(lookAt, maxDim) {
         const zoom = 0.18;
@@ -1824,8 +1697,6 @@ export function isKitchenSceneReady() {
       let lightBlend = 0;
       let lightBlendTarget = 0;
       const LIGHT_FADE_DURATION = 0.2;
-      /** Tris spacing / compact mode only once blend crosses this (bright side). */
-      const LIGHT_BLEND_TRIS_BRIGHT_THRESHOLD = 0.5;
       const _cDark = new THREE.Color();
       const _cBright = new THREE.Color();
       function applyLightBlend(b) {
@@ -2036,7 +1907,6 @@ export function isKitchenSceneReady() {
       // --- Car from car-game13.gltf (loaded when table is ready) ---
       // GLTF wheel names: wheelFl=front left, wheelFr=front right, wheelRl=rear left, wheelRr=rear right
       const WHEEL_RADIUS = 0.28;
-      const TABLE_WHEEL_CLEARANCE = 0;
       let halfW = 0.6,
         halfL = 1.0,
         carBodyHalfY = 0.25,
@@ -2051,8 +1921,6 @@ export function isKitchenSceneReady() {
       const _quatWheelRollOpposite = new THREE.Quaternion();
       const _axisWheelY = new THREE.Vector3(0, 1, 0);
       const _axisWheelRoll = new THREE.Vector3(1, 0, 0);
-      const _axisSteerLocal = new THREE.Vector3();
-      const _quatBaseInv = new THREE.Quaternion();
       let airInParts = [];
       const _quatAirInDrive = new THREE.Quaternion();
       const _axisAirInDrive = new THREE.Vector3(1, 0, 0);
@@ -2072,12 +1940,9 @@ export function isKitchenSceneReady() {
         canonRRBody = null;
       let canonBodyMesh = null,
         canonBodyPhys = null;
-      let carWheelBox = null;
-      let carWheelBoxPhys = null;
       const _canonWorldPos = new THREE.Vector3();
       const _canonWorldQuat = new THREE.Quaternion();
       const _canonBodyLocalCenter = new THREE.Vector3();
-      const _airTiltUp = new THREE.Vector3();
       const _wheelSyncWorldPos = [
         new THREE.Vector3(),
         new THREE.Vector3(),
@@ -2085,7 +1950,6 @@ export function isKitchenSceneReady() {
         new THREE.Vector3(),
       ];
       const _wheelsList = [null, null, null, null];
-      const _wheelHadBottom = [false, false, false, false];
       const car = new THREE.Group();
       car.rotation.order = "YXZ";
       scene.add(car);
@@ -2141,32 +2005,12 @@ export function isKitchenSceneReady() {
       };
       const CAR_GRAVITY = 75;
       const CAR_AIR_RESISTANCE = 0.08;
-      const CAR_RAMP_JUMP_MULTIPLIER = 2;
-      const CAR_RAMP_JUMP_MIN_SPEED = 5;
-      const RAMP_JUMP_MATRIX_CHANCE = 0.4;
-      const RAMP_JUMP_CAM_ZOOM = 0.88;
-      const RAMP_JUMP_CAM_ZOOM_PEAK = 0.58;
-      const RAMP_JUMP_CAM_ZOOM_MATRIX_PEAK = 1;
-      const RAMP_JUMP_CAM_ZOOM_MATRIX_ORBIT_END = 0.38;
-      const RAMP_JUMP_MATRIX_ZOOM_MIN_FRAC = 0.65;
-      const RAMP_JUMP_MATRIX_DRIFT_SCALE = 0.14;
       const RAMP_JUMP_CAM_TABLE_CLEARANCE = 0.28;
-      const RAMP_JUMP_CAM_MAX_DOWN_DRIFT_FRAC = 0.12;
       const RAMP_JUMP_MATRIX_ORBIT = Math.PI * 2;
-      const RAMP_JUMP_MATRIX_ORBIT_AIR_START = 0.04;
-      const RAMP_JUMP_MATRIX_ORBIT_AIR_END = 0.94;
-      const RAMP_JUMP_MATRIX_GRAVITY_SCALE = 0.11;
-      const RAMP_JUMP_MATRIX_TILT = 0.24;
-      const RAMP_JUMP_EFFECT_LERP = 7;
-      const RAMP_JUMP_LAND_CLEARANCE = 0.55;
-      const RAMP_JUMP_EASE_IN_SEC = 0.32;
-      const RAMP_JUMP_EASE_OUT_START = 1.35;
       const LAND_CAM_SHAKE_DURATION = 0.42;
       const LAND_CAM_SHAKE_LOOK = 1.05;
-      const CAR_DRIVEABLE_PROP_MAX_STEP = 0.65;
       const CAR_STEP_SURF_DELTA_MIN = 0.004;
       const CAR_STEP_HEIGHT_LERP = 18;
-      const CAR_STEP_TILT_LERP = 14;
       const keys = {
         forward: false,
         reverse: false,
@@ -2175,7 +2019,6 @@ export function isKitchenSceneReady() {
         brake: false,
       };
 
-      const maxCarDistance = 80;
       let tableSpawn = new THREE.Vector3(0, 0, 0);
       let tableMinY = 0;
       let tableSurfaceY = 0;
@@ -2215,17 +2058,9 @@ let _worldSwitched = false;
       const _kitchenFloorColorDark = new THREE.Color(0x171b2f);
       const _kitchenFloorColorBright = new THREE.Color(0xffffff);
       const _KITCHEN_SHADOW_MAP = 256;
-      const _DEFAULT_SHADOW_MAP = 512;
       const _KITCHEN_FLOOR_STRIPE_MIN = 45;
       const _KITCHEN_FLOOR_STRIPE_MAX = 90;
       let _kitchenNishInstanced = null;
-      const _kitchenShadowCamOffice = {
-        far: 50,
-        left: -6,
-        right: 6,
-        top: 6,
-        bottom: -6,
-      };
       const _kitchenShadowCamKitchen = {
         far: 40,
         left: -9,
@@ -2537,8 +2372,7 @@ let _worldSwitched = false;
       let carFloorTimer = 0;
       let tablePlateMesh = null;
       let storedCarScale = 0.5;
-      let carBottomOffsetY = 0;
-      let carPhysicsHalfY = 0; // kept for compatibility
+      let carBottomOffsetY = 0; // kept for compatibility
 
       function isControlKey(code) {
         return [
@@ -2582,10 +2416,7 @@ let _worldSwitched = false;
         enabled: () => _kitchenSceneRendering && _kIntro.state === "done",
       });
 
-      const TILT_SPEED_MIN_LERP = 0.4;
-      const TILT_SPEED_MAX_LERP = 1.2;
       const _flatUp = new THREE.Vector3(0, 1, 0);
-      const _stepTiltUp = new THREE.Vector3(0, 1, 0);
       let _carFrontAxleSurfY = 0;
       let _carRearAxleSurfY = 0;
       let _carGroundSurfY = 0;
@@ -2593,14 +2424,10 @@ let _worldSwitched = false;
       const _carWheelSurfY = [0, 0, 0, 0];
       const _quatY = new THREE.Quaternion();
       const _quatTilt = new THREE.Quaternion();
-      const _tiltAxis = new THREE.Vector3();
       const carUpLerp = new THREE.Vector3(0, 1, 0);
-      const jumpLaunchUp = new THREE.Vector3(0, 1, 0);
-      let jumpStartTime = 0;
       let jumpLaunchSpeed = 0;
       let jumpInitialVelY = 0;
       let _rampJumpSimAirTime = 0;
-      const LANDING_TILT_LERP = 120;
       const LANDING_RECOVERY_DURATION = 0.3;
       let wasInAir = false;
       let _carLandShakePending = false;
@@ -2609,23 +2436,8 @@ let _worldSwitched = false;
       let _rampJumpFxBlend = 0;
       let _rampJumpFxIn = 0;
       let _carCam1JumpEffect = 0;
-      let _rampJumpMatrixOrbitSign = 1;
       let _rampJumpMatrixOrbitProgress = 0;
-      let _rampJumpMatrixHorizDist = 0;
-      let _rampJumpMatrixHeightOff = 0;
-      let _rampJumpMatrixStartAzimuth = 0;
-      let _rampJumpMatrixPitch = 0.35;
-      let _rampJumpMatrixPitchBias = 0;
-      let _rampJumpMatrixAzimuthBias = 0;
-      let _rampJumpMatrixSideBias = 0;
       let landingRecoveryUntil = 0;
-      const _v0 = new THREE.Vector3();
-      const _v1 = new THREE.Vector3();
-      const _v2 = new THREE.Vector3();
-      const _v3 = new THREE.Vector3();
-      const _surfEdgeA = new THREE.Vector3();
-      const _surfEdgeB = new THREE.Vector3();
-      const _surfNormalB = new THREE.Vector3();
       let tablePlateBody = null;
       let floorPhysBody = null;
       const PHYS_GROUP_DEFAULT = 1;
@@ -6026,7 +5838,6 @@ let _worldSwitched = false;
       const _kIntroV = new THREE.Vector3();
       const _kIntroV2 = new THREE.Vector3();
 
-      const _kIntroEase = introEase;
       const _kIntroEaseSine = introEaseSine;
       const _kIntroLerp = introLerp;
       const _kIntroDeg = Math.PI / 180;
@@ -6183,7 +5994,6 @@ let _worldSwitched = false;
 
       // ── Intro shot 3: Mister Spot firing its lasers ──────────────────────────
       const _kIntroSpotBox = new THREE.Box3();
-      const _kIntroSpotC = new THREE.Vector3();
       const _kIntroSpotA = new THREE.Vector3();
       const _kIntroSpotB = new THREE.Vector3();
 
@@ -9295,9 +9105,7 @@ let _worldSwitched = false;
       const FLAME_EFFECT_PARTICLE_COUNT = 60;
       const FLAME_EFFECT_SPREAD = 0.06;
       const FLAME_EFFECT_SIZE = 320;
-      const FLAME_EFFECT_ABOVE = 0.38;
       const FLAME_EFFECT_RISE_SPEED = 2.5;
-      const FLAME_EFFECT_RISE_DISTANCE = 7.0;
       const flameEffectVertexShader = `
       attribute vec3 color;
       varying vec3 vColor;
@@ -9490,22 +9298,7 @@ let _worldSwitched = false;
         carLighting.setupTableLightReflections(carRoot, list);
       }
 
-      const _beamFrontPoint = new THREE.Vector3();
-      const _beamRearPoint = new THREE.Vector3();
 
-      function getHeadlightBeamCarLength(tableY) {
-        let front = null;
-        let rear = null;
-        for (let gi = 0; gi < tableLightGlows.length; gi++) {
-          const e = tableLightGlows[gi];
-          if (!front && e.kind === "front") front = e;
-          if (!rear && (e.kind === "rear" || e.kind === "brake")) rear = e;
-        }
-        if (!front || !rear) return 2.4 * car.scale.x;
-        carLighting.getMeshTableReflectionPoint(front, tableY, _beamFrontPoint);
-        carLighting.getMeshTableReflectionPoint(rear, tableY, _beamRearPoint);
-        return Math.max(0.5, _beamFrontPoint.distanceTo(_beamRearPoint));
-      }
 
       /**
        * The table top's sharp highlights (the cars' lamp spot lights, e.g. the
@@ -9567,32 +9360,6 @@ let _worldSwitched = false;
           mesh.parent.add(effect.points);
           exhaustEffects.push(effect);
         }
-      }
-      function remapMeshUVsToFullQuad(mesh) {
-        if (!mesh?.geometry?.attributes?.uv) return;
-        const uv = mesh.geometry.attributes.uv;
-        let uMin = Infinity,
-          uMax = -Infinity,
-          vMin = Infinity,
-          vMax = -Infinity;
-        for (let i = 0; i < uv.count; i++) {
-          const u = uv.getX(i);
-          const v = uv.getY(i);
-          if (u < uMin) uMin = u;
-          if (u > uMax) uMax = u;
-          if (v < vMin) vMin = v;
-          if (v > vMax) vMax = v;
-        }
-        const du = uMax - uMin || 1;
-        const dv = vMax - vMin || 1;
-        for (let i = 0; i < uv.count; i++) {
-          uv.setXY(
-            i,
-            (uv.getX(i) - uMin) / du,
-            (uv.getY(i) - vMin) / dv,
-          );
-        }
-        uv.needsUpdate = true;
       }
       function _safeRemoveBody(body) {
         if (!body) return;
@@ -9863,9 +9630,6 @@ let _worldSwitched = false;
       let _kitchenTableTopLampOverlay = null;
       let _kitchenTableTopStencilWriter = null;
 
-      function _kitchenMeshReceivesLampLight(name) {
-        return name === "mainTableTopPlane";
-      }
 
       function _isKitchenTableCoverPlane(name) {
         return name === "mainTableTopPlane" || name === "mainTableSidePlane";
@@ -9882,18 +9646,6 @@ let _worldSwitched = false;
         return tex;
       }
 
-      function _kitchenCoverMatFromTextures(map, normalMap, roughnessMap, aoMap) {
-        return new THREE.MeshStandardMaterial({
-          map,
-          normalMap,
-          roughnessMap,
-          aoMap,
-          roughness: 1,
-          metalness: 0,
-          envMapIntensity: 0.35,
-          side: THREE.DoubleSide,
-        });
-      }
 
       function _kitchenCoverMatLite(
         map,
@@ -10276,7 +10028,6 @@ let _worldSwitched = false;
       const _laserEnd = new THREE.Vector3();
       const _laserQuat = new THREE.Quaternion();
       const _laserUp = new THREE.Vector3(0, 1, 0);
-      const _laserBox = new THREE.Box3();
 
       function _laserBloom(obj) {
         obj.layers.enable(CAR_LIGHTS_BLOOM_LAYER);
@@ -11590,11 +11341,6 @@ let _worldSwitched = false;
               metalness: 0.0,
               envMapIntensity: 1.0,
             });
-            const _applyCeramic = (root, material) => {
-              root.traverse((n) => {
-                if (n.isMesh) n.material = material;
-              });
-            };
 
             let _coverCloneStepX = null;
             let _tableCoverLampMat = null;
@@ -12067,14 +11813,6 @@ let _worldSwitched = false;
               }
               if (kept.length >= 3) cloned.setIndex(kept);
               mesh.geometry = cloned;
-            };
-            const _useFrontSideMaterial = (mesh) => {
-              const sourceMat = Array.isArray(mesh.material) ? mesh.material[0] : mesh.material;
-              if (!sourceMat) return;
-              const mat = sourceMat.clone();
-              mat.side = THREE.FrontSide;
-              mat.needsUpdate = true;
-              mesh.material = mat;
             };
             const _dropOverlappingShells = (mesh) => {
               const geo = mesh.geometry;
@@ -14074,41 +13812,6 @@ let _worldSwitched = false;
         setTier: (tier) => setPerformanceTier(tier, "manual"),
       };
 
-      function computeCarGroundNormalFromWheels(out) {
-        _v0.set(
-          _wheelSyncWorldPos[0].x,
-          _carWheelSurfY[0],
-          _wheelSyncWorldPos[0].z,
-        );
-        _v1.set(
-          _wheelSyncWorldPos[1].x,
-          _carWheelSurfY[1],
-          _wheelSyncWorldPos[1].z,
-        );
-        _v2.set(
-          _wheelSyncWorldPos[2].x,
-          _carWheelSurfY[2],
-          _wheelSyncWorldPos[2].z,
-        );
-        _v3.set(
-          _wheelSyncWorldPos[3].x,
-          _carWheelSurfY[3],
-          _wheelSyncWorldPos[3].z,
-        );
-        _surfEdgeA.subVectors(_v1, _v0);
-        _surfEdgeB.subVectors(_v2, _v0);
-        out.crossVectors(_surfEdgeA, _surfEdgeB);
-        _surfEdgeA.subVectors(_v3, _v1);
-        _surfEdgeB.subVectors(_v2, _v1);
-        _surfNormalB.crossVectors(_surfEdgeA, _surfEdgeB);
-        out.add(_surfNormalB);
-        if (out.lengthSq() < 1e-10) {
-          out.set(0, 1, 0);
-          return;
-        }
-        out.normalize();
-        if (out.y < 0) out.negate();
-      }
 
       /**
        * Driving physics shared by every car (player and AI): speed from the

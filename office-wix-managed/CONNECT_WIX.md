@@ -51,15 +51,9 @@ The office scene loads from `public/office-scene-optimized/`. If assets are miss
 
 `../public/office-scene-optimized/` → `public/office-scene-optimized/`.
 
-## 2. Regenerate the scene module (optional)
+## 2. Scene code
 
-If you update the source HTML in the sibling `car-game-wix-table` tree (see `scripts/build-office-scene-module.mjs`), run:
-
-```bash
-npm run sync-office
-```
-
-Or set `OFFICE_HTML` to an absolute path to `office-scene.html`.
+The scene modules (`src/components/office-copy/`, `kitchen/`, `meeting-room/`) are edited directly, as mirrors of the same files under the parent app's `src/` (they're no longer generated from HTML).
 
 ## 3. Link to Wix (device login)
 

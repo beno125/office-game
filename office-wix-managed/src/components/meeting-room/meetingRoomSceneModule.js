@@ -2198,8 +2198,6 @@ let _tableLightGlowGeo = null;
 let _tableHeadlightBeamGeo = null;
 const HEADLIGHT_BEAM_ASPECT = 652 / 326;
 const _lightGlowPoint = new THREE.Vector3();
-const _beamFrontPoint = new THREE.Vector3();
-const _beamRearPoint = new THREE.Vector3();
 const _tabletFaceFlat = new THREE.Vector3();
 
 function getTableLightGlowTexture() {
@@ -2315,8 +2313,6 @@ function createTableLightGlowSprite(tint, baseSize, kind = "") {
 
 const _carLightFwd = new THREE.Vector3();
 const _carLightRight = new THREE.Vector3();
-const _lightGlowBox = new THREE.Box3();
-const _lightGlowCenter = new THREE.Vector3();
 const _lightGlowCorner = new THREE.Vector3();
 const _lampCarBox = new THREE.Box3();
 
@@ -2427,19 +2423,6 @@ function setupTableLightReflections(carRoot) {
   });
 }
 
-function getHeadlightBeamCarLength(tableY) {
-  let front = null;
-  let rear = null;
-  for (let gi = 0; gi < tableLightGlows.length; gi++) {
-    const e = tableLightGlows[gi];
-    if (!front && e.kind === "front") front = e;
-    if (!rear && (e.kind === "rear" || e.kind === "brake")) rear = e;
-  }
-  if (!front || !rear) return Math.max(0.12, 2.4 * car.scale.x);
-  getMeshTableReflectionPoint(front, tableY, _beamFrontPoint);
-  getMeshTableReflectionPoint(rear, tableY, _beamRearPoint);
-  return Math.max(0.12, _beamFrontPoint.distanceTo(_beamRearPoint));
-}
 
 /** Each car's lamp spots and table glows follow that car (its own heading and brake). */
 function updateArenaCarLights() {
@@ -4280,23 +4263,6 @@ function _vecs(n) {
   return Array.from({ length: n }, () => new THREE.Vector3());
 }
 
-/** A collider piece from a box in a mesh's local space (world pose from the mesh). */
-function _cabledBoxPiece(name, mesh, localBox, mass, fit = 1, localYaw = 0) {
-  if (localBox.isEmpty()) return null;
-  const wpos = new THREE.Vector3();
-  const wq = new THREE.Quaternion();
-  const ws = new THREE.Vector3();
-  mesh.matrixWorld.decompose(wpos, wq, ws);
-  const centre = localBox.getCenter(new THREE.Vector3());
-  if (localYaw) centre.applyAxisAngle(new THREE.Vector3(0, 1, 0), localYaw);
-  centre.applyMatrix4(mesh.matrixWorld);
-  const half = localBox.getSize(new THREE.Vector3()).multiply(ws).multiplyScalar(0.5);
-  half.set(Math.abs(half.x), Math.abs(half.y), Math.abs(half.z * fit));
-  half.set(Math.max(0.004, half.x), Math.max(0.004, half.y), Math.max(0.004, half.z));
-  const q = wq.clone();
-  if (localYaw) q.multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), localYaw));
-  return { name, centre, q, half, mass, kind: "box" };
-}
 
 // --- tablet shape -------------------------------------------------------------
 function _tabletPieces(group) {

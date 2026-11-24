@@ -11,8 +11,6 @@
     "build": "wix build",
     "preview": "wix preview",
     "astro": "astro",
-    "sync-office": "node scripts/build-office-scene-module.mjs",
-    "sync-kitchen": "node scripts/build-kitchen-scene-module.mjs",
     "wix": "wix",
     "release": "wix release",
     "generate": "wix generate",

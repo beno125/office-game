@@ -15,7 +15,6 @@ npm run dev:wix-astro    # Same app via plain `astro dev` (no Wix proxy; use if 
 npm run build            # Vite → dist/
 npm run build:wix        # Wix Astro production build only
 npm run build:all        # Vite + Wix Astro
-npm run sync-office      # rebuild src/office/officeSceneModule.js from office-scene.html
 ```
 
 ### Wix Headless (self-managed)
@@ -39,27 +38,17 @@ On Vercel/Netlify, set `VITE_WIX_CLIENT_ID` in the host’s **Environment Variab
 
 **Go live (self-hosted):** see [DEPLOY.md](./DEPLOY.md).
 
-## Office scene port (Three.js + cannon-es)
+## Scenes (Three.js + cannon-es)
 
-Dependencies match the original HTML import map: **`three@^0.160`** and **`cannon-es@^0.20`**.
+Dependencies: **`three@^0.160`** and **`cannon-es@^0.20`**. Each level is a code-split module that appends its WebGL canvas to a mount set by its React component, and loads its files from `public/` (e.g. `officeAsset()` → `/office-scene-optimized/...`):
 
-1. **Copy assets** from your `office-scene-optimized` folder into **`public/office-scene-optimized/`** (same filenames as before: `office-table-embed65.gltf`, `car-game12.gltf`, `airPlane2.gltf`, textures, `.mp4`, etc.). Without these, loads will fail (see the browser console).
-2. **Regenerate the ported module** after you edit the source HTML (optional; the repo already contains `src/office/officeSceneModule.js`):
+| Level | Module | Model |
+|------|--------|-------|
+| Office | `src/office-copy/officeSceneModule.js` | `public/office-scene-optimized/office-scene1.glb` |
+| Kitchen | `src/kitchen/kitchenSceneModule.js` (+ `src/kitchen/*.js`) | `public/kitchen-scene-optimized/ul-kitchen28.glb` |
+| Meeting room | `src/meeting-room/meetingRoomSceneModule.js` | `public/meeting-room-optimized/` |
 
-   ```bash
-   npm run sync-office
-   ```
-
-   By default the script reads `../car-game-wix-table/office-scene-optimized/office-scene.html`. Override with  
-   `OFFICE_HTML=/absolute/path/to/office-scene.html npm run sync-office`.
-
-3. **Run** — `npm run dev`. The scene code is **code-split** into `officeSceneModule-*.js` (~1.1 MB minified).
-
-`OfficeScene.jsx` calls `setOfficeSceneMount()` then **dynamic-imports** `officeSceneModule.js`, which appends the WebGL canvas to that mount. Local files resolve under `/office-scene-optimized/...` via `officeAsset()`.
-
-**Note:** The script may load **`office-table-embed34.gltf`** as a fallback. If you do not have it, add it next to the other assets or change the constant in the HTML before running `sync-office`.
-
-After step 1, open the app in the browser — you should get the full table scene (not the old placeholder cube).
+The modules are edited directly (they're no longer generated from HTML files). Every change in `src/` is mirrored to the same file under `office-wix-managed/src/components/`, and `public/` assets to `office-wix-managed/public/`.
 
 ## Porting checklist (from one HTML file + inline script + JSON)
 

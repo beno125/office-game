@@ -27,7 +27,7 @@ Use when you want the CLI to scaffold everything, then you paste code in.
 
 Use when you prefer an explicit **Astro 5** app, then link it to Wix in one command ([Connect an existing Astro project](https://dev.wix.com/docs/go-headless/wix-managed-headless/get-started/connect-an-existing-astro-project.md)).
 
-**In-repo starter:** this repository already contains **`office-wix-managed/`** — an Astro 5 + React copy of the scene, `public/office-scene-optimized/`, and `scripts/build-office-scene-module.mjs` wired to output under `src/components/office/`. Open [`office-wix-managed/README.md`](./office-wix-managed/README.md) and [`office-wix-managed/CONNECT_WIX.md`](./office-wix-managed/CONNECT_WIX.md), then run `headless link` from that folder after you sign in with the Wix CLI.
+**In-repo starter:** this repository already contains **`office-wix-managed/`** — an Astro 5 + React copy of the scene, `public/office-scene-optimized/`. Open [`office-wix-managed/README.md`](./office-wix-managed/README.md) and [`office-wix-managed/CONNECT_WIX.md`](./office-wix-managed/CONNECT_WIX.md), then run `headless link` from that folder after you sign in with the Wix CLI.
 
 1. In a **new directory** (or skip and use `office-wix-managed/` above):
 
@@ -77,7 +77,6 @@ Use when you prefer an explicit **Astro 5** app, then link it to Wix in one comm
 | `src/index.css` | Merge into global styles: e.g. `src/styles/global.css` imported from `Layout.astro`, or `<style is:global>` — keep `#perfBadge` rules. |
 | `src/wixClient.js` | **Review after link.** Wix-managed projects often preconfigure the SDK; you may drop manual `OAuthStrategy` + `VITE_WIX_CLIENT_ID` if the template handles auth. Keep the file only if you still need a custom client. |
 | `public/office-scene-optimized/**` | Copy entire folder → `public/office-scene-optimized/` in the Astro project. Large binaries unchanged. |
-| `scripts/build-office-scene-module.mjs` | Copy → same path under new repo root. Keep `npm run sync-office` in `package.json` if you still sync from `office-scene.html`. |
 | `index.html` | **Do not copy as the app shell.** Astro generates HTML; your scene mounts from the `.astro` + React island. |
 | `vite.config.js` | **Do not copy.** Astro uses `astro.config.mjs`. |
 | `vercel.json` / `netlify.toml` | **Optional.** Wix hosts production; remove or keep only if you also deploy elsewhere. |

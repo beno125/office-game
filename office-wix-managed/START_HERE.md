@@ -93,15 +93,9 @@ Replace `<siteId>` with the value from **`wix.config.json`** (the `siteId` field
 
 ---
 
-### 6. Optional: regenerate the big scene file from HTML
+### 6. Scene code
 
-Only if you maintain `office-scene.html` elsewhere and want to rebuild the module:
-
-```bash
-npm run sync-office
-```
-
-See `scripts/build-office-scene-module.mjs` and env var **`OFFICE_HTML`** if paths differ.
+The scene modules are edited directly (mirrors of the parent app's `src/`); they're no longer generated from HTML.
 
 ---
 

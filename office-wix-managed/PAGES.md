@@ -47,7 +47,7 @@ components/
 3. **Loader overlay:** “Loading office world…” then “Filling the gums tank…”.
 4. Overlay fades when gums settle; player stays on `/`.
 
-The scene emits `office-scene:gums-tank-initial-settled` once (wired in `build-office-scene-module.mjs`, not in your table HTML doc).
+The scene emits `office-scene:gums-tank-initial-settled` once.
 
 ## Future: table → kitchen
 
@@ -55,17 +55,9 @@ The scene emits `office-scene:gums-tank-initial-settled` once (wired in `build-o
 - **Shell:** `onOfficeSceneEvent(...)` → `window.location.href = SCENE_ROUTES.kitchen` (or Astro client navigate).
 - **Kitchen page:** loads same car GLTF (`car-game13.gltf`), new room GLTF, smaller bundle.
 
-## Syncing table scene updates
+## Scene updates
 
-When you send an updated `office-scene.html`:
-
-```bash
-# copy assets to public/office-scene-optimized/
-npm run sync-office
-cd office-wix-managed && node scripts/build-office-scene-module.mjs
-```
-
-The gums-settle hook is re-applied by the build script on every sync.
+The scene modules are edited directly in `src/` (and mirrored to `office-wix-managed/src/components/`); they're no longer generated from `office-scene.html`.
 
 ## Performance notes
 
