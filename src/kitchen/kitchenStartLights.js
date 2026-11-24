@@ -60,8 +60,8 @@ export const KITCHEN_START_LIGHTS = {
   },
   reflection: {
     strength: 0.9, // a lit lamp's reflection brightness on the table (added to the table's own light)
-    width: 0.035, // across the view (direction difference: smaller = narrower)
-    length: 0.09, // along the view (same units; a little longer than wide, like a light on a glossy floor)
+    width: 0.14, // across the view (model units round the mirror point; a lens is 0.23 wide)
+    length: 0.42, // along the view (model units; a little longer than wide, like a light on a glossy floor)
     facingSoft: 0.35, // fades out as the view goes round to the lamp's side (0 from behind it)
     breakup: 0.45, // 0 = smooth, 1 = broken up like a wet surface
   },
@@ -299,20 +299,30 @@ void main() {`,
         .replace(
           "#include <opaque_fragment>",
           `{
-  vec3 V = normalize(cameraPosition - vLampWorld);
-  vec3 Rr = vec3(-V.x, V.y, -V.z); // the view reflected off the (level) table
-  vec3 fwd = normalize(vec3(Rr.x, 0.0, Rr.z) + vec3(1e-5, 0.0, 0.0));
-  vec3 side = vec3(-fwd.z, 0.0, fwd.x);
+  // Per lamp, its mirror point on the table: where the line from the camera to the lamp's image below the table
+  // (mirrored in the table's plane) crosses it. The reflection is a small streak round that point, in world units,
+  // a little longer along the view than across: it stays anchored there and the same size from any angle.
+  float ty = vLampWorld.y;
   float wet = mix(1.0, 0.35 + 1.1 * lampNoise(vLampWorld.xz * 9.0), uReflBreakup);
   vec3 refl = vec3(0.0);
-  for (int i = 0; i < ${MAXL}; i++) {
-    if (dot(uLampCol[i], uLampCol[i]) < 1e-8) continue;
-    vec3 D = normalize(uLampPos[i] - vLampWorld);
-    float across = dot(D - Rr, side);
-    float along = D.y - Rr.y; // elevation difference: the streak runs along the view
-    float lobe = exp(-(across * across) / (uReflShape.x * uReflShape.x) - (along * along) / (uReflShape.y * uReflShape.y));
-    float faceOn = clamp(dot(uLampFacing, -D) / uReflShape.z, 0.0, 1.0); // the lens faces this point
-    refl += uLampCol[i] * lobe * faceOn;
+  if (cameraPosition.y > ty + 1e-3) {
+    for (int i = 0; i < ${MAXL}; i++) {
+      if (dot(uLampCol[i], uLampCol[i]) < 1e-8) continue;
+      vec3 Lm = vec3(uLampPos[i].x, 2.0 * ty - uLampPos[i].y, uLampPos[i].z);
+      float s = (cameraPosition.y - ty) / max(1e-4, cameraPosition.y - Lm.y);
+      vec2 M = mix(cameraPosition.xz, Lm.xz, s);
+      vec2 toCam = cameraPosition.xz - M;
+      float lenTC = length(toCam);
+      vec2 fwd = lenTC > 1e-4 ? toCam / lenTC : vec2(1.0, 0.0);
+      vec2 d = vLampWorld.xz - M;
+      float along = dot(d, fwd);
+      float across = dot(d, vec2(-fwd.y, fwd.x));
+      float lobe = exp(-(across * across) / (uReflShape.x * uReflShape.x) - (along * along) / (uReflShape.y * uReflShape.y));
+      // Only where the lens faces the mirror point (nothing from behind or beside the traffic light).
+      vec3 D = normalize(uLampPos[i] - vec3(M.x, ty, M.y));
+      float faceOn = clamp(dot(uLampFacing, -D) / uReflShape.z, 0.0, 1.0);
+      refl += uLampCol[i] * lobe * faceOn;
+    }
   }
   outgoingLight += refl * wet;
 }
