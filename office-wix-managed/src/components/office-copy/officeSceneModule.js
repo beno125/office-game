@@ -2098,6 +2098,27 @@ let _officeSceneAnimationFrame = 0;
         blocksInput: () => _officeSceneRendering,
       });
 
+      /**
+       * Objects drawn with frustum culling off for one warm-up frame (restored right after it).
+       * compile() doesn't make every variant a real frame draws (the glass's back-face
+       * transmission pass, for one): objects outside the first shot compiled those when
+       * the intro first showed them (the gum tank, the air-in parts, the certificate:
+       * 10–75 ms each). One frame behind the loader drawing everything makes them.
+       */
+      const _officeWarmupUnculled = [];
+      function beginOfficeWarmupUncull() {
+        scene.traverse((o) => {
+          if (o.frustumCulled && (o.isMesh || o.isPoints || o.isLine || o.isSprite)) {
+            o.frustumCulled = false;
+            _officeWarmupUnculled.push(o);
+          }
+        });
+      }
+      function endOfficeWarmupUncull() {
+        for (let i = 0; i < _officeWarmupUnculled.length; i++) _officeWarmupUnculled[i].frustumCulled = true;
+        _officeWarmupUnculled.length = 0;
+      }
+
       /** Behind the loader: car placed and gums settled, a few frames already drawn at the first shot. */
       function updateOfficeSceneReady() {
         if (_officeSceneReady || !_officeGameplayCam) return;
@@ -2116,11 +2137,19 @@ let _officeSceneAnimationFrame = 0;
         // "portal on" variant when the drawer opened, a 110 ms hitch).
         if (_officeReadyFrames % OFFICE_READY_WARMUP_STEP_FRAMES === 0) {
           applyLightBlend(step.blend);
+          // Into the frames' own target: the scene is drawn into the composer's buffer
+          // (linear output, no tone mapping), so compiling for the screen (sRGB + ACES)
+          // made programs no frame uses, and the real ones compiled during the intro.
+          const prevTarget = renderer.getRenderTarget();
           try {
+            renderer.setRenderTarget(finalComposer.readBuffer);
             renderer.compile(scene, camera);
           } catch (err) {
             console.warn("[office] shader warm-up failed:", err);
+          } finally {
+            renderer.setRenderTarget(prevTarget);
           }
+          beginOfficeWarmupUncull();
         }
         _officeReadyFrames++;
         if (_officeReadyFrames < OFFICE_READY_WARMUP_FRAMES) return;
@@ -5414,6 +5443,52 @@ let _officeSceneAnimationFrame = 0;
         allowSleep: true,
       });
       physicsWorld.broadphase = new CANNON.SAPBroadphase(physicsWorld);
+      /**
+       * A trimesh's AABB query keeps only the triangles whose own box overlaps the query box.
+       * cannon's octree returns every triangle stored at a node the box touches, and long
+       * triangles (the gum tank's walls) sit near its root: ~540 of the tank's 1,320 came back
+       * for each gum, ~66 ms of narrowphase per physics step while the 230 gums settle.
+       * A triangle outside the box can't touch the shape, so contacts are unchanged.
+       */
+      function tightenTrimeshAabbQuery(trimesh) {
+        const v = trimesh.vertices;
+        const ix = trimesh.indices;
+        const triCount = ix.length / 3;
+        const box = new Float32Array(triCount * 6); // per triangle: min x y z, max x y z (unscaled)
+        for (let t = 0; t < triCount; t++) {
+          const o = t * 6;
+          box[o] = box[o + 1] = box[o + 2] = Infinity;
+          box[o + 3] = box[o + 4] = box[o + 5] = -Infinity;
+          for (let k = 0; k < 3; k++) {
+            const vi = ix[t * 3 + k] * 3;
+            for (let a = 0; a < 3; a++) {
+              const c = v[vi + a];
+              if (c < box[o + a]) box[o + a] = c;
+              if (c > box[o + 3 + a]) box[o + 3 + a] = c;
+            }
+          }
+        }
+        const treeQuery = trimesh.getTrianglesInAABB.bind(trimesh);
+        trimesh.getTrianglesInAABB = (aabb, result) => {
+          const start = result.length;
+          treeQuery(aabb, result);
+          const s = trimesh.scale;
+          const l = aabb.lowerBound;
+          const u = aabb.upperBound;
+          const lx = Math.min(l.x / s.x, u.x / s.x), ux = Math.max(l.x / s.x, u.x / s.x);
+          const ly = Math.min(l.y / s.y, u.y / s.y), uy = Math.max(l.y / s.y, u.y / s.y);
+          const lz = Math.min(l.z / s.z, u.z / s.z), uz = Math.max(l.z / s.z, u.z / s.z);
+          let w = start;
+          for (let i = start; i < result.length; i++) {
+            const o = result[i] * 6;
+            if (box[o] > ux || box[o + 3] < lx || box[o + 1] > uy || box[o + 4] < ly || box[o + 2] > uz || box[o + 5] < lz) continue;
+            result[w++] = result[i];
+          }
+          result.length = w;
+          return result;
+        };
+        return trimesh;
+      }
       // Pair bodies by their boxes, not bounding spheres: a flat desk box's sphere covers every gum.
       physicsWorld.broadphase.useBoundingBoxes = true;
       physicsWorld.solver.iterations = perfSettings.physicsIterations;
@@ -8367,6 +8442,7 @@ let _officeSceneAnimationFrame = 0;
         }
         const tri = new CANNON.Trimesh(verts, triInds);
         tri.updateTree();
+        tightenTrimeshAabbQuery(tri);
         tri.updateNormals();
         const body = new CANNON.Body({
           type: CANNON.Body.STATIC,
@@ -13754,6 +13830,7 @@ diffuseColor.a = 1.0;
               }
               const tri = new CANNON.Trimesh(rampVerts, rampTriInds);
               tri.updateTree();
+              tightenTrimeshAabbQuery(tri);
               tri.updateNormals();
               const body = new CANNON.Body({
                 type: CANNON.Body.STATIC,
@@ -13842,6 +13919,7 @@ diffuseColor.a = 1.0;
               }
               const tri = new CANNON.Trimesh(verts, triInds);
               tri.updateTree();
+              tightenTrimeshAabbQuery(tri);
               tri.updateNormals();
               const body = new CANNON.Body({
                 type: CANNON.Body.STATIC,
@@ -13919,6 +13997,7 @@ diffuseColor.a = 1.0;
                 }
                 const bodyTri = new CANNON.Trimesh(bVerts, dblInds);
                 bodyTri.updateTree();
+                tightenTrimeshAabbQuery(bodyTri);
                 bodyTri.updateNormals();
                 gumsBodyPhysBody = new CANNON.Body({
                   type: CANNON.Body.STATIC,
@@ -14049,6 +14128,7 @@ diffuseColor.a = 1.0;
                 }
                 const rampTri = new CANNON.Trimesh(rVerts, rDblInds);
                 rampTri.updateTree();
+                tightenTrimeshAabbQuery(rampTri);
                 rampTri.updateNormals();
                 gumsRampPhysBody = new CANNON.Body({
                   type: CANNON.Body.STATIC,
@@ -17966,10 +18046,12 @@ diffuseColor.a = 1.0;
           if (shadowRefresh && macScreenMesh && macScreenMesh.castShadow)
             renderer.shadowMap.needsUpdate = true; // mac pass hid the screen
           finalComposer.render();
+          if (_officeWarmupUnculled.length) endOfficeWarmupUncull();
           if (sceneBloomEnabled) setCarLightsEmissiveForMainPass(false);
           officeIntro.restoreCamera();
           officeCameraDrag.restore(camera);
         } catch (e) {
+          if (_officeWarmupUnculled.length) endOfficeWarmupUncull();
           officeIntro.restoreCamera();
           officeCameraDrag.restore(camera);
           console.error("Animate error:", e);
