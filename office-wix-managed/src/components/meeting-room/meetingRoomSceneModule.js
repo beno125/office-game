@@ -214,7 +214,7 @@ function _arenaDarkOf(bright, scale) {
  */
 const MR_BRIGHT_LOOK = {
   board: { color: 0xe9eae7, envMapIntensity: 1.25 },
-  wallPattern: { color: 0xf3f0e9, emissive: 0xeee8dd },
+  wallPattern: { color: 0xf5ebd8, emissive: 0xf0e2c6 }, // a little warmer than the first step (0xf3f0e9 / 0xeee8dd)
 };
 const EXPOSURE_BRIGHT = 0.74;
 const LIGHT_FADE_DURATION = 0.2;
