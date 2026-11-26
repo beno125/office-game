@@ -1923,7 +1923,7 @@ export function isKitchenSceneReady() {
        * the way the race rails do, by a soft glow of their own colour (emissive = colour × this; 0 = none),
        * per mode (lerped with the light blend). Below the rails' strength and below the bloom threshold.
        */
-      const KITCHEN_TOP_CLOSET_FRAME_GLOW = { dark: 0.3, bright: 0.12 };
+      const KITCHEN_TOP_CLOSET_FRAME_GLOW = { dark: 0.15, bright: 0.06 }; // (was 0.3 / 0.12: too much)
       let _kTopClosetFrameMats = [];
       function _kFindTopClosetFrames() {
         const names = ["leftTopClosetMatalFrame", "midTopClosetMatalFrame", "rightTopClosetMatalFrame"];
