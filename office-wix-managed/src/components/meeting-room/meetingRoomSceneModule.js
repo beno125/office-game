@@ -209,8 +209,8 @@ function _arenaDarkOf(bright, scale) {
  * Bright Mode colours of the whiteboards and the wall patterns (the intro runs in it). Dark Mode keeps its
  * colours exactly (still made from their original bright colours).
  * - boards (boardRight / boardFront / boardLeft): a touch less white (was 0xf7f7f4; reflections 1.45).
- * - wallPattern (wallFront / wallLeft / wallRightPattern, their own copy of the matt paint; pannelStrips and
- *   tzokel keep it): whiter, less warm (was 0xf8e2b8, its glow 0xf3d19c).
+ * - wallPattern (wallFront / wallLeft / wallRightPattern and pannelStrips, their own copy of the matt paint;
+ *   tzokel keeps it): whiter, less warm (was 0xf8e2b8, its glow 0xf3d19c).
  */
 const MR_BRIGHT_LOOK = {
   board: { color: 0xe9eae7, envMapIntensity: 1.25 },
@@ -8233,8 +8233,8 @@ function applyMeetingRoomMaterials(root) {
   assignMaterial(root, ["cameraLansBig"], blackPlastic);
   assignMaterial(root, ["cameraLansSmall"], greenLight, true);
   assignMaterial(root, ["tabletsideLight"], tabletSideLightMat, true);
-  assignMaterial(root, ["pannelStrips", "tzokel"], whiteMattPaint);
-  assignMaterial(root, ["wallLeftPattern", "wallRightPattern", "wallFrontPattern"], wallPatternPaint);
+  assignMaterial(root, ["tzokel"], whiteMattPaint);
+  assignMaterial(root, ["wallLeftPattern", "wallRightPattern", "wallFrontPattern", "pannelStrips"], wallPatternPaint);
   assignMaterial(root, ["chairSeat"], brightGreyNet);
   assignMaterial(root, ["doorGlass", "wndowGlass"], frostedGlass, true);
   assignMaterial(root, ["tabletPowerLight"], whiteLight, true);
