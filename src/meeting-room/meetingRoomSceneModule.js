@@ -216,9 +216,9 @@ const MR_BRIGHT_LOOK = {
   board: { color: 0xe9eae7, envMapIntensity: 1.25 },
   wallPattern: { color: 0xf5ebd8, emissive: 0xf0e2c6 },
   /** backWallWood: the tint over its wood texture (linear, per channel; was 1.2 / 1.22 / 1.16, a reddish
-   *  brown on screen, ~#855F55), lighter and toward a light oak (reference ~#ECCB9F): on screen ~#CDAF8A,
-   *  the reference's tone (measured in a bright-mode render). */
-  backWallWood: [3.6, 4.0, 2.5], // a little warmer than the first step (0xf3f0e9 / 0xeee8dd)
+   *  brown on screen, ~#855F55), a little lighter and toward a light oak's tone (reference ~#ECCB9F; the
+   *  first step, 3.6 / 4.0 / 2.5, ~#CDAF8A on screen, was too light). */
+  backWallWood: [2.4, 2.65, 1.7], // a little warmer than the first step (0xf3f0e9 / 0xeee8dd)
 };
 const EXPOSURE_BRIGHT = 0.74;
 const LIGHT_FADE_DURATION = 0.2;
