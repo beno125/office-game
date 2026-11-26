@@ -7685,6 +7685,218 @@ function applyMeetingRoomScreenMaterials(root, map) {
   }
 }
 
+// --- tablet screen -----------------------------------------------------------
+/**
+ * tabletScreen: a lit meeting-room panel's home screen (after a reference photo of one; no brands): a light
+ * screen with a left rail (Home / Contacts / Settings), the time and date along the top (the real local time,
+ * redrawn when the minute changes), "No upcoming meetings" with a Refresh button on the left half, and the call
+ * tiles on the right (New meeting, Join, Share; Room call below). Drawn once into a canvas texture on the
+ * screen's own quad (unlit, like the old plain grey light); `brightness` scales it (1 = the canvas as drawn).
+ */
+const TABLET_SCREEN = {
+  width: 1024, // canvas pixels (the screen is 1.6 : 1)
+  height: 640,
+  brightness: 0.85,
+  colors: {
+    bg: "#eceef1",
+    rail: "#e2e5e9",
+    divider: "#cfd3d8",
+    text: "#2b2f36",
+    textSoft: "#5d636c",
+    orange: "#ef5a2b",
+    blue: "#1f5fd6",
+    yellow: "#f2b83a",
+  },
+};
+let _tabletScreen = null;
+function drawTabletScreen(S) {
+  const { ctx: g, canvas } = S;
+  const C = TABLET_SCREEN.colors;
+  const W = canvas.width, H = canvas.height;
+  const font = (w, px) => `${w} ${px}px "Helvetica Neue", Arial, sans-serif`;
+  const rr = (x, y, w, h, r) => {
+    g.beginPath();
+    g.roundRect(x, y, w, h, r);
+  };
+  // Background, the left rail, the divider between the halves.
+  g.fillStyle = C.bg;
+  g.fillRect(0, 0, W, H);
+  g.fillStyle = C.rail;
+  g.fillRect(0, 0, W * 0.09, H);
+  g.fillStyle = C.divider;
+  g.fillRect(W * 0.42, 0, 2, H);
+  // Time and date.
+  const now = new Date();
+  g.fillStyle = C.text;
+  g.textBaseline = "middle";
+  g.textAlign = "left";
+  g.font = font(600, 30);
+  g.fillText(`${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`, W * 0.115, H * 0.09);
+  g.font = font(400, 20);
+  g.fillStyle = C.textSoft;
+  g.fillText(now.toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" }), W * 0.245, H * 0.09);
+  // Left rail: Home, Contacts, Settings (line icons with labels).
+  g.strokeStyle = C.textSoft;
+  g.fillStyle = C.textSoft;
+  g.lineWidth = 2.5;
+  g.lineJoin = "round";
+  g.lineCap = "round";
+  g.textAlign = "center";
+  g.font = font(400, 13);
+  const rx = W * 0.045;
+  const icon = (y, draw, label) => {
+    draw(rx, y);
+    g.fillText(label, rx, y + 30);
+  };
+  icon(H * 0.38, (x, y) => {
+    g.beginPath();
+    g.moveTo(x - 14, y + 14);
+    g.lineTo(x - 14, y - 2);
+    g.lineTo(x, y - 15);
+    g.lineTo(x + 14, y - 2);
+    g.lineTo(x + 14, y + 14);
+    g.closePath();
+    g.stroke();
+  }, "Home");
+  icon(H * 0.55, (x, y) => {
+    rr(x - 14, y - 15, 28, 30, 6);
+    g.stroke();
+    g.beginPath();
+    g.arc(x, y - 4, 5, 0, Math.PI * 2);
+    g.stroke();
+    g.beginPath();
+    g.moveTo(x - 8, y + 9);
+    g.quadraticCurveTo(x, y + 1, x + 8, y + 9);
+    g.stroke();
+  }, "Contacts");
+  icon(H * 0.72, (x, y) => {
+    g.beginPath();
+    for (let i = 0; i < 16; i++) {
+      const a = (i / 16) * Math.PI * 2;
+      const r = i % 2 ? 11 : 15;
+      g[i ? "lineTo" : "moveTo"](x + Math.cos(a) * r, y + Math.sin(a) * r);
+    }
+    g.closePath();
+    g.stroke();
+    g.beginPath();
+    g.arc(x, y, 5, 0, Math.PI * 2);
+    g.stroke();
+  }, "Settings");
+  // Left half: no meetings, Refresh.
+  const lx = W * 0.255;
+  g.font = font(400, 19);
+  g.fillStyle = C.textSoft;
+  g.fillText("No upcoming meetings", lx, H * 0.5);
+  rr(lx - 80, H * 0.555, 160, 42, 8);
+  g.strokeStyle = C.textSoft;
+  g.lineWidth = 2;
+  g.stroke();
+  g.fillStyle = C.text;
+  g.font = font(600, 18);
+  g.fillText("Refresh", lx, H * 0.555 + 21);
+  // Right half: the call tiles.
+  const T = 82;
+  const tile = (cx, cy, fill, draw, label, outline) => {
+    rr(cx - T / 2, cy - T / 2, T, T, 20);
+    if (outline) {
+      g.fillStyle = "#ffffff";
+      g.fill();
+      g.strokeStyle = C.textSoft;
+      g.lineWidth = 2;
+      g.stroke();
+    } else {
+      g.fillStyle = fill;
+      g.fill();
+    }
+    draw(cx, cy);
+    g.fillStyle = C.textSoft;
+    g.font = font(400, 16);
+    g.textAlign = "center";
+    g.fillText(label, cx, cy + T / 2 + 20);
+  };
+  const camera = (cx, cy, col) => {
+    g.fillStyle = col;
+    rr(cx - 22, cy - 13, 30, 26, 6);
+    g.fill();
+    g.beginPath();
+    g.moveTo(cx + 11, cy - 3);
+    g.lineTo(cx + 22, cy - 11);
+    g.lineTo(cx + 22, cy + 11);
+    g.lineTo(cx + 11, cy + 3);
+    g.closePath();
+    g.fill();
+  };
+  const ty = H * 0.42;
+  tile(W * 0.6, ty, C.orange, (cx, cy) => camera(cx, cy, "#ffffff"), "New meeting");
+  tile(W * 0.73, ty, C.blue, (cx, cy) => {
+    rr(cx - 20, cy - 20, 40, 40, 6);
+    g.strokeStyle = "#ffffff";
+    g.lineWidth = 3;
+    g.stroke();
+    g.beginPath();
+    g.moveTo(cx, cy - 11);
+    g.lineTo(cx, cy + 11);
+    g.moveTo(cx - 11, cy);
+    g.lineTo(cx + 11, cy);
+    g.stroke();
+  }, "Join");
+  tile(W * 0.86, ty, C.blue, (cx, cy) => {
+    rr(cx - 21, cy - 15, 42, 30, 6);
+    g.fillStyle = "#ffffff";
+    g.fill();
+    g.strokeStyle = C.blue;
+    g.lineWidth = 3;
+    g.beginPath();
+    g.moveTo(cx, cy + 9);
+    g.lineTo(cx, cy - 8);
+    g.moveTo(cx - 7, cy - 1);
+    g.lineTo(cx, cy - 8);
+    g.lineTo(cx + 7, cy - 1);
+    g.stroke();
+  }, "Share");
+  tile(W * 0.6, H * 0.72, null, (cx, cy) => camera(cx, cy, C.yellow), "Room call", true);
+  S.minute = now.getHours() * 60 + now.getMinutes();
+  S.tex.needsUpdate = true;
+}
+function applyTabletScreen(root) {
+  const mesh = root.getObjectByName("tabletScreen");
+  if (!mesh || !mesh.isMesh) return;
+  // Own UVs over the quad (its local x across, y up; it faces +z).
+  const geo = mesh.geometry.clone();
+  geo.computeBoundingBox();
+  const bb = geo.boundingBox;
+  const pos = geo.attributes.position;
+  const uv = new Float32Array(pos.count * 2);
+  for (let i = 0; i < pos.count; i++) {
+    uv[i * 2] = (pos.getX(i) - bb.min.x) / (bb.max.x - bb.min.x);
+    uv[i * 2 + 1] = (pos.getY(i) - bb.min.y) / (bb.max.y - bb.min.y);
+  }
+  geo.setAttribute("uv", new THREE.BufferAttribute(uv, 2));
+  mesh.geometry = geo;
+  if (_tabletScreen) {
+    clearInterval(_tabletScreen.timer);
+    _tabletScreen.tex.dispose();
+    _tabletScreen.mat.dispose();
+  }
+  const canvas = document.createElement("canvas");
+  canvas.width = TABLET_SCREEN.width;
+  canvas.height = TABLET_SCREEN.height;
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy());
+  const mat = new THREE.MeshBasicMaterial({ map: tex, toneMapped: false });
+  mat.color.setScalar(TABLET_SCREEN.brightness);
+  mesh.material = mat;
+  const S = { canvas, ctx: canvas.getContext("2d"), tex, mat, minute: -1, timer: 0 };
+  drawTabletScreen(S);
+  // The clock: redrawn only when the minute changes.
+  S.timer = setInterval(() => {
+    const now = new Date();
+    if (now.getHours() * 60 + now.getMinutes() !== S.minute) drawTabletScreen(S);
+  }, 5000);
+  _tabletScreen = S;
+}
+
 function applyMeetingRoomMaterials(root) {
   _reflectiveMats = [];
   const tablePlateColor =
@@ -8018,6 +8230,7 @@ function applyMeetingRoomMaterials(root) {
   assignMaterial(root, ["lordCupRight"], redPlastic);
   assignMaterial(root, ["acRemoteButtonsLeft"], greyRubber);
   assignMaterial(root, ["acRemoteScreenLeft", "tabletScreen"], greySoftLight, true);
+  applyTabletScreen(root); // tabletScreen: its lit home screen (TABLET_SCREEN)
   assignMaterial(root, ["plantBase"], plantBasePlastic);
   _reflectiveMats.push(
     glossyWhiteBoard,
