@@ -1943,6 +1943,68 @@ export function isKitchenSceneReady() {
           m.emissiveIntensity = 1;
         }
       }
+      /**
+       * dishwasherDoor perforated (after the reference image): a grid of round holes through the door, `cols` ×
+       * `rows`, evenly spaced. Positions are shares of the door's front (0 = left / top, 1 = right / bottom):
+       * the first and last hole centres in each direction; the bottom is left plain (a wider band). Drawn in the
+       * door's shader (its own material; no geometry change) as dark openings: the cabinet front sits right
+       * behind the door (0.16 away), so holes cut through would only show that same face.
+       */
+      const KITCHEN_DISHWASHER_HOLES = {
+        enabled: true,
+        cols: 9,
+        rows: 11,
+        x: [0.106, 0.89], // first / last column centre, across the width
+        y: [0.082, 0.843], // first / last row centre, down the height
+        diameter: 0.045, // × the door's width
+        color: 0x0b0b0c, // inside a hole (dark: the cabinet's inside)
+      };
+      let _kDishwasherHolesMat = null;
+      function _kPerforateDishwasherDoor() {
+        const H = KITCHEN_DISHWASHER_HOLES;
+        const door = scene.getObjectByName("dishwasherDoor");
+        if (!H.enabled || !door || !door.isMesh || Array.isArray(door.material) || door.material === _kDishwasherHolesMat) return;
+        door.geometry.computeBoundingBox();
+        const bb = door.geometry.boundingBox; // the door's local x (width) / y (height); it faces +z
+        const mat = door.material;
+        _kDishwasherHolesMat = mat;
+        const u = {
+          uHoleMin: { value: new THREE.Vector2(bb.min.x, bb.min.y) },
+          uHoleSize: { value: new THREE.Vector2(bb.max.x - bb.min.x, bb.max.y - bb.min.y) },
+          uHoleGrid: { value: new THREE.Vector2(H.cols, H.rows) },
+          uHoleX: { value: new THREE.Vector2(H.x[0], H.x[1]) },
+          uHoleY: { value: new THREE.Vector2(H.y[0], H.y[1]) },
+          uHoleR: { value: (H.diameter * (bb.max.x - bb.min.x)) / 2 },
+          uHoleCol: { value: new THREE.Color(H.color) },
+        };
+        const prevCompile = mat.onBeforeCompile;
+        mat.onBeforeCompile = (sh, r) => {
+          if (prevCompile) prevCompile(sh, r);
+          Object.assign(sh.uniforms, u);
+          sh.vertexShader = "varying vec2 vHoleP;\n" + sh.vertexShader.replace("#include <begin_vertex>", "#include <begin_vertex>\nvHoleP = position.xy;");
+          sh.fragmentShader =
+            "varying vec2 vHoleP;\nuniform vec2 uHoleMin, uHoleSize, uHoleGrid, uHoleX, uHoleY;\nuniform float uHoleR;\nuniform vec3 uHoleCol;\n" +
+            sh.fragmentShader.replace(
+              "#include <opaque_fragment>",
+              `#include <opaque_fragment>
+              {
+                // Share across (0 left → 1 right) and down (0 top → 1 bottom), to the nearest hole's centre.
+                vec2 q = vec2((vHoleP.x - uHoleMin.x) / uHoleSize.x, 1.0 - (vHoleP.y - uHoleMin.y) / uHoleSize.y);
+                vec2 a = vec2(uHoleX.x, uHoleY.x);
+                vec2 step = vec2(uHoleX.y - uHoleX.x, uHoleY.y - uHoleY.x) / max(uHoleGrid - 1.0, vec2(1.0));
+                vec2 k = clamp(floor((q - a) / step + 0.5), vec2(0.0), uHoleGrid - 1.0);
+                vec2 d = (q - (a + k * step)) * uHoleSize;
+                float l = length(d);
+                float aa = max(fwidth(l), 1e-4);
+                float hole = 1.0 - smoothstep(uHoleR - aa, uHoleR + aa, l); // a smooth edge, one pixel wide
+                gl_FragColor.rgb = mix(gl_FragColor.rgb, uHoleCol, hole);
+              }`,
+            );
+        };
+        const prevKey = mat.customProgramCacheKey ? mat.customProgramCacheKey.bind(mat) : () => "";
+        mat.customProgramCacheKey = () => prevKey() + "|dishwasherHoles";
+        mat.needsUpdate = true;
+      }
       function _kRegisterBrightLook() {
         if (!KITCHEN_BRIGHT_LOOK.enabled || _kBrightLook.length) return;
         const baseName = (n) => n.replace(/_\d+$/, ""); // a multi-material mesh's parts (name_1, name_2)
@@ -14498,6 +14560,7 @@ let _worldSwitched = false;
         _kitchenWarmup.state = "running";
         try {
           _kRegisterBrightLook(); // bright mode's photo look (everything's loaded now)
+          _kPerforateDishwasherDoor(); // its holes (KITCHEN_DISHWASHER_HOLES), on the bright look's material
           _kFindTopClosetFrames(); // their glow (KITCHEN_TOP_CLOSET_FRAME_GLOW), after the bright look's copies
           _kApplyTopClosetFrameGlow(lightBlend);
           // The plates' food settles first (off-screen physics, a time budget per frame).
