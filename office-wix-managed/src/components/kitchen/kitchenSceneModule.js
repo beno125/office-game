@@ -2006,97 +2006,90 @@ export function isKitchenSceneReady() {
         mat.needsUpdate = true;
       }
       /**
-       * The iced coffee tank's glowing liquid (dark mode) spills a little of its light on what's round it: the
-       * side wall, the back wall and the counter top. Not a real light (a light would change every lit
-       * material's shader and cost per pixel everywhere): one soft glow patch per surface, added on top of it
-       * (additive, unlit, one shared gradient texture; the bloom weights in the image's alpha left as they are).
-       * Each surface is found by a ray from the tank's centre (`dirs`); a patch is `size` × its distance across
-       * and `strength` bright, fading out with bright mode (no glow then: the liquid is iced coffee).
+       * The iced coffee tank's glowing liquid (dark mode) lights what's round it a little: the walls, the counter,
+       * the machine itself, the fridge, shelves and cups nearby. Not a real light (that would change every lit
+       * material's shader and cost per pixel everywhere): the materials of the meshes within `range` of the
+       * tank get a small light term of their own, added to their emissive (a soft point glow at the liquid's
+       * centre: `strength` × colour × the surface's own colour, facing it, falling off with distance as
+       * 1 / (1 + (d / `radius`)²) and to nothing at `range`). No shadows (it reaches through the machine a
+       * little). Fades out with bright mode (the liquid is iced coffee then). A few math ops a pixel on those
+       * materials only; compiled with them in the warm-up.
        */
       const KITCHEN_ICE_COFFEE_SPILL = {
         enabled: true,
         color: [0.95, 0.0, 0.38], // the liquid's hot purple (linear)
-        size: 2.2, // a patch's diameter, × its distance from the tank
-        dirs: [
-          { dir: [-1, 0, 0], strength: 0.32 }, // the side wall beside it
-          { dir: [0, 0, -1], strength: 0.22 }, // the back wall behind it
-          { dir: [0, -1, 0], strength: 0.26 }, // the counter top under it
-        ],
-        lift: 0.03, // off the surface
+        strength: 0.4,
+        radius: 3, // world units: the fall-off's knee
+        range: 13, // world units: nothing beyond
       };
-      const _kIceSpill = { mats: [], group: null };
+      const _kIceSpill = {
+        uniforms: {
+          uSpillPos: { value: new THREE.Vector3() },
+          uSpillCol: { value: new THREE.Vector3() },
+          uSpillK: { value: new THREE.Vector3() }, // radius, range, strength × (1 - bright)
+        },
+        mats: new WeakSet(),
+      };
+      function _kApplyIceCoffeeSpill(b) {
+        const C = KITCHEN_ICE_COFFEE_SPILL;
+        _kIceSpill.uniforms.uSpillK.value.set(C.radius, C.range, C.strength * (1 - b));
+      }
       function _kBuildIceCoffeeSpill() {
         const C = KITCHEN_ICE_COFFEE_SPILL;
         const water = scene.getObjectByName("iceCoffeeWater");
         if (!C.enabled || !water) return;
-        if (_kIceSpill.group) {
-          _kIceSpill.group.removeFromParent();
-          for (const m of _kIceSpill.mats) m.dispose();
-          _kIceSpill.mats.length = 0;
-          if (_kIceSpill.tex) _kIceSpill.tex.dispose();
-        }
-        // A soft round falloff.
-        const N = 64;
-        const cv = document.createElement("canvas");
-        cv.width = cv.height = N;
-        const g2 = cv.getContext("2d");
-        const grad = g2.createRadialGradient(N / 2, N / 2, 0, N / 2, N / 2, N / 2);
-        for (let i = 0; i <= 8; i++) {
-          const t = i / 8;
-          grad.addColorStop(t, `rgba(255,255,255,${(Math.exp(-t * t * 4) - Math.exp(-4)) / (1 - Math.exp(-4))})`);
-        }
-        g2.fillStyle = grad;
-        g2.fillRect(0, 0, N, N);
-        const tex = new THREE.CanvasTexture(cv);
-        _kIceSpill.tex = tex;
+        const U = _kIceSpill.uniforms;
         const centre = new THREE.Box3().setFromObject(water).getCenter(new THREE.Vector3());
-        const targets = [];
+        U.uSpillPos.value.copy(centre);
+        U.uSpillCol.value.set(...C.color);
+        _kApplyIceCoffeeSpill(lightBlend);
+        const box = new THREE.Box3();
         scene.traverse((o) => {
-          if (o.isMesh && o.visible && !/^iceCoffee/.test(o.name)) targets.push(o);
+          if (!o.isMesh || /^iceCoffee(Water|Surface|Glass|Tank)$/.test(o.name)) return;
+          box.setFromObject(o);
+          if (box.isEmpty() || box.distanceToPoint(centre) > C.range) return;
+          for (const m of Array.isArray(o.material) ? o.material : [o.material]) {
+            if (!m || !m.isMeshStandardMaterial || _kIceSpill.mats.has(m)) continue;
+            _kIceSpill.mats.add(m);
+            const prevCompile = m.onBeforeCompile;
+            m.onBeforeCompile = (sh, r) => {
+              if (prevCompile) prevCompile(sh, r);
+              Object.assign(sh.uniforms, U);
+              sh.vertexShader =
+                "varying vec3 vSpillW;\n" +
+                sh.vertexShader.replace(
+                  "#include <project_vertex>",
+                  `#include <project_vertex>
+                  {
+                    vec4 sw = vec4(transformed, 1.0);
+                    #ifdef USE_INSTANCING
+                      sw = instanceMatrix * sw;
+                    #endif
+                    vSpillW = (modelMatrix * sw).xyz;
+                  }`,
+                );
+              sh.fragmentShader =
+                "varying vec3 vSpillW;\nuniform vec3 uSpillPos, uSpillCol, uSpillK;\n" +
+                sh.fragmentShader.replace(
+                  "#include <emissivemap_fragment>",
+                  `#include <emissivemap_fragment>
+                  if (uSpillK.z > 0.0) {
+                    // The tank's glow (KITCHEN_ICE_COFFEE_SPILL): facing it, by distance.
+                    vec3 L = uSpillPos - vSpillW;
+                    float d = length(L);
+                    vec3 nW = inverseTransformDirection(normal, viewMatrix);
+                    float facing = clamp(dot(nW, L / max(d, 1e-4)) * 0.8 + 0.2, 0.0, 1.0);
+                    float q = d / uSpillK.x;
+                    float fall = (1.0 / (1.0 + q * q)) * (1.0 - smoothstep(uSpillK.y * 0.6, uSpillK.y, d));
+                    totalEmissiveRadiance += uSpillCol * diffuseColor.rgb * (uSpillK.z * fall * facing);
+                  }`,
+                );
+            };
+            const prevKey = m.customProgramCacheKey ? m.customProgramCacheKey.bind(m) : () => "";
+            m.customProgramCacheKey = () => prevKey() + "|iceSpill";
+            m.needsUpdate = true;
+          }
         });
-        const ray = new THREE.Raycaster();
-        const group = new THREE.Group();
-        group.name = "iceCoffeeSpill";
-        for (const D of C.dirs) {
-          ray.set(centre, new THREE.Vector3(...D.dir).normalize());
-          const hit = ray.intersectObjects(targets, false)[0];
-          if (!hit || !hit.face) continue;
-          // Facing the tank (whichever way the face's normal points).
-          const n = hit.face.normal.clone().transformDirection(hit.object.matrixWorld);
-          if (n.dot(ray.ray.direction) > 0) n.negate();
-          const mat = new THREE.MeshBasicMaterial({
-            map: tex,
-            color: new THREE.Color(...C.color),
-            transparent: true,
-            depthWrite: false,
-            toneMapped: false,
-            blending: THREE.CustomBlending,
-            blendEquation: THREE.AddEquation,
-            blendSrc: THREE.SrcAlphaFactor,
-            blendDst: THREE.OneFactor,
-            blendSrcAlpha: THREE.ZeroFactor, // the image's alpha (bloom weights) kept as it is
-            blendDstAlpha: THREE.OneFactor,
-            polygonOffset: true,
-            polygonOffsetFactor: -2,
-            polygonOffsetUnits: -2,
-          });
-          mat.userData.spillStrength = D.strength;
-          mat.opacity = D.strength * (1 - lightBlend);
-          const d = C.size * hit.distance;
-          const patch = new THREE.Mesh(new THREE.PlaneGeometry(d, d), mat);
-          patch.position.copy(hit.point).addScaledVector(n, C.lift);
-          patch.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), n);
-          patch.renderOrder = 3;
-          patch.castShadow = patch.receiveShadow = false;
-          patch.name = "iceCoffeeSpillPatch";
-          group.add(patch);
-          _kIceSpill.mats.push(mat);
-        }
-        // With the kitchen model (it goes when the model does).
-        let root = water;
-        while (root.parent && root.parent !== scene) root = root.parent;
-        root.attach(group);
-        _kIceSpill.group = group;
       }
       function _kRegisterBrightLook() {
         if (!KITCHEN_BRIGHT_LOOK.enabled || _kBrightLook.length) return;
@@ -2289,7 +2282,7 @@ export function isKitchenSceneReady() {
           }
         }
         if (_iceCoffeeTankMat) _iceCoffeeTankMat.uniforms.uBright.value = b; // shared with its surface
-        for (const m of _kIceSpill.mats) m.opacity = m.userData.spillStrength * (1 - b); // its light: dark mode only
+        _kApplyIceCoffeeSpill(b); // the tank's light round it: dark mode only
         for (const e of _kBrightLook) {
           e.mat.color.lerpColors(e.darkColor, e.brightColor, b);
           if (e.L.roughness != null) e.mat.roughness = e.darkRough + (e.L.roughness - e.darkRough) * b;
