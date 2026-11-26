@@ -21,6 +21,7 @@ import {
   introLerp,
 } from "../game/cinematicIntro.js";
 import { createCameraDrag } from "../game/cameraDrag.js";
+import { createOfficeDog } from "./officeDog.js";
 import { createCarLighting } from "../game/carLighting.js";
 import { createTouchDrive } from "../game/touch/touchDrive.js";
 import { addThresholdBloom, BLOOM_EMISSIVE, BLOOM_WEIGHT_ALPHA_BASE, setBloomWeight } from "../game/thresholdBloom.js";
@@ -6917,6 +6918,33 @@ let _officeSceneAnimationFrame = 0;
       }
 
       function showTablePlateWireframe() {
+      }
+
+      /**
+       * The office dog (officeDog.js): a life-size border collie lying on the floor in front of the desk, to
+       * its right (seen from the gameplay camera past the desk's edge). Office units per metre from the desk
+       * (its top ~20.6 above the floor, a 0.75 m desk); `at` is on the floor (x, z), facing `faceToward`.
+       */
+      const OFFICE_DOG_PLACE = { unitsPerMeter: 27.5, at: [24, 17], faceToward: [-9, 23] };
+      let _officeDog = null;
+      function setupOfficeDog(model) {
+        let floorMesh = null;
+        model.traverse((node) => {
+          if (node.isMesh && node.name === "floor") floorMesh = node;
+        });
+        if (!floorMesh) return;
+        if (_officeDog) {
+          _officeDog.object.removeFromParent();
+          _officeDog.dispose();
+        }
+        _officeDog = createOfficeDog(THREE);
+        const P = OFFICE_DOG_PLACE;
+        const o = _officeDog.object;
+        o.scale.setScalar(P.unitsPerMeter);
+        const floorTop = new THREE.Box3().setFromObject(floorMesh).max.y;
+        o.position.set(P.at[0], floorTop, P.at[1]);
+        o.rotation.y = Math.atan2(-(P.faceToward[1] - P.at[1]), P.faceToward[0] - P.at[0]); // its +x (nose) that way
+        model.attach(o);
       }
 
       function setupFloorPhysics(model) {
@@ -14658,6 +14686,11 @@ diffuseColor.a = 1.0;
             console.warn("Floor physics setup failed:", e);
           }
           try {
+            setupOfficeDog(model);
+          } catch (e) {
+            console.warn("Office dog setup failed:", e);
+          }
+          try {
             setupTableSideWallPhysics(model);
           } catch (e) {
             console.warn("tableSideWall physics setup failed:", e);
@@ -16823,6 +16856,7 @@ diffuseColor.a = 1.0;
                 Math.max(perfMaxCarSteps, Math.ceil(dt / carDt)),
               );
           trackPerformanceFrame(rawDt);
+          if (_officeDog) _officeDog.update(Math.min(rawDt, 0.1)); // the dog's breathing, tail and head
           let physicsStepDt = dt;
           const gumsTankBusy =
             gumsReadyToDrop ||
