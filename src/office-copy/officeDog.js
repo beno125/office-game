@@ -23,7 +23,9 @@ export const OFFICE_DOG = {
    * other (`blend`, metres) and meshed by marching cubes at `bodyRes` / `headRes` cells across (finer = smoother,
    * slower to build, once); black and white blend over `colourSoft` metres.
    */
-  surface: { bodyRes: 88, headRes: 64, blend: 0.045, colourSoft: 0.006, maxTris: 140000 },
+  surface: { bodyRes: 92, headRes: 64, blend: 0.045, colourSoft: 0.006, maxTris: 160000 },
+  /** The coat's tufts: up to `amount` metres out from the shapes (× each shape's fluff), `tuft` metres across. */
+  fur: { amount: 0.016, tuft: 0.03 },
   roughness: 0.82,
   breathe: { period: 2.6, amount: 0.018 }, // s; the chest's rise (share of its height)
   /** Tail: wags side to side; each spell `spell` s long (min / max), at `hz`, with a random strength. */
@@ -68,12 +70,37 @@ export function createOfficeDog(THREE) {
   const COAT = 0, WHITE = 1;
 
   // --- Shapes, blended into one smooth surface (a distance field, then marching cubes) ---
-  const E = (color, c, r, rot) => {
-    const p = { kind: 0, color, c, r, inv: null };
+  /** A shape: ellipsoid (E) or capsule (C), black or white, `f` its fluff (0 smooth → 1 the fullest coat). */
+  const E = (color, c, r, rot, f = 0.35) => {
+    const p = { kind: 0, color, c, r, inv: null, f };
     if (rot) p.inv = new THREE.Matrix4().makeRotationFromEuler(new THREE.Euler(...rot)).invert().elements;
     return p;
   };
-  const C = (color, a, b, rad) => ({ kind: 1, color, a, b, rad });
+  const C = (color, a, b, rad, f = 0.25) => ({ kind: 1, color, a, b, rad, f });
+  // Fur: value noise (two octaves) pushing the surface out / in, in tufts (OFFICE_DOG.fur).
+  const hash = (x, y, z) => {
+    let h = (x * 374761393 + y * 668265263 + z * 1274126177) | 0;
+    h = Math.imul(h ^ (h >>> 13), 1274126177);
+    return ((h ^ (h >>> 16)) & 0xffff) / 0xffff;
+  };
+  const vnoise = (x, y, z) => {
+    const xi = Math.floor(x), yi = Math.floor(y), zi = Math.floor(z);
+    const xf = x - xi, yf = y - yi, zf = z - zi;
+    const u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf), w = zf * zf * (3 - 2 * zf);
+    const l = (a, b, t) => a + (b - a) * t;
+    return l(
+      l(l(hash(xi, yi, zi), hash(xi + 1, yi, zi), u), l(hash(xi, yi + 1, zi), hash(xi + 1, yi + 1, zi), u), v),
+      l(l(hash(xi, yi, zi + 1), hash(xi + 1, yi, zi + 1), u), l(hash(xi, yi + 1, zi + 1), hash(xi + 1, yi + 1, zi + 1), u), v),
+      w,
+    );
+  };
+  const furNoise = (x, y, z) => {
+    const F = D.fur;
+    // Tufts, a little longer along the body (the coat lies back along it).
+    const a = vnoise(x / (F.tuft * 1.8), y / F.tuft, z / F.tuft);
+    const b = vnoise(x / (F.tuft * 0.9) + 17.3, y / (F.tuft * 0.5) + 5.1, z / (F.tuft * 0.5) - 9.7);
+    return (a * 0.65 + b * 0.35) * 2 - 1; // -1 … 1
+  };
   function sd(p, x, y, z) {
     if (p.kind === 1) {
       const [ax, ay, az] = p.a, [bx, by, bz] = p.b;
@@ -127,14 +154,19 @@ export function createOfficeDog(THREE) {
             continue;
           }
           // Smooth union (polynomial smooth min), the colour from the nearest shapes.
-          let u = 1e9, best = 1e9;
+          let u = 1e9, best = 1e9, bi = 0;
           for (let i = 0; i < n; i++) {
             const di = sd(prims[i], x, y, z);
             d[i] = di;
-            if (di < best) best = di;
+            if (di < best) {
+              best = di;
+              bi = i;
+            }
             const h = Math.max(blend - Math.abs(u - di), 0) / blend;
             u = Math.min(u, di) - h * h * blend * 0.25;
           }
+          // The coat: tufts out of the surface (as fluffy as the nearest shape); none where it meets the floor.
+          if (Math.abs(u) < far) u -= D.fur.amount * prims[bi].f * (0.55 + 0.45 * furNoise(x, y, z)) * Math.min(1, y / 0.03 + 0.2);
           if (floor) u = Math.max(u, -y);
           field[q] = Math.min(3 * ISO, Math.max(-3 * ISO, ISO - u * G));
           if (Math.abs(u) < 4 * voxel) {
@@ -169,7 +201,7 @@ export function createOfficeDog(THREE) {
 
   // Body: lying on its belly (sphinx pose), hind legs folded at its sides.
   const bodyPrims = [
-    E(COAT, [-0.02, 0.15, 0], [0.34, 0.145, 0.155]), // the barrel
+    E(COAT, [-0.02, 0.15, 0], [0.34, 0.145, 0.155], null, 0.55), // the barrel
     E(COAT, [-0.24, 0.14, 0.1], [0.17, 0.125, 0.1]), // the haunches
     E(COAT, [-0.24, 0.14, -0.1], [0.17, 0.125, 0.1]),
     E(COAT, [0.2, 0.17, 0], [0.18, 0.17, 0.145]), // the chest
@@ -178,37 +210,45 @@ export function createOfficeDog(THREE) {
     E(COAT, [0.3, 0.31, 0], [0.11, 0.14, 0.105], [0, 0, -0.5]), // the neck
     E(WHITE, [0.34, 0.3, 0], [0.1, 0.13, 0.11], [0, 0, -0.5]), // the white collar (front)
     E(WHITE, [0.3, 0.28, 0], [0.07, 0.11, 0.13], [0, 0, -0.5]), // (round the sides)
+    // The border collie's coat: a big white ruff round the neck, a bib hanging down the chest between the
+    // front legs, a black mane over the shoulders, fluffy hind quarters.
+    E(WHITE, [0.33, 0.25, 0], [0.11, 0.14, 0.155], [0, 0, -0.45], 1), // the ruff
+    E(WHITE, [0.37, 0.11, 0], [0.075, 0.09, 0.08], null, 1), // the bib
+    E(COAT, [0.22, 0.33, 0], [0.11, 0.09, 0.135], [0, 0, -0.3], 1), // the mane
+    E(COAT, [-0.34, 0.14, 0.11], [0.11, 0.12, 0.09], null, 0.9), // the hind "trousers"
+    E(COAT, [-0.34, 0.14, -0.11], [0.11, 0.12, 0.09], null, 0.9),
   ];
   for (const z of [0.075, -0.075]) {
     bodyPrims.push(
       C(COAT, [0.22, 0.1, z], [0.34, 0.05, z], 0.045), // front legs stretched forward, white below
       C(WHITE, [0.33, 0.045, z], [0.55, 0.035, z], 0.038),
-      E(WHITE, [0.58, 0.028, z], [0.055, 0.028, 0.038]), // paws
+      E(WHITE, [0.37, 0.04, z * 1.05], [0.1, 0.03, 0.042], null, 0.9), // feathering behind the forearm
+      E(WHITE, [0.58, 0.028, z], [0.055, 0.028, 0.038], null, 0.15), // paws
     );
   }
   for (const s of [1, -1]) {
     bodyPrims.push(
       C(COAT, [-0.34, 0.06, 0.15 * s], [-0.14, 0.04, 0.17 * s], 0.042), // hind legs along the floor
       C(WHITE, [-0.14, 0.035, 0.17 * s], [-0.04, 0.03, 0.175 * s], 0.034),
-      E(WHITE, [-0.02, 0.026, 0.175 * s], [0.05, 0.026, 0.035]), // paws
+      E(WHITE, [-0.02, 0.026, 0.175 * s], [0.05, 0.026, 0.035], null, 0.15), // paws
     );
   }
   // Head (head-local; on a pivot at the top of the neck): black skull and ears, white blaze and muzzle.
   const headPrims = [
-    E(COAT, [0.04, 0.03, 0], [0.105, 0.09, 0.085]), // skull
-    E(COAT, [0.02, 0.0, 0.055], [0.07, 0.07, 0.04]), // cheeks
-    E(COAT, [0.02, 0.0, -0.055], [0.07, 0.07, 0.04]),
-    E(WHITE, [0.11, 0.065, 0], [0.075, 0.018, 0.014], [0, 0, -0.32]), // the blaze up the forehead
-    E(WHITE, [0.155, -0.015, 0], [0.085, 0.042, 0.045]), // muzzle
-    E(COAT, [0.13, 0.012, 0], [0.06, 0.03, 0.04]), // the muzzle's black top (the blaze runs down its middle)
-    E(WHITE, [0.15, 0.02, 0], [0.07, 0.018, 0.014]),
-    E(WHITE, [0.14, -0.05, 0], [0.07, 0.018, 0.035]), // lower jaw
+    E(COAT, [0.04, 0.03, 0], [0.105, 0.09, 0.085], null, 0.2), // skull
+    E(COAT, [0.02, 0.0, 0.055], [0.07, 0.07, 0.04], null, 0.7), // cheeks (fluffy)
+    E(COAT, [0.02, 0.0, -0.055], [0.07, 0.07, 0.04], null, 0.7),
+    E(WHITE, [0.105, 0.068, 0], [0.07, 0.016, 0.01], [0, 0, -0.32], 0.05), // the narrow white blaze up the forehead
+    E(COAT, [0.13, -0.008, 0], [0.065, 0.045, 0.05], null, 0.1), // the muzzle's base, black (round the eyes and cheeks)
+    E(WHITE, [0.178, -0.016, 0], [0.058, 0.036, 0.039], null, 0.06), // the white front of the muzzle
+    E(WHITE, [0.15, 0.026, 0], [0.06, 0.014, 0.011], null, 0.05), // the blaze down the muzzle's top
+    E(WHITE, [0.14, -0.05, 0], [0.07, 0.018, 0.035], null, 0.1), // lower jaw
   ];
   for (const s of [1, -1]) {
     // Ears: semi-erect, leaning out to the side, the tips folding forward.
     headPrims.push(
-      E(COAT, [-0.005, 0.112, 0.058 * s], [0.034, 0.045, 0.013], [-0.45 * s, 0, 0.15]), // wide at the base
-      E(COAT, [0.006, 0.152, 0.074 * s], [0.02, 0.032, 0.01], [-0.5 * s, 0, -0.45]), // narrowing, tipping forward
+      E(COAT, [-0.005, 0.112, 0.058 * s], [0.034, 0.045, 0.013], [-0.45 * s, 0, 0.15], 0.15), // wide at the base
+      E(COAT, [0.006, 0.152, 0.074 * s], [0.02, 0.032, 0.01], [-0.5 * s, 0, -0.45], 0.05), // narrowing, tipping forward
     );
   }
 
@@ -218,7 +258,7 @@ export function createOfficeDog(THREE) {
   dog.add(body);
   const head = new THREE.Group();
   head.position.set(0.38, 0.4, 0);
-  head.scale.setScalar(0.92);
+  head.scale.setScalar(1.0);
   dog.add(head);
   const sphere = new THREE.SphereGeometry(1, 32, 24);
   geos.push(sphere);
@@ -253,9 +293,11 @@ export function createOfficeDog(THREE) {
     const tip = new THREE.Color(D.white), coat = new THREE.Color(D.coat), c = new THREE.Color();
     for (let i = 0; i < pos.count; i++) {
       const s = Math.min(1, Math.max(0, -pos.getX(i) / tailLen)); // 0 root → 1 tip
-      const r = 0.042 * (1 - 0.55 * s) * (0.75 + 0.45 * Math.sin(Math.PI * Math.min(1, s * 1.15 + 0.12))); // fluffy in the middle, thin tip
-      pos.setY(i, pos.getY(i) * r);
-      pos.setZ(i, pos.getZ(i) * r * 1.15);
+      // Bushy, the border collie's: full through its length, a long feathered fringe hanging below, a tapering tip.
+      const r = 0.05 * (1 - 0.45 * s) * (0.8 + 0.45 * Math.sin(Math.PI * Math.min(1, s * 1.1 + 0.1)));
+      const yv = pos.getY(i);
+      pos.setY(i, yv * r * (yv < 0 ? 1.55 : 1));
+      pos.setZ(i, pos.getZ(i) * r * 1.2);
       const b = Math.min(N - 1, s * N);
       const i0 = Math.min(N - 1, Math.floor(b)), f = b - i0;
       skinI.push(i0, Math.min(N, i0 + 1), 0, 0);
