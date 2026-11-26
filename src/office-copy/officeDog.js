@@ -1,6 +1,7 @@
 /**
- * The office dog: a life-size border collie lying on the floor (after a reference photo), built from simple
- * smooth shapes (no model file): black coat with the breed's white parts (blaze, muzzle, collar and chest,
+ * The office dog: a life-size border collie lying on the floor (after a reference photo), built in code (no
+ * model file): its body and head are each one smooth surface (shapes blended into each other, meshed by
+ * marching cubes), the tail a smooth skinned tube; black coat with the breed's white parts (blaze, muzzle, collar and chest,
  * legs and paws, tail tip), a soft fur sheen. It breathes, wags its tail (in spells: harder, softer, resting
  * a moment) and turns its head now and then to a new random look (left / right, up / down, a tilt).
  *
@@ -16,7 +17,13 @@ export const OFFICE_DOG = {
   eye: 0x2a1a10, // dark brown
   tongue: 0xd8707e,
   /** Fur: a soft sheen at grazing angles (MeshPhysical sheen), matt otherwise. */
-  sheen: { amount: 0.9, roughness: 0.5, coat: 0x6a6a70, white: 0xffffff },
+  sheen: { amount: 0.9, roughness: 0.5, color: 0x8a8a90 },
+  /**
+   * The coat's surface: the body and the head are each one smooth surface, the shapes below blended into each
+   * other (`blend`, metres) and meshed by marching cubes at `bodyRes` / `headRes` cells across (finer = smoother,
+   * slower to build, once); black and white blend over `colourSoft` metres.
+   */
+  surface: { bodyRes: 88, headRes: 64, blend: 0.045, colourSoft: 0.006, maxTris: 140000 },
   roughness: 0.82,
   breathe: { period: 2.6, amount: 0.018 }, // s; the chest's rise (share of its height)
   /** Tail: wags side to side; each spell `spell` s long (min / max), at `hz`, with a random strength. */
@@ -39,127 +46,247 @@ export const OFFICE_DOG = {
 
 export function createOfficeDog(THREE) {
   const D = OFFICE_DOG;
-  const fur = (color, sheenColor) =>
-    new THREE.MeshPhysicalMaterial({
-      color,
-      roughness: D.roughness,
-      metalness: 0,
-      sheen: D.sheen.amount,
-      sheenRoughness: D.sheen.roughness,
-      sheenColor: new THREE.Color(sheenColor),
-    });
+  const R = D.surface;
+  // One fur material for the whole coat (black / white from the vertex colours), a soft sheen.
+  const furMat = new THREE.MeshPhysicalMaterial({
+    color: 0xffffff,
+    vertexColors: true,
+    roughness: D.roughness,
+    metalness: 0,
+    sheen: D.sheen.amount,
+    sheenRoughness: D.sheen.roughness,
+    sheenColor: new THREE.Color(D.sheen.color),
+  });
   const mats = {
-    coat: fur(D.coat, D.sheen.coat),
-    white: fur(D.white, D.sheen.white),
+    fur: furMat,
     nose: new THREE.MeshStandardMaterial({ color: D.nose, roughness: 0.35 }),
-    eye: new THREE.MeshStandardMaterial({ color: D.eye, roughness: 0.12 }),
+    eye: new THREE.MeshStandardMaterial({ color: D.eye, roughness: 0.1 }),
     tongue: new THREE.MeshStandardMaterial({ color: D.tongue, roughness: 0.45 }),
   };
-  const sphere = new THREE.SphereGeometry(1, 28, 20);
-  const geos = [sphere];
-  const ell = (parent, mat, pos, r, rot) => {
-    const m = new THREE.Mesh(sphere, mat);
-    m.position.set(...pos);
-    m.scale.set(...r);
-    if (rot) m.rotation.set(...rot);
-    parent.add(m);
-    return m;
+  const geos = [];
+  const colours = [new THREE.Color(D.coat), new THREE.Color(D.white)];
+  const COAT = 0, WHITE = 1;
+
+  // --- Shapes, blended into one smooth surface (a distance field, then marching cubes) ---
+  const E = (color, c, r, rot) => {
+    const p = { kind: 0, color, c, r, inv: null };
+    if (rot) p.inv = new THREE.Matrix4().makeRotationFromEuler(new THREE.Euler(...rot)).invert().elements;
+    return p;
   };
-  const capsule = (parent, mat, a, b, radius) => {
-    const A = new THREE.Vector3(...a), B = new THREE.Vector3(...b);
-    const len = A.distanceTo(B);
-    const g = new THREE.CapsuleGeometry(radius, len, 6, 14);
+  const C = (color, a, b, rad) => ({ kind: 1, color, a, b, rad });
+  function sd(p, x, y, z) {
+    if (p.kind === 1) {
+      const [ax, ay, az] = p.a, [bx, by, bz] = p.b;
+      const pax = x - ax, pay = y - ay, paz = z - az, bax = bx - ax, bay = by - ay, baz = bz - az;
+      const h = Math.min(1, Math.max(0, (pax * bax + pay * bay + paz * baz) / (bax * bax + bay * bay + baz * baz)));
+      return Math.hypot(pax - bax * h, pay - bay * h, paz - baz * h) - p.rad;
+    }
+    let px = x - p.c[0], py = y - p.c[1], pz = z - p.c[2];
+    if (p.inv) {
+      const e = p.inv;
+      const qx = e[0] * px + e[4] * py + e[8] * pz, qy = e[1] * px + e[5] * py + e[9] * pz, qz = e[2] * px + e[6] * py + e[10] * pz;
+      px = qx; py = qy; pz = qz;
+    }
+    const [rx, ry, rz] = p.r;
+    const k0 = Math.hypot(px / rx, py / ry, pz / rz);
+    const k1 = Math.hypot(px / (rx * rx), py / (ry * ry), pz / (rz * rz));
+    return k1 < 1e-9 ? -Math.min(rx, ry, rz) : (k0 * (k0 - 1)) / k1;
+  }
+  /** Marching cubes over the shapes' smooth union, in a cube round `box` (min / max, metres); `floor`: cut flat at y 0. */
+  function surface(MarchingCubes, prims, box, res, blend, floor) {
+    const centre = [(box[0][0] + box[1][0]) / 2, (box[0][1] + box[1][1]) / 2, (box[0][2] + box[1][2]) / 2];
+    const half = Math.max(box[1][0] - box[0][0], box[1][1] - box[0][1], box[1][2] - box[0][2]) / 2 + 0.03;
+    const mc = new MarchingCubes(res, furMat, false, true, R.maxTris);
+    const ISO = mc.isolation;
+    const voxel = (2 * half) / res;
+    const G = ISO / (3 * voxel);
+    const field = mc.field, pal = mc.palette;
+    const n = prims.length;
+    const d = new Float32Array(n);
+    // A bounding sphere per shape: cells far from all of them are outside (the field is clamped there anyway).
+    const bound = prims.map((p) =>
+      p.kind === 1
+        ? [(p.a[0] + p.b[0]) / 2, (p.a[1] + p.b[1]) / 2, (p.a[2] + p.b[2]) / 2, Math.hypot(p.b[0] - p.a[0], p.b[1] - p.a[1], p.b[2] - p.a[2]) / 2 + p.rad]
+        : [p.c[0], p.c[1], p.c[2], Math.max(...p.r)],
+    );
+    const far = (3 * ISO) / G + blend; // beyond this the field is at its outside clamp
+    let q = 0;
+    for (let iz = 0; iz < res; iz++) {
+      const z = centre[2] + half * ((iz - res / 2) / (res / 2));
+      for (let iy = 0; iy < res; iy++) {
+        const y = centre[1] + half * ((iy - res / 2) / (res / 2));
+        for (let ix = 0; ix < res; ix++, q++) {
+          const x = centre[0] + half * ((ix - res / 2) / (res / 2));
+          let near = false;
+          for (let i = 0; i < n && !near; i++) {
+            const b = bound[i];
+            near = Math.hypot(x - b[0], y - b[1], z - b[2]) - b[3] < far;
+          }
+          if (!near) {
+            field[q] = -3 * ISO;
+            continue;
+          }
+          // Smooth union (polynomial smooth min), the colour from the nearest shapes.
+          let u = 1e9, best = 1e9;
+          for (let i = 0; i < n; i++) {
+            const di = sd(prims[i], x, y, z);
+            d[i] = di;
+            if (di < best) best = di;
+            const h = Math.max(blend - Math.abs(u - di), 0) / blend;
+            u = Math.min(u, di) - h * h * blend * 0.25;
+          }
+          if (floor) u = Math.max(u, -y);
+          field[q] = Math.min(3 * ISO, Math.max(-3 * ISO, ISO - u * G));
+          if (Math.abs(u) < 4 * voxel) {
+            let wr = 0, wg = 0, wb = 0, ws = 0;
+            for (let i = 0; i < n; i++) {
+              const w = Math.exp(-(d[i] - best) / R.colourSoft);
+              const c = colours[prims[i].color];
+              wr += c.r * w; wg += c.g * w; wb += c.b * w; ws += w;
+            }
+            pal[q * 3] = wr / ws; pal[q * 3 + 1] = wg / ws; pal[q * 3 + 2] = wb / ws;
+          }
+        }
+      }
+    }
+    mc.update();
+    const count = mc.count;
+    const pos = mc.positionArray.slice(0, count * 3), nor = mc.normalArray.slice(0, count * 3), col = mc.colorArray.slice(0, count * 3);
+    for (let i = 0; i < count; i++) {
+      for (let k = 0; k < 3; k++) pos[i * 3 + k] = centre[k] + half * pos[i * 3 + k];
+      const l = Math.hypot(nor[i * 3], nor[i * 3 + 1], nor[i * 3 + 2]) || 1;
+      nor[i * 3] /= l; nor[i * 3 + 1] /= l; nor[i * 3 + 2] /= l;
+    }
+    mc.geometry.dispose();
+    const g = new THREE.BufferGeometry();
+    g.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+    g.setAttribute("normal", new THREE.BufferAttribute(nor, 3));
+    g.setAttribute("color", new THREE.BufferAttribute(col, 3));
+    g.computeBoundingSphere();
     geos.push(g);
-    const m = new THREE.Mesh(g, mat);
-    m.position.copy(A).add(B).multiplyScalar(0.5);
-    m.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), B.clone().sub(A).normalize());
-    parent.add(m);
-    return m;
-  };
+    return g;
+  }
+
+  // Body: lying on its belly (sphinx pose), hind legs folded at its sides.
+  const bodyPrims = [
+    E(COAT, [-0.02, 0.15, 0], [0.34, 0.145, 0.155]), // the barrel
+    E(COAT, [-0.24, 0.14, 0.1], [0.17, 0.125, 0.1]), // the haunches
+    E(COAT, [-0.24, 0.14, -0.1], [0.17, 0.125, 0.1]),
+    E(COAT, [0.2, 0.17, 0], [0.18, 0.17, 0.145]), // the chest
+    E(WHITE, [0.3, 0.16, 0], [0.11, 0.15, 0.1]), // white chest
+    E(WHITE, [0.12, 0.05, 0], [0.16, 0.05, 0.1]), // a little white under the belly
+    E(COAT, [0.3, 0.31, 0], [0.11, 0.14, 0.105], [0, 0, -0.5]), // the neck
+    E(WHITE, [0.34, 0.3, 0], [0.1, 0.13, 0.11], [0, 0, -0.5]), // the white collar (front)
+    E(WHITE, [0.3, 0.28, 0], [0.07, 0.11, 0.13], [0, 0, -0.5]), // (round the sides)
+  ];
+  for (const z of [0.075, -0.075]) {
+    bodyPrims.push(
+      C(COAT, [0.22, 0.1, z], [0.34, 0.05, z], 0.045), // front legs stretched forward, white below
+      C(WHITE, [0.33, 0.045, z], [0.55, 0.035, z], 0.038),
+      E(WHITE, [0.58, 0.028, z], [0.055, 0.028, 0.038]), // paws
+    );
+  }
+  for (const s of [1, -1]) {
+    bodyPrims.push(
+      C(COAT, [-0.34, 0.06, 0.15 * s], [-0.14, 0.04, 0.17 * s], 0.042), // hind legs along the floor
+      C(WHITE, [-0.14, 0.035, 0.17 * s], [-0.04, 0.03, 0.175 * s], 0.034),
+      E(WHITE, [-0.02, 0.026, 0.175 * s], [0.05, 0.026, 0.035]), // paws
+    );
+  }
+  // Head (head-local; on a pivot at the top of the neck): black skull and ears, white blaze and muzzle.
+  const headPrims = [
+    E(COAT, [0.04, 0.03, 0], [0.105, 0.09, 0.085]), // skull
+    E(COAT, [0.02, 0.0, 0.055], [0.07, 0.07, 0.04]), // cheeks
+    E(COAT, [0.02, 0.0, -0.055], [0.07, 0.07, 0.04]),
+    E(WHITE, [0.11, 0.065, 0], [0.075, 0.018, 0.014], [0, 0, -0.32]), // the blaze up the forehead
+    E(WHITE, [0.155, -0.015, 0], [0.085, 0.042, 0.045]), // muzzle
+    E(COAT, [0.13, 0.012, 0], [0.06, 0.03, 0.04]), // the muzzle's black top (the blaze runs down its middle)
+    E(WHITE, [0.15, 0.02, 0], [0.07, 0.018, 0.014]),
+    E(WHITE, [0.14, -0.05, 0], [0.07, 0.018, 0.035]), // lower jaw
+  ];
+  for (const s of [1, -1]) {
+    // Ears: semi-erect, leaning out to the side, the tips folding forward.
+    headPrims.push(
+      E(COAT, [-0.005, 0.112, 0.058 * s], [0.034, 0.045, 0.013], [-0.45 * s, 0, 0.15]), // wide at the base
+      E(COAT, [0.006, 0.152, 0.074 * s], [0.02, 0.032, 0.01], [-0.5 * s, 0, -0.45]), // narrowing, tipping forward
+    );
+  }
 
   const dog = new THREE.Group();
   dog.name = "officeDog";
-
-  // Body: lying on its belly (sphinx pose), hind legs folded at its sides.
   const body = new THREE.Group();
   dog.add(body);
-  ell(body, mats.coat, [-0.02, 0.15, 0], [0.34, 0.145, 0.155]); // the barrel
-  ell(body, mats.coat, [-0.24, 0.14, 0.1], [0.17, 0.125, 0.1]); // the haunches
-  ell(body, mats.coat, [-0.24, 0.14, -0.1], [0.17, 0.125, 0.1]);
-  ell(body, mats.coat, [0.2, 0.17, 0], [0.18, 0.17, 0.145]); // the chest
-  ell(body, mats.white, [0.3, 0.16, 0], [0.11, 0.15, 0.1]); // white chest
-  ell(body, mats.white, [0.12, 0.05, 0], [0.16, 0.05, 0.1]); // a little white under the belly
-  ell(body, mats.coat, [0.3, 0.31, 0], [0.11, 0.14, 0.105], [0, 0, -0.5]); // the neck
-  ell(body, mats.white, [0.34, 0.3, 0], [0.1, 0.13, 0.11], [0, 0, -0.5]); // the white collar (front)
-  ell(body, mats.white, [0.3, 0.28, 0], [0.07, 0.11, 0.13], [0, 0, -0.5]); // (round the sides)
-
-  // Front legs stretched forward, white below; paws.
-  for (const z of [0.075, -0.075]) {
-    capsule(body, mats.coat, [0.22, 0.1, z], [0.34, 0.05, z], 0.045);
-    capsule(body, mats.white, [0.33, 0.045, z], [0.55, 0.035, z], 0.038);
-    ell(body, mats.white, [0.58, 0.028, z], [0.055, 0.028, 0.038]);
-  }
-  // Hind legs: the folded lower legs along the floor beside the body, white paws to the front.
-  for (const s of [1, -1]) {
-    capsule(body, mats.coat, [-0.34, 0.06, 0.15 * s], [-0.14, 0.04, 0.17 * s], 0.042);
-    capsule(body, mats.white, [-0.14, 0.035, 0.17 * s], [-0.04, 0.03, 0.175 * s], 0.034);
-    ell(body, mats.white, [-0.02, 0.026, 0.175 * s], [0.05, 0.026, 0.035]);
-  }
-
-  // Head (on a pivot at the top of the neck): black skull and ears, white blaze and muzzle, an open mouth.
   const head = new THREE.Group();
   head.position.set(0.38, 0.4, 0);
   head.scale.setScalar(0.92);
   dog.add(head);
-  ell(head, mats.coat, [0.04, 0.03, 0], [0.105, 0.09, 0.085]); // skull
-  ell(head, mats.coat, [0.02, 0.0, 0.055], [0.07, 0.07, 0.04]); // cheeks
-  ell(head, mats.coat, [0.02, 0.0, -0.055], [0.07, 0.07, 0.04]);
-  ell(head, mats.white, [0.11, 0.065, 0], [0.075, 0.018, 0.014], [0, 0, -0.32]); // the blaze up the forehead
-  ell(head, mats.white, [0.155, -0.015, 0], [0.085, 0.042, 0.045]); // muzzle
-  ell(head, mats.coat, [0.13, 0.012, 0], [0.06, 0.03, 0.04]); // the muzzle's black top (the blaze runs down its middle)
-  ell(head, mats.white, [0.15, 0.02, 0], [0.07, 0.018, 0.014]);
-  ell(head, mats.nose, [0.235, 0.0, 0], [0.022, 0.018, 0.022]); // nose
-  ell(head, mats.white, [0.14, -0.05, 0], [0.07, 0.018, 0.035]); // lower jaw
+  const sphere = new THREE.SphereGeometry(1, 32, 24);
+  geos.push(sphere);
+  const ell = (parent, mat, pos, r) => {
+    const m = new THREE.Mesh(sphere, mat);
+    m.position.set(...pos);
+    m.scale.set(...r);
+    parent.add(m);
+    return m;
+  };
+  ell(head, mats.nose, [0.232, 0.002, 0], [0.019, 0.016, 0.02]); // nose
   ell(head, mats.tongue, [0.16, -0.04, 0], [0.05, 0.012, 0.024]); // tongue (panting)
-  for (const z of [0.042, -0.042]) ell(head, mats.eye, [0.115, 0.04, z], [0.014, 0.013, 0.012]);
-  // Ears: semi-erect, tips folded forward.
-  for (const s of [1, -1]) {
-    const ear = new THREE.Group();
-    ear.position.set(-0.005, 0.085, 0.062 * s);
-    ear.rotation.set(-0.55 * s, 0, 0.2); // leaning out to its side, a little back
-    head.add(ear);
-    const g = new THREE.ConeGeometry(0.034, 0.08, 12);
-    geos.push(g);
-    const base = new THREE.Mesh(g, mats.coat);
-    base.scale.set(1, 1, 0.45);
-    base.position.y = 0.04;
-    ear.add(base);
-    const tip = new THREE.Mesh(g, mats.coat);
-    tip.scale.set(0.6, 0.5, 0.35);
-    tip.position.set(0.02, 0.085, 0);
-    tip.rotation.z = -1.1;
-    ear.add(tip);
-  }
+  for (const z of [0.046, -0.046]) ell(head, mats.eye, [0.108, 0.042, z], [0.016, 0.015, 0.014]); // eyes (glossy, on the black)
+  // The coat surfaces (made once the marching cubes module is in).
+  const nextFrame = () => new Promise((r) => (typeof requestAnimationFrame === "function" ? requestAnimationFrame(() => r()) : setTimeout(r, 0)));
+  const ready = import("three/addons/objects/MarchingCubes.js").then(async ({ MarchingCubes }) => {
+    const bodyMesh = new THREE.Mesh(surface(MarchingCubes, bodyPrims, [[-0.45, 0, -0.24], [0.68, 0.46, 0.24]], R.bodyRes, R.blend, true), furMat);
+    body.add(bodyMesh);
+    await nextFrame(); // the head on the next frame (two shorter stalls under the loader, not one)
+    const headMesh = new THREE.Mesh(surface(MarchingCubes, headPrims, [[-0.08, -0.08, -0.12], [0.25, 0.2, 0.12]], R.headRes, R.blend * 0.6, false), furMat);
+    head.add(headMesh);
+  });
 
-  // Tail: a chain of fluffy segments from the rump, down to the floor and curling round; white tip.
+  // Tail: one smooth tapered, fluffy tube on a chain of bones (skinned: it bends smoothly), white tip.
+  const N = 7, segLen = 0.06, tailLen = N * segLen;
+  const tg = new THREE.CylinderGeometry(1, 1, tailLen, 18, 56, false);
+  tg.translate(0, -tailLen / 2, 0); // from 0 (root) down to -tailLen along y
+  tg.rotateZ(-Math.PI / 2); // along -x (y -> -x)
+  {
+    const pos = tg.attributes.position;
+    const skinI = [], skinW = [], cols = [];
+    const tip = new THREE.Color(D.white), coat = new THREE.Color(D.coat), c = new THREE.Color();
+    for (let i = 0; i < pos.count; i++) {
+      const s = Math.min(1, Math.max(0, -pos.getX(i) / tailLen)); // 0 root → 1 tip
+      const r = 0.042 * (1 - 0.55 * s) * (0.75 + 0.45 * Math.sin(Math.PI * Math.min(1, s * 1.15 + 0.12))); // fluffy in the middle, thin tip
+      pos.setY(i, pos.getY(i) * r);
+      pos.setZ(i, pos.getZ(i) * r * 1.15);
+      const b = Math.min(N - 1, s * N);
+      const i0 = Math.min(N - 1, Math.floor(b)), f = b - i0;
+      skinI.push(i0, Math.min(N, i0 + 1), 0, 0);
+      skinW.push(1 - f, f, 0, 0);
+      c.copy(coat).lerp(tip, Math.min(1, Math.max(0, (s - 0.72) / 0.12)));
+      cols.push(c.r, c.g, c.b);
+    }
+    tg.setAttribute("skinIndex", new THREE.Uint16BufferAttribute(skinI, 4));
+    tg.setAttribute("skinWeight", new THREE.Float32BufferAttribute(skinW, 4));
+    tg.setAttribute("color", new THREE.Float32BufferAttribute(cols, 3));
+    tg.computeVertexNormals();
+  }
+  geos.push(tg);
+  const bones = [];
+  for (let i = 0; i <= N; i++) {
+    const b = new THREE.Bone();
+    b.position.x = i ? -segLen : 0;
+    b.userData.restZ = i === 0 ? 1.05 : -0.2; // down off the rump, then back toward level along the floor
+    b.userData.restY = i === 0 ? 0 : 0.16; // curling round toward the body
+    if (i) bones[i - 1].add(b);
+    bones.push(b);
+  }
+  const tailMesh = new THREE.SkinnedMesh(tg, furMat);
+  tailMesh.add(bones[0]);
+  tailMesh.bind(new THREE.Skeleton(bones));
+  tailMesh.frustumCulled = false;
   const tailBase = new THREE.Group();
   tailBase.position.set(-0.36, 0.17, 0);
+  tailBase.add(tailMesh);
   dog.add(tailBase);
-  const segs = [];
-  const N = 7;
-  let parent = tailBase;
-  for (let i = 0; i < N; i++) {
-    const seg = new THREE.Group();
-    const len = 0.06;
-    seg.position.x = i ? -len : 0;
-    seg.userData.restZ = i === 0 ? 1.05 : -0.2; // down off the rump, then back toward level along the floor
-    seg.userData.restY = i === 0 ? 0 : 0.16; // curling round toward the body
-    parent.add(seg);
-    const r = 0.048 - i * 0.003;
-    ell(seg, i >= N - 2 ? mats.white : mats.coat, [-len / 2, 0, 0], [len * 0.75, r, r * 1.15]);
-    segs.push(seg);
-    parent = seg;
-  }
+  const segs = bones.slice(0, N);
 
   // State: breathing, the tail's spells, the head's looks.
   const rand = (a, b) => a + Math.random() * (b - a);
@@ -200,5 +327,5 @@ export function createOfficeDog(THREE) {
     for (const g of geos) g.dispose();
     for (const m of Object.values(mats)) m.dispose();
   }
-  return { object: dog, update, dispose };
+  return { object: dog, update, dispose, ready };
 }
