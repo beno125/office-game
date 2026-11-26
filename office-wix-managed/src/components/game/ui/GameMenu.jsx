@@ -44,7 +44,7 @@ const CONFIRM_COPY = {
 const CONFIRM_DEFAULT = { title: "Leave this level?", text: "Your progress here will be lost." };
 
 /** The hood air intake: housing + three holes, each with a cap that turns edge-on when open. */
-export function AirIntakeIcon({ open }) {
+function AirIntakeIcon({ open }) {
   return (
     <svg className={"wx-menu-icon" + (open ? " is-open" : "")} viewBox="0 0 44 24" aria-hidden="true">
       <rect x="1" y="1" width="42" height="22" rx="11" ry="11" />
