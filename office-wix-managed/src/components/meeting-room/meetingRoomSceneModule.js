@@ -214,7 +214,11 @@ function _arenaDarkOf(bright, scale) {
  */
 const MR_BRIGHT_LOOK = {
   board: { color: 0xe9eae7, envMapIntensity: 1.25 },
-  wallPattern: { color: 0xf5ebd8, emissive: 0xf0e2c6 }, // a little warmer than the first step (0xf3f0e9 / 0xeee8dd)
+  wallPattern: { color: 0xf5ebd8, emissive: 0xf0e2c6 },
+  /** backWallWood: the tint over its wood texture (linear, per channel; was 1.2 / 1.22 / 1.16, a reddish
+   *  brown on screen, ~#855F55), lighter and toward a light oak (reference ~#ECCB9F): on screen ~#CDAF8A,
+   *  the reference's tone (measured in a bright-mode render). */
+  backWallWood: [3.6, 4.0, 2.5], // a little warmer than the first step (0xf3f0e9 / 0xeee8dd)
 };
 const EXPOSURE_BRIGHT = 0.74;
 const LIGHT_FADE_DURATION = 0.2;
@@ -571,7 +575,7 @@ function applyLightBlend(b) {
     _themeMats.floor.envMapIntensity = blendChannel(0.07, 0.18, b);
   }
   if (_themeMats.wallWood && _themeMats.wallWoodBright) {
-    _themeMats.wallWood.color.lerpColors(_arenaDarkOf(_themeMats.wallWoodBright, ARENA_DARK.wood), _themeMats.wallWoodBright, b);
+    _themeMats.wallWood.color.lerpColors(_arenaDarkOf(_themeMats.wallWoodBright, ARENA_DARK.wood), _themeMats.wallWoodLook || _themeMats.wallWoodBright, b);
   }
   if (_themeMats.tablePlate) {
     if (_themeMats.tableEmissiveBright) {
@@ -8628,10 +8632,11 @@ function loadMeetingRoom() {
         applySealingPlatesDiamondMesh(_model);
         applyMeetingRoomScreenMaterials(_model, screenMap);
         _themeMats.wallWood = applyPoliigonWoodMaterial(_model, "backWallWood", wallWoodMaps, "z", "y", {
-          color: new THREE.Color(1.2, 1.22, 1.16),
+          color: new THREE.Color(...MR_BRIGHT_LOOK.backWallWood),
           envMapIntensity: 0.48,
         });
-        _themeMats.wallWoodBright = new THREE.Color(1.2, 1.22, 1.16);
+        _themeMats.wallWoodBright = new THREE.Color(1.2, 1.22, 1.16); // Dark Mode is made from this (unchanged)
+        _themeMats.wallWoodLook = new THREE.Color(...MR_BRIGHT_LOOK.backWallWood);
         _themeMats.wallWoodDark = new THREE.Color(0.22, 0.28, 0.42);
         _themeMats.floor = applyPoliigonWoodMaterial(_model, "floor", floorWoodMaps, "z", "x", {
           color: 0x7c7569,
