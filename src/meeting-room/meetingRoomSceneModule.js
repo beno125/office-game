@@ -205,6 +205,17 @@ const _arenaDarkTmp = new THREE.Color();
 function _arenaDarkOf(bright, scale) {
   return _arenaDarkTmp.copy(bright).multiplyScalar(scale).multiply(ARENA_DARK_TINT);
 }
+/**
+ * Bright Mode colours of the whiteboards and the wall patterns (the intro runs in it). Dark Mode keeps its
+ * colours exactly (still made from their original bright colours).
+ * - boards (boardRight / boardFront / boardLeft): a touch less white (was 0xf7f7f4; reflections 1.45).
+ * - wallPattern (wallFront / wallLeft / wallRightPattern, their own copy of the matt paint; pannelStrips and
+ *   tzokel keep it): whiter, less warm (was 0xf8e2b8, its glow 0xf3d19c).
+ */
+const MR_BRIGHT_LOOK = {
+  board: { color: 0xe9eae7, envMapIntensity: 1.25 },
+  wallPattern: { color: 0xf3f0e9, emissive: 0xeee8dd },
+};
 const EXPOSURE_BRIGHT = 0.74;
 const LIGHT_FADE_DURATION = 0.2;
 const _legacyDarkLightsScale = 1;
@@ -496,9 +507,9 @@ function applyLightBlend(b) {
     creamWall.envMapIntensity = blendChannel(0.05, 0.22, b);
   }
   if (_themeMats.glossyBoard && _themeMats.glossyBoardBright) {
-    _themeMats.glossyBoard.color.lerpColors(_arenaDarkOf(_themeMats.glossyBoardBright, ARENA_DARK.board), _themeMats.glossyBoardBright, b);
+    _themeMats.glossyBoard.color.lerpColors(_arenaDarkOf(_themeMats.glossyBoardBright, ARENA_DARK.board), _themeMats.glossyBoardLook, b);
     _themeMats.glossyBoard.roughness = blendChannel(0.18, 0.1, b);
-    _themeMats.glossyBoard.envMapIntensity = blendChannel(0.12, 1.45, b);
+    _themeMats.glossyBoard.envMapIntensity = blendChannel(0.12, MR_BRIGHT_LOOK.board.envMapIntensity, b);
     _themeMats.glossyBoard.clearcoat = blendChannel(0.4, 0.72, b);
   }
   if (_themeMats.whitePaintMetal && _themeMats.whitePaintMetalBright) {
@@ -541,6 +552,13 @@ function applyLightBlend(b) {
       );
     }
     _themeMats.whiteMattPaint.emissiveIntensity = blendChannel(0.02, 0.2, b);
+  }
+  // The wall patterns: the same dark values, their own (whiter) bright ones (MR_BRIGHT_LOOK.wallPattern).
+  const wp = _themeMats.wallPatternPaint;
+  if (wp && _themeMats.whiteMattBright) {
+    wp.color.lerpColors(_arenaDarkOf(_themeMats.whiteMattBright, ARENA_DARK.paint), _themeMats.wallPatternBright, b);
+    wp.emissive.lerpColors(ARENA_DARK.paintGlow, _themeMats.wallPatternEmissiveBright, b);
+    wp.emissiveIntensity = blendChannel(0.02, 0.2, b);
   }
   if (_themeMats.whiteVisibleLight && _themeMats.whiteLightEmissiveBright) {
     _themeMats.whiteVisibleLight.emissive.copy(_themeMats.whiteLightEmissiveBright);
@@ -7951,9 +7969,11 @@ function applyMeetingRoomMaterials(root) {
     clearcoat: 0.72,
     clearcoatRoughness: 0.08,
     envMap: _meetingRoomEnv,
-    envMapIntensity: 1.45,
+    envMapIntensity: MR_BRIGHT_LOOK.board.envMapIntensity, // was 1.45
   });
+  glossyWhiteBoard.color.setHex(MR_BRIGHT_LOOK.board.color);
   _themeMats.glossyBoard = glossyWhiteBoard;
+  _themeMats.glossyBoardLook = new THREE.Color(MR_BRIGHT_LOOK.board.color);
   _themeMats.glossyBoardBright = new THREE.Color(0xf7f7f4);
   _themeMats.glossyBoardDark = new THREE.Color(0x0a1228);
   _themeMats.whitePaintMetal = whitePaintMetal;
@@ -8084,6 +8104,12 @@ function applyMeetingRoomMaterials(root) {
   _themeMats.whiteMattDark = new THREE.Color(0x0e1a2e);
   _themeMats.whiteMattEmissiveBright = new THREE.Color(0xf3d19c);
   _themeMats.whiteMattEmissiveDark = new THREE.Color(0x4ae0ff);
+  const wallPatternPaint = whiteMattPaint.clone();
+  wallPatternPaint.color.setHex(MR_BRIGHT_LOOK.wallPattern.color);
+  wallPatternPaint.emissive.setHex(MR_BRIGHT_LOOK.wallPattern.emissive);
+  _themeMats.wallPatternPaint = wallPatternPaint;
+  _themeMats.wallPatternBright = new THREE.Color(MR_BRIGHT_LOOK.wallPattern.color);
+  _themeMats.wallPatternEmissiveBright = new THREE.Color(MR_BRIGHT_LOOK.wallPattern.emissive);
   const frostedGlass = new THREE.MeshPhysicalMaterial({
     color: 0xdde4ea,
     roughness: 0.64,
@@ -8207,13 +8233,8 @@ function applyMeetingRoomMaterials(root) {
   assignMaterial(root, ["cameraLansBig"], blackPlastic);
   assignMaterial(root, ["cameraLansSmall"], greenLight, true);
   assignMaterial(root, ["tabletsideLight"], tabletSideLightMat, true);
-  assignMaterial(root, [
-    "wallLeftPattern",
-    "wallRightPattern",
-    "wallFrontPattern",
-    "pannelStrips",
-    "tzokel",
-  ], whiteMattPaint);
+  assignMaterial(root, ["pannelStrips", "tzokel"], whiteMattPaint);
+  assignMaterial(root, ["wallLeftPattern", "wallRightPattern", "wallFrontPattern"], wallPatternPaint);
   assignMaterial(root, ["chairSeat"], brightGreyNet);
   assignMaterial(root, ["doorGlass", "wndowGlass"], frostedGlass, true);
   assignMaterial(root, ["tabletPowerLight"], whiteLight, true);
