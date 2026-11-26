@@ -6919,6 +6919,128 @@ let _officeSceneAnimationFrame = 0;
       function showTablePlateWireframe() {
       }
 
+      /**
+       * musa (the yellow figure on the desk) comes alive now and then: it waves hello with the hand it already
+       * holds up, and it wiggles its hips. One mesh with no bones, so it's done in its vertex shader (and its
+       * shadow's): the raised arm turns about the shoulder and the forearm about the elbow; the hips sway side
+       * to side and twist a little, the feet staying planted and the chest still. Soft weights keep the surface
+       * smooth. Mesh-local units (its local up is -z: from the feet at 4.29 up to the hand at -2.6; x across).
+       * Each move starts after a random pause (`every`, s), runs `cycles` at `hz`, easing in and out.
+       */
+      const MUSA_ANIM = {
+        shoulder: [-2.1, 0.3], // pivot (x, z)
+        elbow: [-3.1, -1.0],
+        /** Arm: x below armX[0] → armX[1] fully the arm, above the shoulder height (armZ, z: down is +). */
+        armX: [-2.0, -2.45],
+        armZ: [0.7, 0.2],
+        forearmX: [-2.3, -2.6],
+        forearmZ: [-0.9, -1.4],
+        wave: { every: [4, 10], cycles: 3, hz: 2.2, arm: 0.12, forearm: 0.42, ease: 0.25 },
+        /** Hips: a bell from the feet (planted) up to the chest (still). */
+        hipZ: [4.1, 3.0, 1.6, 0.6],
+        centre: [-0.66, 3.84], // the body's middle (x, y): the twist's axis
+        hips: { every: [5, 12], cycles: 4, hz: 2.4, sway: 0.28, twist: 0.12, ease: 0.3 },
+      };
+      const _musaAnim = {
+        uniforms: { uMusaArm: { value: 0 }, uMusaForearm: { value: 0 }, uMusaSway: { value: 0 }, uMusaTwist: { value: 0 } },
+        wave: { start: 0, next: 0 },
+        hips: { start: 0, next: 0 },
+        t: 0,
+        on: false,
+      };
+      /** The deformation (GLSL): a point or a direction (w = 0), in musa's local space. */
+      function musaDeformGLSL() {
+        const A = MUSA_ANIM;
+        const f = (v) => v.toFixed(3);
+        return `
+          uniform float uMusaArm, uMusaForearm, uMusaSway, uMusaTwist;
+          vec2 musaRot(vec2 p, vec2 c, float a) { float s = sin(a), k = cos(a); p -= c; return c + vec2(k * p.x - s * p.y, s * p.x + k * p.y); }
+          vec3 musaDeform(vec3 p, vec3 rest, float isPoint) {
+            float wArm = smoothstep(${f(A.armX[0])}, ${f(A.armX[1])}, rest.x) * smoothstep(${f(A.armZ[0])}, ${f(A.armZ[1])}, rest.z);
+            float wFore = smoothstep(${f(A.forearmX[0])}, ${f(A.forearmX[1])}, rest.x) * smoothstep(${f(A.forearmZ[0])}, ${f(A.forearmZ[1])}, rest.z);
+            vec2 sh = vec2(${f(A.shoulder[0])}, ${f(A.shoulder[1])}) * isPoint;
+            vec2 el = vec2(${f(A.elbow[0])}, ${f(A.elbow[1])}) * isPoint;
+            p.xz = musaRot(p.xz, el, uMusaForearm * wFore);
+            p.xz = musaRot(p.xz, sh, uMusaArm * wArm);
+            float wHip = smoothstep(${f(A.hipZ[0])}, ${f(A.hipZ[1])}, rest.z) * (1.0 - smoothstep(${f(A.hipZ[2])}, ${f(A.hipZ[3])}, rest.z));
+            p.x += uMusaSway * wHip * isPoint;
+            p.xy = musaRot(p.xy, vec2(${f(A.centre[0])}, ${f(A.centre[1])}) * isPoint, uMusaTwist * wHip); // a twist about its up axis
+            return p;
+          }`;
+      }
+      function musaPatchShader(sh) {
+        Object.assign(sh.uniforms, _musaAnim.uniforms);
+        sh.vertexShader = sh.vertexShader
+          .replace("#include <common>", "#include <common>\n" + musaDeformGLSL())
+          .replace("#include <begin_vertex>", "#include <begin_vertex>\ntransformed = musaDeform(transformed, position, 1.0);");
+        if (sh.vertexShader.includes("#include <beginnormal_vertex>")) {
+          sh.vertexShader = sh.vertexShader.replace(
+            "#include <beginnormal_vertex>",
+            "#include <beginnormal_vertex>\nobjectNormal = normalize(musaDeform(objectNormal, position, 0.0));",
+          );
+        }
+      }
+      function setupMusaAnimation(model) {
+        let mesh = null;
+        model.traverse((n) => {
+          if (n.isMesh && n.name === "musa") mesh = n;
+        });
+        if (!mesh || Array.isArray(mesh.material)) return;
+        const mat = mesh.material;
+        if (!mat.userData.musaAnim) {
+          mat.userData.musaAnim = true;
+          const prev = mat.onBeforeCompile;
+          mat.onBeforeCompile = (sh, r) => {
+            if (prev) prev(sh, r);
+            musaPatchShader(sh);
+          };
+          const prevKey = mat.customProgramCacheKey ? mat.customProgramCacheKey.bind(mat) : () => "";
+          mat.customProgramCacheKey = () => prevKey() + "|musaAnim";
+          mat.needsUpdate = true;
+        }
+        // Its shadow moves with it.
+        const depth = new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking });
+        depth.onBeforeCompile = musaPatchShader;
+        depth.customProgramCacheKey = () => "musaAnimDepth";
+        const dist = new THREE.MeshDistanceMaterial();
+        dist.onBeforeCompile = musaPatchShader;
+        dist.customProgramCacheKey = () => "musaAnimDistance";
+        mesh.customDepthMaterial = depth;
+        mesh.customDistanceMaterial = dist;
+        const r = (a) => a[0] + Math.random() * (a[1] - a[0]);
+        _musaAnim.wave.next = r(MUSA_ANIM.wave.every);
+        _musaAnim.hips.next = r(MUSA_ANIM.hips.every);
+        _musaAnim.on = true;
+      }
+      /** Per frame: the wave and the hip wiggle (each now and then, easing in and out). */
+      function updateMusaAnimation(dt) {
+        if (!_musaAnim.on) return;
+        const A = _musaAnim;
+        A.t += dt;
+        const r = (a) => a[0] + Math.random() * (a[1] - a[0]);
+        const run = (state, cfg) => {
+          const dur = cfg.cycles / cfg.hz;
+          if (!state.start && A.t >= state.next) state.start = A.t;
+          if (!state.start) return 0;
+          const u = A.t - state.start;
+          if (u >= dur) {
+            state.start = 0;
+            state.next = A.t + r(cfg.every);
+            return 0;
+          }
+          const env = Math.min(1, u / cfg.ease, (dur - u) / cfg.ease);
+          const e = env * env * (3 - 2 * env);
+          return Math.sin(u * cfg.hz * Math.PI * 2) * e;
+        };
+        const W = MUSA_ANIM.wave, H = MUSA_ANIM.hips;
+        const w = run(A.wave, W);
+        A.uniforms.uMusaArm.value = w * W.arm;
+        A.uniforms.uMusaForearm.value = w * W.forearm;
+        const h = run(A.hips, H);
+        A.uniforms.uMusaSway.value = h * H.sway;
+        A.uniforms.uMusaTwist.value = h * H.twist;
+      }
+
       function setupFloorPhysics(model) {
         let floorMesh = null;
         model.traverse((node) => {
@@ -14658,6 +14780,11 @@ diffuseColor.a = 1.0;
             console.warn("Floor physics setup failed:", e);
           }
           try {
+            setupMusaAnimation(model);
+          } catch (e) {
+            console.warn("musa animation setup failed:", e);
+          }
+          try {
             setupTableSideWallPhysics(model);
           } catch (e) {
             console.warn("tableSideWall physics setup failed:", e);
@@ -16823,6 +16950,7 @@ diffuseColor.a = 1.0;
                 Math.max(perfMaxCarSteps, Math.ceil(dt / carDt)),
               );
           trackPerformanceFrame(rawDt);
+          updateMusaAnimation(Math.min(rawDt, 0.1)); // musa's wave and hip wiggle
           let physicsStepDt = dt;
           const gumsTankBusy =
             gumsReadyToDrop ||
