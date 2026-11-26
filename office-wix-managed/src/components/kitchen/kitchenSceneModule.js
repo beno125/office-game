@@ -1906,7 +1906,7 @@ export function isKitchenSceneReady() {
           { from: ["MainNishBackWall"], color: 0x24474f }, // behind it: dark teal grout
           { from: ["closetDoors", "dishwasherDoor", "tzokelLeft", "tzokelRight"], color: 0xc9e2d4, roughness: 1 }, // lower cabinets, kick plates: pale mint
           { from: ["kitchenMainPlate"], color: 0xeee3d2, roughness: 0.55 }, // counter top: off-white stone, satin
-          { from: ["leftTopClosetMatalFrame", "midTopClosetMatalFrame", "rightTopClosetMatalFrame"], color: 0xf39580, roughness: 0.45 }, // shelf frames: coral-red powder coat (was 0xdf5a43, then 0xe86e58; lighter)
+          { from: ["leftTopClosetMatalFrame", "midTopClosetMatalFrame", "rightTopClosetMatalFrame"], color: 0xfab7a6, roughness: 0.45 }, // shelf frames: light coral powder coat (was 0xdf5a43, then 0xe86e58, 0xf39580)
           { from: ["glassPotCup1_shelfRow", "glassPotBigCup1_shelfRow", "glassPotBigCup2_shelfRow"], color: 0x3a2e26 }, // jar lids: near-black brown
           { from: ["sinkInner"], color: 0x9a9a98, roughness: 0.35, metalness: 1 }, // sink: brushed steel
           { from: ["waterTapBody"], color: 0xffffff, roughness: 0.5, metalness: 0 }, // tap: matte white
@@ -1922,7 +1922,7 @@ export function isKitchenSceneReady() {
        * lighter in dark mode: their model colour 0xe77735 (orange) lifted by this much HSL lightness (0 = as in
        * the model). Bright mode's colour is KITCHEN_BRIGHT_LOOK's.
        */
-      const KITCHEN_TOP_CLOSET_FRAME_LIGHTEN = 0.16; // (was 0.07)
+      const KITCHEN_TOP_CLOSET_FRAME_LIGHTEN = 0.28; // (was 0.07, then 0.16)
       const _kTopClosetFramesLit = new WeakSet();
       function _kLightenTopClosetFrames() {
         const names = ["leftTopClosetMatalFrame", "midTopClosetMatalFrame", "rightTopClosetMatalFrame"];
