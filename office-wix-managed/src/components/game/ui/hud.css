@@ -271,8 +271,9 @@
   flex-direction: column;
   gap: var(--wx-space-5);
   width: min(28rem, 100%);
-  max-height: calc(100% - 8px);
-  overflow-y: auto;
+  /* No scroll (was max-height: calc(100% - 8px); overflow-y: auto): the placement frame reaches 4px past
+     the card's edge, which made it scroll by those few pixels; the card fits its content. */
+  overflow: visible;
   padding: clamp(1.25rem, 3vw, 2rem);
   background: var(--wx-surface-strong);
   transform: translate(var(--wx-snap-offset), calc(var(--wx-snap-offset) * -0.6));
