@@ -1906,7 +1906,7 @@ export function isKitchenSceneReady() {
           { from: ["MainNishBackWall"], color: 0x24474f }, // behind it: dark teal grout
           { from: ["closetDoors", "dishwasherDoor", "tzokelLeft", "tzokelRight"], color: 0xc9e2d4, roughness: 1 }, // lower cabinets, kick plates: pale mint
           { from: ["kitchenMainPlate"], color: 0xeee3d2, roughness: 0.55 }, // counter top: off-white stone, satin
-          { from: ["leftTopClosetMatalFrame", "midTopClosetMatalFrame", "rightTopClosetMatalFrame"], color: 0xf39580, roughness: 0.45 }, // shelf frames: coral-red powder coat (was 0xdf5a43, then 0xe86e58; lighter)
+          { from: ["leftTopClosetMatalFrame", "midTopClosetMatalFrame", "rightTopClosetMatalFrame"], color: 0xdf5a43, roughness: 0.45 }, // shelf frames: coral-red powder coat
           { from: ["glassPotCup1_shelfRow", "glassPotBigCup1_shelfRow", "glassPotBigCup2_shelfRow"], color: 0x3a2e26 }, // jar lids: near-black brown
           { from: ["sinkInner"], color: 0x9a9a98, roughness: 0.35, metalness: 1 }, // sink: brushed steel
           { from: ["waterTapBody"], color: 0xffffff, roughness: 0.5, metalness: 0 }, // tap: matte white
@@ -1918,22 +1918,30 @@ export function isKitchenSceneReady() {
       /** The materials KITCHEN_BRIGHT_LOOK changes, with their dark-mode values (filled once the kitchen is loaded). */
       const _kBrightLook = [];
       /**
-       * The upper closets' metal frames (left / mid / right TopClosetMatalFrame, their own material) a little
-       * lighter in dark mode: their model colour 0xe77735 (orange) lifted by this much HSL lightness (0 = as in
-       * the model). Bright mode's colour is KITCHEN_BRIGHT_LOOK's.
+       * The upper closets' metal frames (left / mid / right TopClosetMatalFrame, their own material): their own
+       * colours kept (dark 0xe77735 from the model, bright KITCHEN_BRIGHT_LOOK's), made to stand out a little
+       * the way the race rails do, by a soft glow of their own colour (emissive = colour × this; 0 = none),
+       * per mode (lerped with the light blend). Below the rails' strength and below the bloom threshold.
        */
-      const KITCHEN_TOP_CLOSET_FRAME_LIGHTEN = 0.16; // (was 0.07)
-      const _kTopClosetFramesLit = new WeakSet();
-      function _kLightenTopClosetFrames() {
+      const KITCHEN_TOP_CLOSET_FRAME_GLOW = { dark: 0.3, bright: 0.12 };
+      let _kTopClosetFrameMats = [];
+      function _kFindTopClosetFrames() {
         const names = ["leftTopClosetMatalFrame", "midTopClosetMatalFrame", "rightTopClosetMatalFrame"];
+        const found = new Set();
         scene.traverse((o) => {
           if (!o.isMesh || !names.includes(o.name.replace(/_\d+$/, ""))) return;
-          for (const m of Array.isArray(o.material) ? o.material : [o.material]) {
-            if (!m || !m.color || _kTopClosetFramesLit.has(m)) continue;
-            _kTopClosetFramesLit.add(m);
-            m.color.offsetHSL(0, 0, KITCHEN_TOP_CLOSET_FRAME_LIGHTEN);
-          }
+          for (const m of Array.isArray(o.material) ? o.material : [o.material]) if (m && m.emissive) found.add(m);
         });
+        _kTopClosetFrameMats = [...found];
+      }
+      /** The frames' glow for light blend b (after the bright look set their colour). */
+      function _kApplyTopClosetFrameGlow(b) {
+        const G = KITCHEN_TOP_CLOSET_FRAME_GLOW;
+        const k = G.dark + (G.bright - G.dark) * b;
+        for (const m of _kTopClosetFrameMats) {
+          m.emissive.copy(m.color).multiplyScalar(k);
+          m.emissiveIntensity = 1;
+        }
       }
       function _kRegisterBrightLook() {
         if (!KITCHEN_BRIGHT_LOOK.enabled || _kBrightLook.length) return;
@@ -2131,6 +2139,7 @@ export function isKitchenSceneReady() {
           if (e.L.roughness != null) e.mat.roughness = e.darkRough + (e.L.roughness - e.darkRough) * b;
           if (e.L.metalness != null) e.mat.metalness = e.darkMetal + (e.L.metalness - e.darkMetal) * b;
         }
+        _kApplyTopClosetFrameGlow(b);
         const plateMat = _mainTablePlateMatRef;
         if (plateMat && plateMat.userData.darkColor) {
           plateMat.color.lerpColors(plateMat.userData.darkColor, _tablePlateBrightColor, b);
@@ -14488,8 +14497,9 @@ let _worldSwitched = false;
       async function runKitchenWarmup() {
         _kitchenWarmup.state = "running";
         try {
-          _kLightenTopClosetFrames(); // before the bright look takes their dark colour
           _kRegisterBrightLook(); // bright mode's photo look (everything's loaded now)
+          _kFindTopClosetFrames(); // their glow (KITCHEN_TOP_CLOSET_FRAME_GLOW), after the bright look's copies
+          _kApplyTopClosetFrameGlow(lightBlend);
           // The plates' food settles first (off-screen physics, a time budget per frame).
           if (_kitchenFood) await _kitchenFood.settle(_kitchenNextFrame);
           // The rail sparks (and their flash light) are made on the first spark: made now, so the light count is final
