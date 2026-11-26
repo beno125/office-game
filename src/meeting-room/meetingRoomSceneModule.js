@@ -218,7 +218,7 @@ const MR_BRIGHT_LOOK = {
   /** backWallWood: the tint over its wood texture (linear, per channel; was 1.2 / 1.22 / 1.16, a reddish
    *  brown on screen, ~#855F55), a little lighter and toward a light oak's tone (reference ~#ECCB9F; the
    *  first step, 3.6 / 4.0 / 2.5, ~#CDAF8A on screen, was too light). */
-  backWallWood: [2.4, 2.65, 1.7], // a little warmer than the first step (0xf3f0e9 / 0xeee8dd)
+  backWallWood: [1.75, 1.85, 1.35], // (then 2.4 / 2.65 / 1.7: still too light) // a little warmer than the first step (0xf3f0e9 / 0xeee8dd)
 };
 const EXPOSURE_BRIGHT = 0.74;
 const LIGHT_FADE_DURATION = 0.2;
