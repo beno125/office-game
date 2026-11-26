@@ -2018,7 +2018,7 @@ export function isKitchenSceneReady() {
       const KITCHEN_ICE_COFFEE_SPILL = {
         enabled: true,
         color: [0.95, 0.0, 0.38], // the liquid's hot purple (linear)
-        strength: 0.4,
+        strength: 0.2, // (was 0.55, then 0.4: too strong)
         radius: 3, // world units: the fall-off's knee
         range: 13, // world units: nothing beyond
       };
