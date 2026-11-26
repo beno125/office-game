@@ -1906,7 +1906,7 @@ export function isKitchenSceneReady() {
           { from: ["MainNishBackWall"], color: 0x24474f }, // behind it: dark teal grout
           { from: ["closetDoors", "dishwasherDoor", "tzokelLeft", "tzokelRight"], color: 0xc9e2d4, roughness: 1 }, // lower cabinets, kick plates: pale mint
           { from: ["kitchenMainPlate"], color: 0xeee3d2, roughness: 0.55 }, // counter top: off-white stone, satin
-          { from: ["leftTopClosetMatalFrame", "midTopClosetMatalFrame", "rightTopClosetMatalFrame"], color: 0xdf5a43, roughness: 0.45 }, // shelf frames: coral-red powder coat
+          { from: ["leftTopClosetMatalFrame", "midTopClosetMatalFrame", "rightTopClosetMatalFrame"], color: 0xe86e58, roughness: 0.45 }, // shelf frames: coral-red powder coat (was 0xdf5a43; a little lighter)
           { from: ["glassPotCup1_shelfRow", "glassPotBigCup1_shelfRow", "glassPotBigCup2_shelfRow"], color: 0x3a2e26 }, // jar lids: near-black brown
           { from: ["sinkInner"], color: 0x9a9a98, roughness: 0.35, metalness: 1 }, // sink: brushed steel
           { from: ["waterTapBody"], color: 0xffffff, roughness: 0.5, metalness: 0 }, // tap: matte white
@@ -1917,6 +1917,24 @@ export function isKitchenSceneReady() {
       };
       /** The materials KITCHEN_BRIGHT_LOOK changes, with their dark-mode values (filled once the kitchen is loaded). */
       const _kBrightLook = [];
+      /**
+       * The upper closets' metal frames (left / mid / right TopClosetMatalFrame, their own material) a little
+       * lighter in dark mode: their model colour 0xe77735 (orange) lifted by this much HSL lightness (0 = as in
+       * the model). Bright mode's colour is KITCHEN_BRIGHT_LOOK's.
+       */
+      const KITCHEN_TOP_CLOSET_FRAME_LIGHTEN = 0.07;
+      const _kTopClosetFramesLit = new WeakSet();
+      function _kLightenTopClosetFrames() {
+        const names = ["leftTopClosetMatalFrame", "midTopClosetMatalFrame", "rightTopClosetMatalFrame"];
+        scene.traverse((o) => {
+          if (!o.isMesh || !names.includes(o.name.replace(/_\d+$/, ""))) return;
+          for (const m of Array.isArray(o.material) ? o.material : [o.material]) {
+            if (!m || !m.color || _kTopClosetFramesLit.has(m)) continue;
+            _kTopClosetFramesLit.add(m);
+            m.color.offsetHSL(0, 0, KITCHEN_TOP_CLOSET_FRAME_LIGHTEN);
+          }
+        });
+      }
       function _kRegisterBrightLook() {
         if (!KITCHEN_BRIGHT_LOOK.enabled || _kBrightLook.length) return;
         const baseName = (n) => n.replace(/_\d+$/, ""); // a multi-material mesh's parts (name_1, name_2)
@@ -14470,6 +14488,7 @@ let _worldSwitched = false;
       async function runKitchenWarmup() {
         _kitchenWarmup.state = "running";
         try {
+          _kLightenTopClosetFrames(); // before the bright look takes their dark colour
           _kRegisterBrightLook(); // bright mode's photo look (everything's loaded now)
           // The plates' food settles first (off-screen physics, a time budget per frame).
           if (_kitchenFood) await _kitchenFood.settle(_kitchenNextFrame);

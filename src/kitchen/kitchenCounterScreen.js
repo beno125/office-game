@@ -29,11 +29,20 @@ export const KITCHEN_COUNTER_SCREEN = {
   panelColor: 0x070503, // between the LEDs
   frameColor: 0x0c0c0d, // the black frame
   rivetColor: 0x9aa0a6, // steel rivets
-  frameShare: 0.11, // the frame's width, × the screen's height
+  frameShare: 0, // the frame's width, × the screen's height (was 0.11: a black frame with a ring of light steel
+  //   rivets that read as white LEDs; 0 = no frame, the LED panel fills the screen)
   rivetPitch: 0.34, // between rivets, × the screen's height
   rivetRadius: 0.36, // × the frame's width
   ledFill: 0.56, // an LED's diameter / its cell (smaller: more dark panel between the LEDs)
   marginCells: 1, // empty LED rows / columns round the text
+  /** Seen at an angle or from far, an LED can get smaller than a pixel and drop out between the pixels
+   *  (the digits break up or vanish). Each LED's edge is softened over this many pixels, and once the LEDs
+   *  are about a pixel wide (`farFromPx` → `farToPx` pixels per cell, × 1 / the cell) each cell shows its
+   *  LED's average light instead (× `farBoost`), so the digits stay readable from any angle. */
+  edgePx: 1,
+  farFromPx: 4,
+  farToPx: 1.5,
+  farBoost: 1.6,
 };
 
 /** 5 × 7 dot font, rows top to bottom; ':' and '.' are one column wide. */
@@ -135,6 +144,8 @@ export function createCounterScreen({ THREE, mesh }) {
       uRivetCol: { value: new THREE.Color(C.rivetColor) },
       uRivetPitch: { value: C.rivetPitch * H },
       uRivetR: { value: C.rivetRadius * frame },
+      uEdgePx: { value: C.edgePx },
+      uFar: { value: new THREE.Vector3(C.farFromPx, C.farToPx, C.farBoost) },
     },
     vertexShader: /* glsl */ `
       varying vec2 vUv;
@@ -145,7 +156,8 @@ export function createCounterScreen({ THREE, mesh }) {
     fragmentShader: /* glsl */ `
       uniform sampler2D uLit;
       uniform vec2 uGrid, uSize;
-      uniform float uFrame, uCell, uLed, uUnlit, uGlow, uFill, uRivetPitch, uRivetR;
+      uniform float uFrame, uCell, uLed, uUnlit, uGlow, uFill, uRivetPitch, uRivetR, uEdgePx;
+      uniform vec3 uFar;
       uniform vec3 uColor, uPanel, uFrameCol, uRivetCol;
       varying vec2 vUv;
       void main() {
@@ -178,9 +190,19 @@ export function createCounterScreen({ THREE, mesh }) {
             vec2 f = fract(g) - 0.5;
             float d = length(f) * 2.0; // 0 centre .. 1 the cell's edge
             float on = texture2D(uLit, (c + 0.5) / uGrid).r;
-            float led = 1.0 - smoothstep(uFill * 0.85, uFill, d);
+            // A pixel's size in d units (d spans 2 per cell): the LED's edge softened over uEdgePx of them.
+            vec2 fw = fwidth(g);
+            float px = max(fw.x, fw.y) * 2.0;
+            float edge = max(uFill * 0.15, px * uEdgePx);
+            float led = 1.0 - smoothstep(uFill - edge, uFill, d);
             float core = 1.0 - smoothstep(0.0, uFill, d); // brighter centre
             float halo = (1.0 - smoothstep(uFill, 1.45, d)) * uGlow * 0.35;
+            // Far / at an angle (few pixels per cell): the cell's average LED light instead of the dot.
+            float far = smoothstep(2.0 / uFar.x, 2.0 / uFar.y, px);
+            float avgLed = 0.785 * uFill * uFill * uFar.z; // the dot's share of its cell (π/4 · fill²), boosted
+            led = mix(led, avgLed, far);
+            core = mix(core, 0.5, far);
+            halo = mix(halo, uGlow * 0.12, far);
             vec3 lit = uColor * uLed * (0.7 + 0.6 * core) * led + uColor * uLed * halo;
             vec3 dark = uColor * uUnlit * led;
             col = mix(uPanel + dark, uPanel + lit, on);
