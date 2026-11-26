@@ -2,7 +2,7 @@
 :root {
   --wx-main-loader-icon-w: min(38vw, 300px); /* the menu icon, centred (its 44 × 24 viewBox) */
   --wx-main-loader-stroke: 3px;
-  --wx-main-loader-swap-ms: 900ms; /* MAIN_LOADER.swap */
+  --wx-main-loader-swap-ms: 1600ms; /* the icon's fade: MAIN_LOADER.reveal (was MAIN_LOADER.swap, 900ms, after the reveal) */
   --wx-main-loader-in-ms: 600ms; /* MAIN_LOADER.iconIn */
 }
 .wx-main-loader {
@@ -39,7 +39,8 @@
 .wx-main-loader-icon .wx-menu-icon * { vector-effect: non-scaling-stroke; }
 /* While loading: a slow breath. */
 .wx-main-loader.is-loading .wx-main-loader-icon .wx-menu-icon { animation: wx-main-loader-breath 1.8s ease-in-out infinite; }
-/* The swap: gone as the car's caps open behind it. */
+/* Gone as the car is revealed behind it (it fades out with the car's lights coming up). */
+.wx-main-loader.is-reveal .wx-main-loader-icon,
 .wx-main-loader.is-swap .wx-main-loader-icon,
 .wx-main-loader.is-done .wx-main-loader-icon { opacity: 0; }
 
