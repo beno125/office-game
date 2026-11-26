@@ -6921,11 +6921,13 @@ let _officeSceneAnimationFrame = 0;
       }
 
       /**
-       * The office dog (officeDog.js): a life-size border collie lying on the floor in front of the desk, to
-       * its right (seen from the gameplay camera past the desk's edge). Office units per metre from the desk
-       * (its top ~20.6 above the floor, a 0.75 m desk); `at` is on the floor (x, z), facing `faceToward`.
+       * The office dog (officeDog.js): a life-size border collie lying on the floor to the right of the desk,
+       * along the back wall between the desk and the small chair (seen from the gameplay camera past the desk's
+       * right end), its head toward the desk. Office units per metre from the desk (its top ~20.6 above the
+       * floor, a 0.75 m desk); `at` is on the floor (x, z; under its chest), facing `faceToward`
+       * (was at 24, 17 in front of the desk).
        */
-      const OFFICE_DOG_PLACE = { unitsPerMeter: 27.5, at: [24, 17], faceToward: [-9, 23] };
+      const OFFICE_DOG_PLACE = { unitsPerMeter: 27.5, at: [45, -9.2], faceToward: [0, -9.2] };
       let _officeDog = null;
       function setupOfficeDog(model) {
         let floorMesh = null;
