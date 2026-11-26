@@ -28,7 +28,7 @@ import {
   raceAiMaxOutward,
 } from "./kitchenRace.js";
 import { SCENE_ROUTES, nextLevelPath } from "../game/sceneRoutes.js";
-import { createCinematicIntro, introEase, introEaseSine, introLerp } from "../game/cinematicIntro.js";
+import { createCinematicIntro, introEaseSine, introLerp } from "../game/cinematicIntro.js";
 import { createPortalRing, portalGlowTexture } from "../game/portalRing.js";
 import { createCarLighting } from "../game/carLighting.js";
 import { addBloomGroup, addThresholdBloom, keepBelowBloomThreshold, setBloomWeight } from "../game/thresholdBloom.js";
@@ -1712,7 +1712,7 @@ export function isKitchenSceneReady() {
          *  at 2.8) are capped here before the intensity: the bright room's reflection turned them white. */
         maxStrength: 1,
       };
-      const _kHdri = { tex: null, rt: null, loading: null, on: false, hold: false, mats: new Map(), loadMs: 0 };
+      const _kHdri = { tex: null, rt: null, loading: null, on: false, mats: new Map(), loadMs: 0 };
       /** Loads and prefilters the HDRI (once; again after it was freed). */
       function _kHdriLoad() {
         if (_kHdri.tex) return Promise.resolve(_kHdri.tex);
@@ -1741,9 +1741,9 @@ export function isKitchenSceneReady() {
           });
         return _kHdri.loading;
       }
-      /** The HDRI at strength k (the light blend: 0 dark → 1 bright); on while k > 0 (or held), off and freed at 0. */
+      /** The HDRI at strength k (the light blend: 0 dark → 1 bright); on while k > 0, off and freed at 0. */
       function _kHdriSet(k) {
-        const want = k > 0 || _kHdri.hold;
+        const want = k > 0;
         if (want && !_kHdri.tex) {
           if (k > 0) _kHdriLoad(); // applied when it's ready
           return;
@@ -5972,9 +5972,7 @@ let _worldSwitched = false;
       }
 
       // ---------------------------------------------------------------------------
-      // Cinematic intro, letterboxed:
-      //   0. room reveal — a low glide across the kitchen, from the pesel wall to the iced coffee machine, in
-      //      bright mode, switching to dark mode near its end (dark mode from the portal on); a fade cut
+      // Cinematic intro (dark mode), letterboxed:
       //   1. table overview — a slow glide along the table, descending toward the track
       //   2. car beauty shot — (cut) a slow, low front-three-quarter orbit of the player's car
       //   3. Mister Spot — (cut) a low three-quarter push-in on the robot firing
@@ -5991,54 +5989,8 @@ let _worldSwitched = false;
        * end of the previous shot, the camera moves while the screen is black, in
        * at the start of this one). The arrival is one continuous move.
        */
-      /**
-       * 0. Room reveal (the intro's first shot): a glide across the kitchen in bright mode, a little above the
-       * table's height and tilted slightly down onto it (the track, the cars and what's on the table in view).
-       * It starts on the room's right side by the pesel wall (its coloured panels and light bars), turns into
-       * the aisle between the table and the back counter and travels the length of the room to the far side,
-       * ending on the iced coffee machine. As it gets there (`switch.atShare` of the shot) the lights go to dark
-       * mode: a short flicker, then down (the existing light blend, Key P / Key O: lights, colours, emissive,
-       * bloom, background, together). A fade-to-black cut to the portal shot (the intro's other cuts' style).
-       * The path keeps clear of the table, the robot (above its height), the lamps, the fridges and the counter.
-       */
-      const KITCHEN_INTRO_REVEAL = {
-        sec: 8.0, // the shot's length
-        /** Lights: bright → dark starting at this share of the shot, over `sec`; `flicker`: the blend's level
-         *  (× the fall) at even steps over the first `flickerShare` of it (a power-down stutter). */
-        switch: { atShare: 2 / 3, sec: 1.1, flicker: [1, 0.3, 0.95, 0.2, 0.75, 0.45], flickerShare: 0.45 },
-        /** Camera height (world y; the table's top is 14.3, the lamps' bottoms 26) and its tilt down (degrees
-         *  below level) the whole shot (was 6 → 10.5 high, looking up 8–24°). */
-        height: 22,
-        tiltDeg: 15,
-        /** Camera path (world x, z), smooth through these, at a near-steady pace. */
-        path: [
-          [38, 48], // right side, front: the pesel wall on the right, the table's end on the left
-          [58, 30], // past the pesel wall
-          [63, 8],
-          [50, -4.5], // round the table's end into the back aisle, beside the table
-          [20, -5],
-          [-12, -5],
-          [-28, -4], // the iced coffee machine side
-        ],
-        /** Which way it faces along the way (points it heads toward, world x, z; same count, matched in order):
-         *  between the pesel wall and the table, then across the table diagonally, settling on the iced coffee
-         *  machine. */
-        look: [
-          [66, 4],
-          [70, 0],
-          [30, 12],
-          [-10, 14],
-          [-35, 12],
-          [-44, -12],
-          [-44.5, -22],
-        ],
-        ease: 0.55, // 0 = steady pace, 1 = fully eased in and out
-        fovFrom: 58, // wide…
-        fovTo: 48, // …tighter on the coffee machine
-      };
       const KITCHEN_INTRO_SHOTS = [
-        { name: "roomReveal", sec: KITCHEN_INTRO_REVEAL.sec, blendIn: 0 },
-        { name: "portal", sec: 5.6, blendIn: 0, fade: true }, // fade cut from the reveal (its own sequence unchanged) // a build-up, the portal opens, the car drives out of it, it closes (was 4.6)
+        { name: "portal", sec: 5.6, blendIn: 0 }, // a build-up, the portal opens, the car drives out of it, it closes (was 4.6)
         { name: "overview", sec: 3.6, blendIn: 0, fade: true },
         { name: "carBeauty", sec: 3.6, blendIn: 0, fade: true },
         { name: "misterSpot", sec: 3.6, blendIn: 0, fade: true }, // Mister Spot firing its lasers
@@ -6163,7 +6115,6 @@ let _worldSwitched = false;
           spotPose: null, // Mister Spot's place / path state for the shot (taken at KITCHEN_INTRO_SPOT.poseAtSec)
           spotStarted: false,
           spotEnded: false,
-          revealDone: false, // the room reveal's lights handed over to dark mode
         },
       );
       const _kIntroPose = { pos: new THREE.Vector3(), look: new THREE.Vector3(), fov: 50, roll: 0 };
@@ -6242,9 +6193,7 @@ let _worldSwitched = false;
       function _kIntroShotPose(i, u, o) {
         const R = _kIntro.rig;
         const name = KITCHEN_INTRO_SHOTS[i].name;
-        if (name === "roomReveal") {
-          _kIntroRevealPose(u, o);
-        } else if (name === "portal") {
+        if (name === "portal") {
           _kIntroPortalCamPose(u, o);
         } else if (name === "overview") {
           const V = KITCHEN_INTRO_OVERVIEW;
@@ -6274,7 +6223,7 @@ let _worldSwitched = false;
           o.roll = 0;
         } else if (name === "misterSpot") {
           const P = _kIntro.spot;
-          if (!P) return _kIntroShotPose(KITCHEN_INTRO_SHOTS.findIndex((sh) => sh.name === "portal"), 1, o); // no robot: hold the portal shot's last pose (shot 0 before the reveal)
+          if (!P) return _kIntroShotPose(0, 1, o); // no robot: hold the overview's last pose
           const S = KITCHEN_INTRO_SPOT;
           const e = _kIntroEaseSine(u);
           _kIntroSpotCamPos(P, e, o.pos);
@@ -7051,93 +7000,6 @@ let _worldSwitched = false;
         return o;
       }
 
-      // ── Intro shot 0: the room reveal (bright → dark) ────────────────────────
-      let _kRevealCurves = null;
-      /** The reveal's pose at u (0..1): along its path, looking along its look points. */
-      function _kIntroRevealPose(u, o) {
-        const V = KITCHEN_INTRO_REVEAL;
-        // The portal is built here (under the loader) as when its shot came first; hidden until its shot.
-        if (!_kPortal.active && !_kPortal.done) _kIntroPortalBegin();
-        if (!_kRevealCurves) {
-          const curve = (pts) => new THREE.CatmullRomCurve3(pts.map((p) => new THREE.Vector3(p[0], 0, p[1])), false, "centripetal");
-          _kRevealCurves = { pos: curve(V.path), look: curve(V.look) };
-        }
-        const e = _kIntroLerp(u, _kIntroEaseSine(u), V.ease);
-        _kRevealCurves.pos.getPointAt(e, o.pos);
-        o.pos.y = V.height;
-        // Heading toward the look points (matched to the path points: same share along each, not by length),
-        // pitched down by the tilt.
-        _kRevealCurves.look.getPoint(_kRevealCurves.pos.getUtoTmapping(e), o.look);
-        const dx = o.look.x - o.pos.x, dz = o.look.z - o.pos.z;
-        const flat = Math.hypot(dx, dz) || 1;
-        o.look.set(o.pos.x + dx / flat, V.height - Math.tan(V.tiltDeg * _kIntroDeg), o.pos.z + dz / flat);
-        o.fov = _kIntroLerp(V.fovFrom, V.fovTo, _kIntroEaseSine(u));
-        o.roll = 0;
-        return o;
-      }
-      /** The reveal's light blend at shot time t: bright, then (from the switch) a flicker down to dark. */
-      function _kRevealBlendAt(t) {
-        const S = KITCHEN_INTRO_REVEAL.switch;
-        const t0 = S.atShare * KITCHEN_INTRO_REVEAL.sec;
-        const k = Math.min(1, Math.max(0, (t - t0) / S.sec));
-        if (k <= 0) return 1;
-        if (k >= 1) return 0;
-        const fall = 1 - introEase(k);
-        if (k >= S.flickerShare) return fall;
-        const f = S.flicker;
-        const step = Math.min(f.length - 1, Math.floor((k / S.flickerShare) * f.length));
-        return fall * f[step];
-      }
-
-      /**
-       * Lights only one of the modes uses (visible in one, hidden in the other). During the reveal they're all on
-       * (the off ones at intensity 0), so the light set never changes mid-shot (a change rebuilds every visible
-       * material's shader); its shaders are compiled in the warm-up (runKitchenWarmup).
-       */
-      let _kRevealLights = null;
-      function _kRevealLightSet() {
-        if (_kRevealLights) return _kRevealLights;
-        const b0 = lightBlend;
-        const vis = [new Set(), new Set()];
-        for (const b of [0, 1]) {
-          applyLightBlend(b);
-          scene.traverse((o) => o.isLight && o.visible && vis[b].add(o));
-        }
-        applyLightBlend(b0);
-        _kRevealLights = [...vis[0], ...vis[1]].filter((l) => !(vis[0].has(l) && vis[1].has(l)));
-        return _kRevealLights;
-      }
-      /** The light blend for the reveal (b: 1 bright → 0 dark), every mode's lights kept on. */
-      function _kRevealApplyLights(b) {
-        lightBlend = lightBlendTarget = b;
-        applyLightBlend(b);
-        for (const l of _kRevealLightSet()) l.visible = true;
-      }
-      /** The portal's ring hidden during the reveal (it's built under the loader; it appears with its own shot). */
-      function _kRevealShowPortal(show) {
-        if (_kPortal.group) _kPortal.group.visible = show;
-        if (_kPortal.arcs && _kPortal.arcs.mesh) _kPortal.arcs.mesh.visible = show;
-      }
-      /** Per frame of the intro: the reveal's lights (bright → dark) until the portal shot starts. */
-      function _kIntroRevealTick(t) {
-        if (_kIntro.revealDone) return;
-        if (t >= _kIntro.shotStart("portal")) {
-          _kIntroRevealEnd();
-          return;
-        }
-        _kRevealApplyLights(_kRevealBlendAt(t));
-        _kRevealShowPortal(false);
-      }
-      /** The reveal over (or skipped): dark mode exactly as before, the usual light set, the portal shown. */
-      function _kIntroRevealEnd() {
-        if (_kIntro.revealDone) return;
-        _kIntro.revealDone = true;
-        _kHdri.hold = false; // its HDRI goes with the light (in the cut's black)
-        lightBlend = lightBlendTarget = 0;
-        applyLightBlend(0);
-        _kRevealShowPortal(true);
-      }
-
       /** Called when the loader starts fading out: the intro begins. */
       function startKitchenIntroPlayback() {
         if (_kIntro.state !== "pending") return;
@@ -7158,7 +7020,6 @@ let _worldSwitched = false;
         _kReleasePortalLightSlots(); // skipped before the portal began: the placeholders go now
         const wasPlaying = _kIntro.state === "playing";
         _kIntro.state = "done";
-        _kIntroRevealEnd(); // dark mode, the HDRI freed (if it ended mid-reveal, or never played)
         _kIntroPortalEnd(); // the portal gone, the car on its grid spot
         // Mister Spot back to its normal path if the intro ends mid-shot.
         if (_kIntro.spotStarted && !_kIntro.spotEnded) {
@@ -7228,10 +7089,7 @@ let _worldSwitched = false;
         }
         if (_kIntro.state === "playing") {
           _kIntro.t += dt;
-          _kIntroRevealTick(_kIntro.t);
-          // The portal's sequence on its own shot's clock (it was the first shot).
-          const tPortal = _kIntro.t - _kIntro.shotStart("portal");
-          if (tPortal >= 0) _kIntroPortalTick(tPortal);
+          _kIntroPortalTick(_kIntro.t);
           _kIntroWaves(_kIntro.t);
           _kIntroSpotTick(_kIntro.t);
           if (_kIntro.t >= KITCHEN_INTRO_TOTAL_SEC) {
@@ -14657,38 +14515,6 @@ let _worldSwitched = false;
             const compiling = renderer.compileAsync(scene, camera).catch(() => {});
             renderer.setRenderTarget(prevTarget);
             await Promise.race([compiling, new Promise((resolve) => setTimeout(resolve, KITCHEN_WARMUP.maxWaitMs))]);
-            // The intro's room reveal (bright → dark): every mode's lights on at once (_kRevealLightSet), compiled
-            // here too, so the reveal doesn't freeze as it starts or as it hands over to dark mode.
-            // As it plays: the car hidden (in the portal's tunnel, with its own lights).
-            // After the first shot's cut: dark mode, no HDRI, the car hidden (in the portal's tunnel). Compiled here
-            // (the frames under the loader now have the HDRI on), so the cut doesn't stall on them.
-            {
-              const carWas = car.visible;
-              car.visible = false;
-              renderer.setRenderTarget(finalComposer.readBuffer);
-              const compilingCut = renderer.compileAsync(scene, camera).catch(() => {});
-              renderer.setRenderTarget(prevTarget);
-              car.visible = carWas;
-              await Promise.race([compilingCut, new Promise((resolve) => setTimeout(resolve, KITCHEN_WARMUP.maxWaitMs))]);
-            }
-            // Its HDRI too (on from here to the cut after the first shot).
-            if (_kIntro.state === "pending") {
-              await _kHdriLoad();
-              _kHdri.hold = true;
-            }
-            const b0 = lightBlend;
-            const target0 = lightBlendTarget;
-            const carWasVisible = car.visible;
-            car.visible = false;
-            _kRevealApplyLights(1);
-            renderer.setRenderTarget(finalComposer.readBuffer);
-            const compilingReveal = renderer.compileAsync(scene, camera).catch(() => {});
-            renderer.setRenderTarget(prevTarget);
-            car.visible = carWasVisible;
-            lightBlend = b0;
-            lightBlendTarget = target0;
-            applyLightBlend(b0);
-            await Promise.race([compilingReveal, new Promise((resolve) => setTimeout(resolve, KITCHEN_WARMUP.maxWaitMs))]);
           }
 
         } catch (e) {
