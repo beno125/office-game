@@ -7036,6 +7036,11 @@ let _officeSceneAnimationFrame = 0;
         const w = run(A.wave, W);
         A.uniforms.uMusaArm.value = w * W.arm;
         A.uniforms.uMusaForearm.value = w * W.forearm;
+        // No hip wiggle during the intro (or under the loader): the first comes a random pause after it.
+        if (officeIntro.state !== "done") {
+          A.hips.start = 0;
+          A.hips.next = A.t + r(H.every);
+        }
         const h = run(A.hips, H);
         A.uniforms.uMusaSway.value = h * H.sway;
         A.uniforms.uMusaTwist.value = h * H.twist;
