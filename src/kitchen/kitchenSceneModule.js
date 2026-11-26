@@ -7581,8 +7581,8 @@ let _worldSwitched = false;
         tiltDeg: 11, // looking down by this much
         fovDeg: 56, // vertical field of view
         lookAhead: 0.15, // aim height above the car's base for the clear-line check (× its length)
-        posDamping: 7, // position follow (per second: higher = tighter)
-        yawDamping: 5, // heading follow (per second)
+        posDamping: 40, // position follow (per second: higher = tighter; was 7, a lag behind the car at speed)
+        yawDamping: 12, // heading follow (per second; was 5, the swing round lagged in turns)
         heightDamping: 6, // height follow (per second; softens bumps)
         driftFollow: 0.5, // how much of a drift's slide angle it follows (0 = the car's nose)
         clearance: 0.25, // kept in front of anything between it and the car
